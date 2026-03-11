@@ -1,0 +1,128 @@
+\documentclass[12pt, a4paper, twoside]{report}
+
+%% ── Encoding & language ──────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[czech, english]{babel}   % main language last
+
+%% ── Fonts & micro-typography ─────────────────────────────────────────────
+\usepackage{lmodern}
+\usepackage{microtype}
+
+%% ── Page geometry ────────────────────────────────────────────────────────
+\usepackage[
+  a4paper,
+  top=25mm, bottom=25mm,
+  inner=35mm, outer=25mm,
+  headheight=15pt
+]{geometry}
+
+%% ── Graphics & colours ───────────────────────────────────────────────────
+\usepackage{graphicx}
+\graphicspath{{figures/}}
+\usepackage[dvipsnames]{xcolor}
+
+%% ── Mathematics ──────────────────────────────────────────────────────────
+\usepackage{amsmath, amssymb, amsthm}
+
+%% ── Algorithms ───────────────────────────────────────────────────────────
+\usepackage[ruled, vlined, linesnumbered]{algorithm2e}
+
+%% ── Tables ───────────────────────────────────────────────────────────────
+\usepackage{booktabs}
+\usepackage{multirow}
+
+%% ── Hyperlinks ───────────────────────────────────────────────────────────
+\usepackage[
+  colorlinks = true,
+  linkcolor  = NavyBlue,
+  citecolor  = OliveGreen,
+  urlcolor   = MidnightBlue
+]{hyperref}
+\usepackage{cleveref}
+
+%% ── Bibliography ─────────────────────────────────────────────────────────
+\usepackage[
+  backend  = biber,
+  style    = ieee,
+  sorting  = none
+]{biblatex}
+\addbibresource{bibliography.bib}
+
+%% ── Code listings ────────────────────────────────────────────────────────
+\usepackage{listings}
+\lstset{
+  basicstyle   = \ttfamily\small,
+  breaklines   = true,
+  frame        = single,
+  numbers      = left,
+  numberstyle  = \tiny\color{gray},
+  keywordstyle = \color{NavyBlue}\bfseries,
+  commentstyle = \color{OliveGreen}\itshape,
+}
+
+%% ── Theorem environments ─────────────────────────────────────────────────
+\newtheorem{definition}{Definition}[chapter]
+\newtheorem{proposition}{Proposition}[chapter]
+
+%% ── Custom commands ──────────────────────────────────────────────────────
+\newcommand{\vect}[1]{\boldsymbol{#1}}
+\newcommand{\mat}[1]{\mathbf{#1}}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{TODO:} #1}}
+
+%% ─────────────────────────────────────────────────────────────────────────
+\begin{document}
+
+%% ── Title page ───────────────────────────────────────────────────────────
+\begin{titlepage}
+  \centering
+  \vspace*{2cm}
+  {\large Czech Technical University in Prague \par}
+  {\large Faculty of Information Technology \par}
+  \vspace{3cm}
+  {\LARGE\bfseries Interpretable and Controllable POI Recommender System Using Sparse Autoencoders \par}
+  \vspace{1cm}
+  {\large Master's Thesis \par}
+  \vfill
+  {\large Eliška Povolná \par}
+  {\large \today \par}
+\end{titlepage}
+
+%% ── Front matter ─────────────────────────────────────────────────────────
+\pagenumbering{roman}
+
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+\todo{Write abstract (EN)}
+
+\begin{otherlanguage}{czech}
+\chapter*{Abstrakt}
+\addcontentsline{toc}{chapter}{Abstrakt}
+\todo{Napsat abstrakt (CS)}
+\end{otherlanguage}
+
+\chapter*{Acknowledgements}
+\addcontentsline{toc}{chapter}{Acknowledgements}
+\todo{Write acknowledgements}
+
+\tableofcontents
+\listoffigures
+\listoftables
+
+%% ── Main matter ──────────────────────────────────────────────────────────
+\pagenumbering{arabic}
+
+\include{chapters/introduction}
+\include{chapters/related_work}
+\include{chapters/methodology}
+\include{chapters/experiments}
+\include{chapters/conclusion}
+
+%% ── Bibliography ─────────────────────────────────────────────────────────
+\printbibliography[heading=bibintoc]
+
+%% ── Appendix ─────────────────────────────────────────────────────────────
+\appendix
+\include{chapters/appendix}
+
+\end{document}

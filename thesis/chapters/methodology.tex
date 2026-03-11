@@ -1,0 +1,50 @@
+\chapter{Methodology}
+\label{chap:methodology}
+
+\todo{Write full methodology chapter.}
+
+\section{Problem formulation}
+
+Let $\mathcal{U} = \{u_1, \dots, u_M\}$ and $\mathcal{I} = \{i_1, \dots, i_N\}$
+denote the sets of users and POIs respectively.
+We observe implicit feedback $\mat{R} \in \{0,1\}^{M \times N}$, where
+$r_{ui} = 1$ if user $u$ has interacted with POI $i$.
+The goal is to learn a ranking function $\hat{r}_{ui} : \mathcal{U} \times
+\mathcal{I} \to \mathbb{R}$ such that unobserved but relevant POIs receive
+higher scores than irrelevant ones.
+
+\section{Baseline: matrix factorisation}
+
+We factorise $\mat{R} \approx \mat{P} \mat{Q}^\top$ where
+$\mat{P} \in \mathbb{R}^{M \times d}$ and $\mat{Q} \in \mathbb{R}^{N \times d}$
+are user and item embedding matrices, trained with Bayesian Personalised
+Ranking (BPR) loss.
+
+\section{Sparse Autoencoder on latent factors}
+
+Given a trained user embedding $\vect{p}_u \in \mathbb{R}^d$, a SAE maps it to
+a sparse code $\vect{z}_u \in \mathbb{R}^k$ ($k \gg d$):
+
+\begin{align}
+  \vect{z}_u &= \sigma\!\left(\mat{W}_{\text{enc}}\,\vect{p}_u + \vect{b}_{\text{enc}}\right), \\
+  \hat{\vect{p}}_u &= \mat{W}_{\text{dec}}\,\vect{z}_u + \vect{b}_{\text{dec}},
+\end{align}
+
+where $\sigma$ is a ReLU activation that promotes non-negativity and sparsity.
+The reconstruction loss is:
+
+\begin{equation}
+  \mathcal{L}_{\text{SAE}} = \|\vect{p}_u - \hat{\vect{p}}_u\|_2^2
+                            + \lambda \|\vect{z}_u\|_1.
+\end{equation}
+
+\section{SAE-CF joint architecture}
+
+\todo{Describe joint training procedure.}
+
+\section{Controllability mechanism}
+
+The sparse code $\vect{z}_u$ directly exposes interpretable preference knobs.
+A user can increase or decrease specific feature activations, and the modified
+$\hat{\vect{p}}_u' = \mat{W}_{\text{dec}}\,\vect{z}_u' + \vect{b}_{\text{dec}}$
+is passed back to the CF scoring function to re-rank POIs in real time.

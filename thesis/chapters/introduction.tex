@@ -1,0 +1,42 @@
+\chapter{Introduction}
+\label{chap:introduction}
+
+\todo{Write full introduction.}
+
+Modern recommender systems achieve state-of-the-art accuracy by learning dense,
+entangled latent representations of users and items.
+While these black-box representations optimise prediction metrics, they are
+fundamentally difficult for users to understand or correct, and for developers
+to audit.
+This lack of transparency is particularly critical in the domain of
+\emph{Points of Interest} (POI) recommendation, where user preferences are
+strongly tied to geographic and temporal context and change dynamically.
+
+\section{Motivation}
+
+\todo{Expand motivation.}
+
+The goal of this thesis is to apply \emph{Sparse Autoencoders} (SAE) to the
+latent space of a collaborative filtering model trained on Yelp data.
+By enforcing sparsity, the model is encouraged to learn monosemantic,
+human-interpretable features that can simultaneously explain recommendations
+and serve as interactive ``knobs'' for user-driven steering.
+
+\section{Research questions}
+
+\begin{enumerate}
+  \item Can SAE-derived sparse features maintain recommendation quality comparable
+        to dense baselines?
+  \item Do the learned features correspond to semantically interpretable
+        preference dimensions (e.g.\ cuisine type, ambience, price range)?
+  \item Can users effectively steer recommendations by manipulating these features
+        through an interactive interface?
+\end{enumerate}
+
+\section{Thesis outline}
+
+\Cref{chap:related_work} reviews related work on collaborative filtering,
+sparse representations, and interpretable recommendation.
+\Cref{chap:methodology} presents the proposed SAE-CF architecture.
+\Cref{chap:experiments} describes the experimental setup and results.
+\Cref{chap:conclusion} concludes and outlines future work.
