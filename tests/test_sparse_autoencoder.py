@@ -1,53 +1,85 @@
-"""Tests for src.models.sparse_autoencoder."""
+"""Tests for src.models.sparse_autoencoder (TopK SAE)."""
 
 import pytest
 import torch
 
-from src.models.sparse_autoencoder import SparseAutoencoder
+from src.models.sparse_autoencoder import TopKSAE, cosine_recon, topk_mask
+
+
+class TestTopKMask:
+    def test_shape(self) -> None:
+        x = torch.randn(4, 32)
+        mask = topk_mask(x, k=5)
+        assert mask.shape == (4, 32)
+
+    def test_exactly_k_ones_per_row(self) -> None:
+        x = torch.randn(4, 32)
+        mask = topk_mask(x, k=5)
+        assert (mask.sum(dim=1) == 5).all()
+
+    def test_binary_values(self) -> None:
+        x = torch.randn(4, 32)
+        mask = topk_mask(x, k=5)
+        assert set(mask.unique().tolist()).issubset({0.0, 1.0})
+
+
+class TestCosineRecon:
+    def test_zero_for_identical(self) -> None:
+        x = torch.randn(8, 16)
+        assert cosine_recon(x, x).item() == pytest.approx(0.0, abs=1e-5)
+
+    def test_positive_for_different(self) -> None:
+        a = torch.randn(8, 16)
+        b = torch.randn(8, 16)
+        assert cosine_recon(a, b).item() >= 0.0
 
 
 @pytest.fixture
-def sae() -> SparseAutoencoder:
-    return SparseAutoencoder(input_dim=16, hidden_dim=64, sparsity_lambda=1e-3)
+def sae() -> TopKSAE:
+    return TopKSAE(input_dim=16, hidden_dim=64, k=4, l1_coef=3e-4)
 
 
-class TestSparseAutoencoder:
-    def test_encode_shape(self, sae: SparseAutoencoder) -> None:
+class TestTopKSAE:
+    def test_forward_shapes(self, sae: TopKSAE) -> None:
         x = torch.randn(8, 16)
-        z = sae.encode(x)
-        assert z.shape == (8, 64)
+        recon, h_sparse, h_pre = sae(x)
+        assert recon.shape == (8, 16)
+        assert h_sparse.shape == (8, 64)
+        assert h_pre.shape == (8, 64)
 
-    def test_encode_nonnegative(self, sae: SparseAutoencoder) -> None:
+    def test_sparse_code_has_exactly_k_nonzeros(self, sae: TopKSAE) -> None:
+        # With random inputs of dim > k, exactly k features should be active
+        torch.manual_seed(0)
         x = torch.randn(8, 16)
-        z = sae.encode(x)
-        assert (z >= 0).all(), "ReLU encoding must be non-negative"
+        _, h_sparse, _ = sae(x)
+        nonzeros_per_row = (h_sparse != 0).sum(dim=1)
+        assert (nonzeros_per_row == sae.k).all()
 
-    def test_decode_shape(self, sae: SparseAutoencoder) -> None:
-        z = torch.randn(8, 64).clamp(min=0)
-        x_hat = sae.decode(z)
-        assert x_hat.shape == (8, 16)
-
-    def test_forward_shapes(self, sae: SparseAutoencoder) -> None:
+    def test_sparse_code_has_at_most_k_nonzeros(self, sae: TopKSAE) -> None:
         x = torch.randn(8, 16)
-        z, x_hat = sae(x)
-        assert z.shape == (8, 64)
-        assert x_hat.shape == (8, 16)
+        _, h_sparse, _ = sae(x)
+        nonzeros_per_row = (h_sparse != 0).sum(dim=1)
+        assert (nonzeros_per_row <= sae.k).all()
 
-    def test_loss_is_scalar(self, sae: SparseAutoencoder) -> None:
+    def test_encode_shape(self, sae: TopKSAE) -> None:
+        x = torch.randn(8, 16)
+        h = sae.encode(x)
+        assert h.shape == (8, 64)
+
+    def test_decode_shape(self, sae: TopKSAE) -> None:
+        h = torch.zeros(8, 64)
+        recon = sae.decode(h)
+        assert recon.shape == (8, 16)
+
+    def test_loss_is_scalar(self, sae: TopKSAE) -> None:
         x = torch.randn(8, 16)
         loss = sae.loss(x)
         assert loss.shape == ()
 
-    def test_loss_is_positive(self, sae: SparseAutoencoder) -> None:
+    def test_loss_is_nonnegative(self, sae: TopKSAE) -> None:
         x = torch.randn(8, 16)
-        loss = sae.loss(x)
-        assert loss.item() > 0
+        assert sae.loss(x).item() >= 0
 
-    def test_normalise_decoder(self, sae: SparseAutoencoder) -> None:
-        sae.normalise_decoder()
-        norms = sae.decoder.weight.norm(dim=0)
-        # All norms should be <= 1.0 after normalisation
-        assert (norms <= 1.0 + 1e-6).all()
+    def test_sparsity_k_property(self, sae: TopKSAE) -> None:
+        assert sae.sparsity_k == 4
 
-    def test_sparsity_property(self, sae: SparseAutoencoder) -> None:
-        assert sae.sparsity == pytest.approx(1e-3)

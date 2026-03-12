@@ -1,241 +1,176 @@
-"""Feature engineering, ID mapping, and train/validation/test splitting.
+"""Build CSR interaction matrix and ID maps from filtered review DataFrames.
 
-This module assumes that raw DataFrames have already been loaded via
-:mod:`src.data.yelp_loader`.  It produces the integer-indexed interaction
-tensors that the model training code expects.
+This module complements ``src/data/yelp_loader.py``.  It mirrors the
+logic in ``src/yelp_initial_exploration/yelp_build_csr.py`` but exposes
+it as importable Python functions rather than a CLI script.
 """
 
 from __future__ import annotations
 
 import logging
+import pickle
+from pathlib import Path
 from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
+from scipy.sparse import coo_matrix, csr_matrix, save_npz
 
 logger = logging.getLogger(__name__)
 
 
 # ── ID mapping ────────────────────────────────────────────────────────────
 
-class IDMapper(NamedTuple):
-    """Bidirectional mapping between raw string IDs and integer indices."""
-
-    id_to_idx: dict[str, int]
-    idx_to_id: dict[int, str]
-
-    @classmethod
-    def from_series(cls, series: pd.Series) -> "IDMapper":
-        unique_ids = sorted(series.unique())
-        id_to_idx = {uid: i for i, uid in enumerate(unique_ids)}
-        idx_to_id = {i: uid for uid, i in id_to_idx.items()}
-        return cls(id_to_idx=id_to_idx, idx_to_id=idx_to_id)
-
-    def __len__(self) -> int:
-        return len(self.id_to_idx)
-
-
-def build_id_mappers(
-    reviews: pd.DataFrame,
-) -> tuple[IDMapper, IDMapper]:
-    """Build user and item ID mappers from a review DataFrame.
+def build_id_map(series: pd.Series) -> pd.Series:
+    """Build a ``{raw_id → integer_index}`` mapping from a Series.
 
     Parameters
     ----------
-    reviews:
-        DataFrame with at least ``user_id`` and ``business_id`` columns.
+    series:
+        Series of raw string IDs (may contain duplicates).
 
     Returns
     -------
-    user_mapper, item_mapper:
-        :class:`IDMapper` instances for users and businesses respectively.
+    pd.Series
+        Index = unique raw IDs, values = consecutive integers starting at 0.
     """
-    user_mapper = IDMapper.from_series(reviews["user_id"])
-    item_mapper = IDMapper.from_series(reviews["business_id"])
-    logger.info(
-        "Built ID mappers: %d users, %d items", len(user_mapper), len(item_mapper)
-    )
-    return user_mapper, item_mapper
+    unique = series.drop_duplicates().reset_index(drop=True)
+    return pd.Series(index=unique.values, data=np.arange(len(unique)), name="idx")
 
 
-# ── Interaction filtering & binarisation ─────────────────────────────────
+class DatasetMaps(NamedTuple):
+    """Container for user/item ID maps and CSR matrix."""
 
-def filter_interactions(
-    reviews: pd.DataFrame,
-    *,
-    min_user_interactions: int = 5,
-    min_item_interactions: int = 5,
-    implicit_threshold: int = 4,
-) -> pd.DataFrame:
-    """Filter reviews to create a clean implicit-feedback dataset.
-
-    Parameters
-    ----------
-    reviews:
-        Raw review DataFrame with ``user_id``, ``business_id``, ``stars``.
-    min_user_interactions:
-        Drop users with fewer than this many positive interactions.
-    min_item_interactions:
-        Drop items with fewer than this many positive interactions.
-    implicit_threshold:
-        Minimum star rating to treat as a positive interaction.
-
-    Returns
-    -------
-    pd.DataFrame
-        Filtered DataFrame with ``user_id``, ``business_id``, ``interaction``
-        (always 1 after binarisation).
-    """
-    df = reviews[reviews["stars"] >= implicit_threshold][
-        ["user_id", "business_id"]
-    ].drop_duplicates()
-
-    # Iterative k-core filtering
-    prev_len = -1
-    while len(df) != prev_len:
-        prev_len = len(df)
-        user_counts = df["user_id"].value_counts()
-        df = df[df["user_id"].isin(user_counts[user_counts >= min_user_interactions].index)]
-        item_counts = df["business_id"].value_counts()
-        df = df[df["business_id"].isin(item_counts[item_counts >= min_item_interactions].index)]
-
-    df = df.copy()
-    df["interaction"] = 1
-    logger.info(
-        "After filtering: %d interactions (%d users, %d items)",
-        len(df),
-        df["user_id"].nunique(),
-        df["business_id"].nunique(),
-    )
-    return df.reset_index(drop=True)
+    user_map: dict[str, int]
+    item_map: dict[str, int]
+    csr: csr_matrix
 
 
-# ── Train / validation / test split ──────────────────────────────────────
+# ── CSR builder ───────────────────────────────────────────────────────────
 
-class InteractionSplit(NamedTuple):
-    """Container for train/val/test interaction DataFrames."""
-
-    train: pd.DataFrame
-    val: pd.DataFrame
-    test: pd.DataFrame
-
-
-def temporal_split(
+def build_csr(
     interactions: pd.DataFrame,
-    reviews_with_dates: pd.DataFrame,
+    *,
+    user_col: str = "user_id",
+    item_col: str = "business_id",
+) -> DatasetMaps:
+    """Build a sparse CSR user–item interaction matrix.
+
+    Parameters
+    ----------
+    interactions:
+        DataFrame with at least ``user_col`` and ``item_col`` columns.
+        Each row is treated as a positive (implicit = 1) interaction.
+        Duplicate ``(user, item)`` pairs are automatically deduplicated.
+    user_col:
+        Name of the user-ID column.
+    item_col:
+        Name of the item-ID column.
+
+    Returns
+    -------
+    DatasetMaps
+        Named tuple with ``user_map``, ``item_map``, and ``csr``.
+    """
+    df = interactions[[user_col, item_col]].drop_duplicates()
+
+    uid_map = build_id_map(df[user_col])
+    iid_map = build_id_map(df[item_col])
+
+    u = df[user_col].map(uid_map).astype(int).values
+    i = df[item_col].map(iid_map).astype(int).values
+    vals = np.ones(len(df), dtype=np.float32)
+
+    n_users = int(u.max()) + 1
+    n_items = int(i.max()) + 1
+    mat = coo_matrix((vals, (u, i)), shape=(n_users, n_items)).tocsr()
+
+    logger.info(
+        "Built CSR: %d users × %d items, %d interactions (density=%.4f%%)",
+        n_users, n_items, mat.nnz, 100.0 * mat.nnz / (n_users * n_items),
+    )
+    return DatasetMaps(
+        user_map=uid_map.to_dict(),
+        item_map=iid_map.to_dict(),
+        csr=mat,
+    )
+
+
+# ── Persistence ───────────────────────────────────────────────────────────
+
+def save_dataset(maps: DatasetMaps, out_dir: str | Path) -> None:
+    """Persist CSR matrix and ID maps to ``out_dir``.
+
+    Outputs
+    -------
+    ``processed_train.npz`` — scipy sparse CSR in NPZ format
+    ``user2index.pkl``       — ``{user_id: int}`` mapping
+    ``item2index.pkl``       — ``{business_id: int}`` mapping
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    save_npz(out_dir / "processed_train.npz", maps.csr)
+    with (out_dir / "user2index.pkl").open("wb") as f:
+        pickle.dump(maps.user_map, f)
+    with (out_dir / "item2index.pkl").open("wb") as f:
+        pickle.dump(maps.item_map, f)
+    logger.info("Saved dataset artefacts to %s", out_dir)
+
+
+def load_dataset(out_dir: str | Path) -> DatasetMaps:
+    """Load previously saved CSR matrix and ID maps.
+
+    Parameters
+    ----------
+    out_dir:
+        Directory containing ``processed_train.npz``, ``user2index.pkl``,
+        ``item2index.pkl``.
+
+    Returns
+    -------
+    DatasetMaps
+    """
+    from scipy.sparse import load_npz  # noqa: PLC0415
+
+    out_dir = Path(out_dir)
+    csr = load_npz(out_dir / "processed_train.npz")
+    with (out_dir / "user2index.pkl").open("rb") as f:
+        user_map: dict[str, int] = pickle.load(f)
+    with (out_dir / "item2index.pkl").open("rb") as f:
+        item_map: dict[str, int] = pickle.load(f)
+    return DatasetMaps(user_map=user_map, item_map=item_map, csr=csr)
+
+
+# ── Train / validation split ──────────────────────────────────────────────
+
+def user_train_val_split(
+    csr: csr_matrix,
     *,
     val_ratio: float = 0.1,
-    test_ratio: float = 0.1,
-) -> InteractionSplit:
-    """Split interactions temporally (latest interactions → val/test).
-
-    Each user's interactions are sorted by date; the most recent fraction
-    goes to test, the second most recent to validation, and the rest to train.
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Split user indices into train and validation sets.
 
     Parameters
     ----------
-    interactions:
-        Filtered interaction DataFrame (``user_id``, ``business_id``).
-    reviews_with_dates:
-        Original review DataFrame including a ``date`` column.
+    csr:
+        Full user–item CSR matrix.
     val_ratio:
-        Fraction of each user's interactions reserved for validation.
-    test_ratio:
-        Fraction of each user's interactions reserved for testing.
+        Fraction of users to use for validation.
+    seed:
+        Random seed for reproducibility.
 
     Returns
     -------
-    InteractionSplit
+    train_indices, val_indices:
+        Arrays of integer user indices.
     """
-    # Attach dates
-    date_lookup = reviews_with_dates.set_index(["user_id", "business_id"])["date"]
-    df = interactions.copy()
-    df["date"] = df.set_index(["user_id", "business_id"]).index.map(date_lookup)
-    df = df.sort_values("date")
+    from sklearn.model_selection import train_test_split  # noqa: PLC0415
 
-    train_rows, val_rows, test_rows = [], [], []
-
-    for _, group in df.groupby("user_id", sort=False):
-        n = len(group)
-        n_test = max(1, int(n * test_ratio))
-        n_val = max(1, int(n * val_ratio))
-        n_train = n - n_val - n_test
-        if n_train <= 0:
-            train_rows.append(group)
-            continue
-        train_rows.append(group.iloc[:n_train])
-        val_rows.append(group.iloc[n_train : n_train + n_val])
-        test_rows.append(group.iloc[n_train + n_val :])
-
-    return InteractionSplit(
-        train=pd.concat(train_rows).reset_index(drop=True),
-        val=pd.concat(val_rows).reset_index(drop=True),
-        test=pd.concat(test_rows).reset_index(drop=True),
+    all_idx = np.arange(csr.shape[0])
+    train_idx, val_idx = train_test_split(
+        all_idx, test_size=val_ratio, random_state=seed
     )
+    return train_idx, val_idx
 
-
-# ── Negative sampling ─────────────────────────────────────────────────────
-
-def sample_negatives(
-    interactions: pd.DataFrame,
-    n_items: int,
-    n_neg_per_pos: int = 1,
-    *,
-    rng: np.random.Generator | None = None,
-) -> pd.DataFrame:
-    """Uniform negative sampling for BPR training.
-
-    For each positive ``(user, item)`` pair, sample ``n_neg_per_pos``
-    items that the user has **not** interacted with.
-
-    Parameters
-    ----------
-    interactions:
-        Positive interactions with integer ``user_idx`` and ``item_idx``.
-    n_items:
-        Total number of items in the catalogue.
-    n_neg_per_pos:
-        Number of negative samples per positive.
-    rng:
-        Optional NumPy random generator for reproducibility.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns: ``user_idx``, ``pos_item_idx``, ``neg_item_idx``.
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    user_positives: dict[int, set[int]] = (
-        interactions.groupby("user_idx")["item_idx"]
-        .apply(set)
-        .to_dict()
-    )
-
-    records: list[dict[str, int]] = []
-    for _, row in interactions.iterrows():
-        u = int(row["user_idx"])
-        pos = int(row["item_idx"])
-        pos_set = user_positives.get(u, set())
-        for _ in range(n_neg_per_pos):
-            neg = rng.integers(n_items)
-            while neg in pos_set:
-                neg = rng.integers(n_items)
-            records.append({"user_idx": u, "pos_item_idx": pos, "neg_item_idx": int(neg)})
-
-    return pd.DataFrame(records)
-
-
-# ── Utility: add integer indices to interaction DataFrame ─────────────────
-
-def add_integer_indices(
-    interactions: pd.DataFrame,
-    user_mapper: IDMapper,
-    item_mapper: IDMapper,
-) -> pd.DataFrame:
-    """Add ``user_idx`` and ``item_idx`` columns using pre-built mappers."""
-    df = interactions.copy()
-    df["user_idx"] = df["user_id"].map(user_mapper.id_to_idx)
-    df["item_idx"] = df["business_id"].map(item_mapper.id_to_idx)
-    return df

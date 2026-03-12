@@ -1,20 +1,25 @@
-"""Sparse Autoencoder (SAE) for decomposing dense latent vectors.
+"""TopK Sparse Autoencoder for decomposing ELSA latent vectors.
 
 Architecture
 ------------
-    encoder:  Linear → ReLU          (dense  →  sparse code)
-    decoder:  Linear (no activation) (sparse code  →  reconstruction)
+    encoder:  Linear (no bias)    dense latent → pre-activations
+    TopK mask: keep only the k largest-magnitude activations (signed)
+    decoder:  Linear (with bias)  sparse code → reconstruction
 
 Loss
 ----
-    L = ||x - x̂||² + λ · ||z||₁
+    L = cosine_reconstruction_loss(x̂, x) + λ · mean(|h_sparse|)
 
-where ``z`` is the sparse code and ``λ`` controls sparsity.
+where ``h_sparse`` has at most ``k`` non-zero entries per sample.
+
+This matches the implementation in
+``src/yelp_initial_exploration/train_sae.py``.
 
 Reference
 ---------
-    Bricken et al. (2023), "Towards Monosemanticity: Decomposing Language
-    Models with Dictionary Learning", Anthropic Transformer Circuits Thread.
+    Spišák M., Bartyzal R., Hoskovec A., Peška L. (2024).
+    "On Interpretability of Linear Autoencoders."
+    Proceedings of RecSys '24, ACM.
 """
 
 from __future__ import annotations
@@ -24,74 +29,66 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class SparseAutoencoder(nn.Module):
-    """Sparse autoencoder with L1 regularisation on activations.
+def topk_mask(x: torch.Tensor, k: int) -> torch.Tensor:
+    """Return a binary mask that is 1 for the ``k`` largest-magnitude entries.
+
+    Parameters
+    ----------
+    x:
+        Tensor of shape ``(batch, hidden_dim)``.
+    k:
+        Number of entries to keep per row.
+
+    Returns
+    -------
+    torch.Tensor
+        Binary mask of shape ``(batch, hidden_dim)``.
+    """
+    _, idx = torch.topk(x.abs(), k, dim=1)
+    return torch.zeros_like(x).scatter(1, idx, 1.0)
+
+
+class TopKSAE(nn.Module):
+    """TopK Sparse Autoencoder.
 
     Parameters
     ----------
     input_dim:
-        Dimensionality of the dense input representation.
+        Dimensionality of the dense ELSA latent vector.
     hidden_dim:
-        Dimensionality of the (over-complete) sparse code.
-        Typically ``hidden_dim >> input_dim``.
-    sparsity_lambda:
-        L1 regularisation coefficient (λ).
+        Dimensionality of the (over-complete) dictionary.
+        Typically ``hidden_dim = width_ratio * input_dim``.
+    k:
+        Number of active features per sample (sparsity level).
+    l1_coef:
+        L1 regularisation coefficient applied to sparse activations.
     """
 
     def __init__(
         self,
         input_dim: int,
         hidden_dim: int,
-        sparsity_lambda: float = 1e-3,
+        k: int = 32,
+        l1_coef: float = 3e-4,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
-        self.sparsity_lambda = sparsity_lambda
+        self.k = k
+        self.l1_coef = l1_coef
 
-        self.encoder = nn.Linear(input_dim, hidden_dim)
-        self.decoder = nn.Linear(hidden_dim, input_dim, bias=False)
+        # No bias on encoder (matches reference implementation)
+        self.enc = nn.Linear(input_dim, hidden_dim, bias=False)
+        self.dec = nn.Linear(hidden_dim, input_dim, bias=True)
 
-        self._init_weights()
+        nn.init.xavier_uniform_(self.enc.weight)
+        nn.init.xavier_uniform_(self.dec.weight)
+        nn.init.zeros_(self.dec.bias)
 
-    def _init_weights(self) -> None:
-        nn.init.xavier_uniform_(self.encoder.weight)
-        nn.init.zeros_(self.encoder.bias)
-        # Tie decoder columns to unit norm (dictionary normalisation)
-        nn.init.xavier_uniform_(self.decoder.weight)
-
-    def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Produce sparse codes from input vectors.
-
-        Parameters
-        ----------
-        x:
-            Input tensor of shape ``(..., input_dim)``.
-
-        Returns
-        -------
-        torch.Tensor
-            Sparse code of shape ``(..., hidden_dim)`` with ReLU applied.
-        """
-        return F.relu(self.encoder(x))
-
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
-        """Reconstruct input from sparse codes.
-
-        Parameters
-        ----------
-        z:
-            Sparse code tensor of shape ``(..., hidden_dim)``.
-
-        Returns
-        -------
-        torch.Tensor
-            Reconstructed tensor of shape ``(..., input_dim)``.
-        """
-        return self.decoder(z)
-
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Encode and decode in one pass.
+    def forward(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Encode and decode with TopK sparsification.
 
         Parameters
         ----------
@@ -100,17 +97,33 @@ class SparseAutoencoder(nn.Module):
 
         Returns
         -------
-        z:
-            Sparse codes of shape ``(batch, hidden_dim)``.
-        x_hat:
-            Reconstruction of shape ``(batch, input_dim)``.
+        recon:
+            Reconstructed tensor of shape ``(batch, input_dim)``.
+        h_sparse:
+            Sparse code (at most ``k`` non-zeros per row) of shape
+            ``(batch, hidden_dim)``.
+        h_pre:
+            Pre-activation (dense) encoder output, shape
+            ``(batch, hidden_dim)``.
         """
-        z = self.encode(x)
-        x_hat = self.decode(z)
-        return z, x_hat
+        h_pre = self.enc(x)
+        mask = topk_mask(h_pre, self.k)
+        h_sparse = h_pre * mask
+        recon = self.dec(h_sparse)
+        return recon, h_sparse, h_pre
+
+    def encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Return the sparse feature code for input ``x``."""
+        h_pre = self.enc(x)
+        mask = topk_mask(h_pre, self.k)
+        return h_pre * mask
+
+    def decode(self, h_sparse: torch.Tensor) -> torch.Tensor:
+        """Reconstruct input from a sparse feature code."""
+        return self.dec(h_sparse)
 
     def loss(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute combined reconstruction + sparsity loss.
+        """Compute combined cosine reconstruction + L1 sparsity loss.
 
         Parameters
         ----------
@@ -120,24 +133,22 @@ class SparseAutoencoder(nn.Module):
         Returns
         -------
         torch.Tensor
-            Scalar loss value.
+            Scalar loss.
         """
-        z, x_hat = self(x)
-        reconstruction_loss = F.mse_loss(x_hat, x)
-        sparsity_loss = self.sparsity_lambda * z.abs().mean()
-        return reconstruction_loss + sparsity_loss
-
-    def normalise_decoder(self) -> None:
-        """Normalise decoder column vectors to unit norm.
-
-        Should be called after each optimiser step to keep the
-        dictionary atoms well-conditioned (prevents degenerate solutions).
-        """
-        with torch.no_grad():
-            norms = self.decoder.weight.norm(dim=0, keepdim=True).clamp(min=1.0)
-            self.decoder.weight.div_(norms)
+        recon, h_sparse, _ = self(x)
+        rec_loss = cosine_recon(recon, x)
+        l1_loss = self.l1_coef * h_sparse.abs().mean()
+        return rec_loss + l1_loss
 
     @property
-    def sparsity(self) -> float:
-        """Return the configured sparsity regularisation coefficient."""
-        return self.sparsity_lambda
+    def sparsity_k(self) -> int:
+        """Return the configured TopK sparsity level."""
+        return self.k
+
+
+def cosine_recon(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Negative cosine similarity loss (scalar)."""
+    pred_n = F.normalize(pred, dim=-1)
+    target_n = F.normalize(target, dim=-1)
+    return 1.0 - F.cosine_similarity(pred_n, target_n, dim=-1).mean()
+

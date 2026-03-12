@@ -1,111 +1,84 @@
-"""Tests for src.data.preprocessing utilities (no real data needed)."""
+"""Tests for src.data.preprocessing (CSR builder + ID maps)."""
 
-import numpy as np
+from __future__ import annotations
+
 import pandas as pd
 import pytest
 
 from src.data.preprocessing import (
-    IDMapper,
-    add_integer_indices,
-    build_id_mappers,
-    filter_interactions,
-    sample_negatives,
+    build_id_map,
+    build_csr,
+    user_train_val_split,
+    DatasetMaps,
 )
 
 
 @pytest.fixture
-def sample_reviews() -> pd.DataFrame:
-    """6 users × 6 businesses with one missing interaction per (user, item) pair.
-
-    User u_i does NOT interact with b_i (diagonal missing), giving each user
-    5 interactions (≥ min_user_interactions=5) and each business 5 interactions
-    (≥ min_item_interactions=5), while leaving exactly one valid negative item
-    per user for ``sample_negatives``.
-    """
-    users = [f"u{i}" for i in range(1, 7)]
-    businesses = [f"b{j}" for j in range(1, 7)]
-    records = [
-        {"user_id": u, "business_id": b, "stars": 5}
-        for k, u in enumerate(users)
-        for j, b in enumerate(businesses)
-        if j != k  # skip diagonal: u_k doesn't rate b_k
-    ]
-    return pd.DataFrame(records)
+def sample_interactions() -> pd.DataFrame:
+    """Small implicit-feedback DataFrame (12 unique user–item pairs)."""
+    data = {
+        "user_id": ["u1", "u1", "u2", "u2", "u3", "u3", "u4", "u4", "u5", "u5", "u5", "u5"],
+        "business_id": ["b1", "b2", "b1", "b3", "b2", "b4", "b3", "b5", "b1", "b2", "b3", "b4"],
+    }
+    return pd.DataFrame(data)
 
 
-class TestIDMapper:
-    def test_from_series(self) -> None:
-        series = pd.Series(["c", "a", "b", "a"])
-        mapper = IDMapper.from_series(series)
-        assert len(mapper) == 3
-        assert set(mapper.id_to_idx.keys()) == {"a", "b", "c"}
-        # idx_to_id is the inverse
-        for uid, idx in mapper.id_to_idx.items():
-            assert mapper.idx_to_id[idx] == uid
+class TestBuildIdMap:
+    def test_returns_series(self, sample_interactions: pd.DataFrame) -> None:
+        m = build_id_map(sample_interactions["user_id"])
+        assert hasattr(m, "index")
+
+    def test_consecutive_integers(self, sample_interactions: pd.DataFrame) -> None:
+        m = build_id_map(sample_interactions["user_id"])
+        assert set(m.values) == set(range(len(m)))
+
+    def test_unique_ids(self, sample_interactions: pd.DataFrame) -> None:
+        m = build_id_map(sample_interactions["user_id"])
+        assert m.index.nunique() == len(m)
 
 
-class TestFilterInteractions:
-    def test_returns_positive_interactions(self, sample_reviews: pd.DataFrame) -> None:
-        result = filter_interactions(sample_reviews, implicit_threshold=4)
-        assert (result["interaction"] == 1).all()
+class TestBuildCSR:
+    def test_returns_dataset_maps(self, sample_interactions: pd.DataFrame) -> None:
+        result = build_csr(sample_interactions)
+        assert isinstance(result, DatasetMaps)
 
-    def test_drops_low_rated(self, sample_reviews: pd.DataFrame) -> None:
-        # Add a 1-star review for a brand-new business — it should be filtered
-        # out both by the star threshold AND by k-core (only 1 interaction).
-        extra = pd.DataFrame({"user_id": ["u1"], "business_id": ["b_new"], "stars": [1]})
-        reviews = pd.concat([sample_reviews, extra], ignore_index=True)
-        result = filter_interactions(reviews, implicit_threshold=4)
-        assert "b_new" not in result["business_id"].values
+    def test_csr_shape(self, sample_interactions: pd.DataFrame) -> None:
+        result = build_csr(sample_interactions)
+        n_users = len(set(sample_interactions["user_id"]))
+        n_items = len(set(sample_interactions["business_id"]))
+        assert result.csr.shape == (n_users, n_items)
 
-    def test_kcore_filter(self) -> None:
-        # Create a user with only 1 interaction — should be filtered out
-        reviews = pd.DataFrame(
-            {
-                "user_id": ["u_rare", "u1", "u1", "u1", "u1", "u1"],
-                "business_id": ["b1", "b1", "b2", "b3", "b4", "b5"],
-                "stars": [5, 5, 5, 5, 5, 5],
-            }
-        )
-        result = filter_interactions(reviews, min_user_interactions=5)
-        assert "u_rare" not in result["user_id"].values
+    def test_csr_is_binary(self, sample_interactions: pd.DataFrame) -> None:
+        result = build_csr(sample_interactions)
+        assert set(result.csr.data.tolist()).issubset({0.0, 1.0})
 
+    def test_maps_cover_all_ids(self, sample_interactions: pd.DataFrame) -> None:
+        result = build_csr(sample_interactions)
+        assert set(result.user_map.keys()) == set(sample_interactions["user_id"].unique())
+        assert set(result.item_map.keys()) == set(sample_interactions["business_id"].unique())
 
-class TestBuildIDMappers:
-    def test_mapper_sizes(self, sample_reviews: pd.DataFrame) -> None:
-        interactions = filter_interactions(sample_reviews)
-        user_mapper, item_mapper = build_id_mappers(interactions)
-        assert len(user_mapper) == interactions["user_id"].nunique()
-        assert len(item_mapper) == interactions["business_id"].nunique()
+    def test_deduplicates_interactions(self) -> None:
+        df = pd.DataFrame({
+            "user_id": ["u1", "u1"],
+            "business_id": ["b1", "b1"],  # duplicate
+        })
+        result = build_csr(df)
+        assert result.csr.nnz == 1
 
-
-class TestAddIntegerIndices:
-    def test_adds_columns(self, sample_reviews: pd.DataFrame) -> None:
-        interactions = filter_interactions(sample_reviews)
-        user_mapper, item_mapper = build_id_mappers(interactions)
-        result = add_integer_indices(interactions, user_mapper, item_mapper)
-        assert "user_idx" in result.columns
-        assert "item_idx" in result.columns
-
-    def test_indices_in_range(self, sample_reviews: pd.DataFrame) -> None:
-        interactions = filter_interactions(sample_reviews)
-        user_mapper, item_mapper = build_id_mappers(interactions)
-        result = add_integer_indices(interactions, user_mapper, item_mapper)
-        assert result["user_idx"].between(0, len(user_mapper) - 1).all()
-        assert result["item_idx"].between(0, len(item_mapper) - 1).all()
+    def test_nnz_matches_unique_pairs(self, sample_interactions: pd.DataFrame) -> None:
+        n_unique = sample_interactions.drop_duplicates().shape[0]
+        result = build_csr(sample_interactions)
+        assert result.csr.nnz == n_unique
 
 
-class TestSampleNegatives:
-    def test_output_columns(self, sample_reviews: pd.DataFrame) -> None:
-        interactions = filter_interactions(sample_reviews)
-        user_mapper, item_mapper = build_id_mappers(interactions)
-        interactions = add_integer_indices(interactions, user_mapper, item_mapper)
-        negs = sample_negatives(interactions, n_items=len(item_mapper), rng=np.random.default_rng(42))
-        assert set(negs.columns) >= {"user_idx", "pos_item_idx", "neg_item_idx"}
+class TestUserTrainValSplit:
+    def test_split_sizes(self, sample_interactions: pd.DataFrame) -> None:
+        maps = build_csr(sample_interactions)
+        train_idx, val_idx = user_train_val_split(maps.csr, val_ratio=0.2, seed=0)
+        n_users = maps.csr.shape[0]
+        assert len(train_idx) + len(val_idx) == n_users
 
-    def test_neg_not_same_as_pos(self, sample_reviews: pd.DataFrame) -> None:
-        interactions = filter_interactions(sample_reviews)
-        user_mapper, item_mapper = build_id_mappers(interactions)
-        interactions = add_integer_indices(interactions, user_mapper, item_mapper)
-        negs = sample_negatives(interactions, n_items=len(item_mapper), rng=np.random.default_rng(42))
-        # Negative item must differ from positive item
-        assert (negs["neg_item_idx"] != negs["pos_item_idx"]).all()
+    def test_no_overlap(self, sample_interactions: pd.DataFrame) -> None:
+        maps = build_csr(sample_interactions)
+        train_idx, val_idx = user_train_val_split(maps.csr, val_ratio=0.2, seed=0)
+        assert len(set(train_idx) & set(val_idx)) == 0

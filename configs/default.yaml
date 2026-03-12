@@ -1,32 +1,37 @@
 # Training & evaluation configuration
+# Hyperparameters match src/yelp_initial_exploration/train_elsa.py and train_sae.py
 # Override individual values with: python src/train.py --config configs/custom.yaml
 
 data:
-  raw_dir: data/raw
-  processed_dir: data/processed
-  min_user_interactions: 5
-  min_item_interactions: 5
-  implicit_threshold: 4      # min stars to treat as positive
+  parquet_dir: yelp_parquet          # root dir with business/ and review/ subdirs
+  processed_dir: data/processed       # output dir for CSR matrix + ID maps
+  pos_threshold: 4.0                  # stars >= threshold → implicit positive
   val_ratio: 0.1
-  test_ratio: 0.1
-  n_neg_per_pos: 1
-
-model:
-  embedding_dim: 64
-  sae_hidden_dim: 512        # should be >> embedding_dim
-  sparsity_lambda: 1.0e-3
-
-training:
-  cf_epochs: 50
-  sae_epochs: 30
-  batch_size: 1024
-  lr: 1.0e-3
-  weight_decay: 1.0e-5
   seed: 42
 
+elsa:
+  latent_dim: 512                     # embedding dimension (= SAE input dim)
+  n_epochs: 25
+  batch_size: 1024
+  lr: 3.0e-4
+  beta1: 0.9                          # Adam beta1
+  beta2: 0.99                         # Adam beta2
+  patience: 10                        # early stopping patience
+
+sae:
+  width_ratio: 4                      # hidden_dim = width_ratio * latent_dim = 2048
+  k: 32                               # TopK sparsity: active features per user
+  l1_coef: 3.0e-4                     # L1 coefficient on sparse activations
+  n_epochs: 50
+  batch_size: 1024
+  lr: 3.0e-4
+  beta1: 0.9                          # Adam beta1
+  beta2: 0.99                         # Adam beta2
+  patience: 10
+
 evaluation:
-  k_values: [10, 20]         # Recall@K, NDCG@K, HR@K
+  k_values: [10, 20]                  # Recall@K, NDCG@K
 
 logging:
   log_every_n_steps: 100
-  checkpoint_dir: checkpoints/
+  checkpoint_dir: models/

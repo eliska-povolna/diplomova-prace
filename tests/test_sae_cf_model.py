@@ -1,64 +1,62 @@
-"""Tests for src.models.sae_cf_model."""
+"""Tests for src.models.sae_cf_model (ELSASAEModel)."""
 
 import pytest
 import torch
 
-from src.models.sae_cf_model import SAECFModel
+from src.models.sae_cf_model import ELSASAEModel
 
 
 @pytest.fixture
-def model() -> SAECFModel:
-    return SAECFModel(
-        n_users=10,
+def model() -> ELSASAEModel:
+    return ELSASAEModel(
         n_items=20,
-        embedding_dim=16,
+        latent_dim=16,
         sae_hidden_dim=64,
-        sparsity_lambda=1e-3,
+        k=4,
+        l1_coef=3e-4,
     )
 
 
-class TestSAECFModel:
-    def test_cf_score_shape(self, model: SAECFModel) -> None:
-        users = torch.tensor([0, 1, 2])
-        items = torch.tensor([5, 10, 15])
-        scores = model.cf_score(users, items)
-        assert scores.shape == (3,)
+class TestELSASAEModel:
+    def test_elsa_score_shape(self, model: ELSASAEModel) -> None:
+        x = torch.randn(8, 20)
+        scores = model.elsa_score(x)
+        assert scores.shape == (8, 20)
 
-    def test_encode_user_shape(self, model: SAECFModel) -> None:
-        users = torch.tensor([0, 1])
-        z = model.encode_user(users)
-        assert z.shape == (2, 64)
+    def test_elsa_encode_shape(self, model: ELSASAEModel) -> None:
+        x = torch.randn(8, 20)
+        z = model.elsa_encode(x)
+        assert z.shape == (8, 16)
 
-    def test_encode_user_nonnegative(self, model: SAECFModel) -> None:
-        users = torch.tensor([0, 1, 2])
-        z = model.encode_user(users)
-        assert (z >= 0).all()
+    def test_sae_encode_shape(self, model: ELSASAEModel) -> None:
+        z = torch.randn(8, 16)
+        h = model.sae_encode(z)
+        assert h.shape == (8, 64)
 
-    def test_reconstruct_user_shape(self, model: SAECFModel) -> None:
-        users = torch.tensor([0, 1])
-        x_hat = model.reconstruct_user(users)
-        assert x_hat.shape == (2, 16)
+    def test_sae_encode_at_most_k_nonzeros(self, model: ELSASAEModel) -> None:
+        z = torch.randn(8, 16)
+        h = model.sae_encode(z)
+        assert (h != 0).sum(dim=1).max().item() <= model.sae.k
 
-    def test_recommend_1d_items(self, model: SAECFModel) -> None:
-        users = torch.tensor([0, 1, 2])
-        items = torch.tensor([3, 7, 12])
-        scores = model.recommend(users, items)
-        assert scores.shape == (3,)
+    def test_recommend_shape(self, model: ELSASAEModel) -> None:
+        x = torch.randn(8, 20)
+        scores = model.recommend(x)
+        assert scores.shape == (8, 20)
 
-    def test_recommend_with_feature_override(self, model: SAECFModel) -> None:
-        users = torch.tensor([0])
-        items = torch.tensor([5])
-        baseline = model.recommend(users, items).item()
-        overridden = model.recommend(users, items, feature_overrides={0: 100.0}).item()
-        # After overriding a feature the score should generally change
-        # (not guaranteed for random weights, so we just check no exception raised)
-        assert isinstance(overridden, float)
-        assert isinstance(baseline, float)
+    def test_recommend_with_feature_override(self, model: ELSASAEModel) -> None:
+        x = torch.randn(4, 20)
+        baseline = model.recommend(x)
+        steered = model.recommend(x, feature_overrides={0: 100.0})
+        assert steered.shape == (4, 20)
+        # Overriding a feature should change the scores
+        assert not torch.allclose(baseline, steered)
 
-    def test_sae_loss_is_scalar(self, model: SAECFModel) -> None:
-        loss = model.sae_loss()
+    def test_sae_loss_is_scalar(self, model: ELSASAEModel) -> None:
+        z = torch.randn(8, 16)
+        loss = model.sae_loss(z)
         assert loss.shape == ()
 
-    def test_sae_loss_positive(self, model: SAECFModel) -> None:
-        loss = model.sae_loss()
-        assert loss.item() > 0
+    def test_sae_loss_nonnegative(self, model: ELSASAEModel) -> None:
+        z = torch.randn(8, 16)
+        assert model.sae_loss(z).item() >= 0
+
