@@ -1,0 +1,83 @@
+\chapter{Návrh řešení}
+\label{chap:navrh_reseni}
+
+Tato kapitola detailně představuje návrh vysvětlitelného a ovladatelného doporučovacího systému pro doménu volnočasových aktivit (POI). Vychází z teoretických poznatků a existujících přístupů popsaných v předchozích kapitolách. Nejprve jsou definovány hlavní cíle a výzkumné otázky práce. Následně je matematicky formalizována celková architektura systému, která kombinuje modely kolaborativního filtrování s řídkými autoenkodéry (SAE). Závěr kapitoly se věnuje způsobům, jakými model generuje vysvětlení a jak umožňuje uživatelům interaktivně upravovat jejich preferenční profily.
+
+\section{Cíle a výzkumné otázky}
+\label{sec:cile_a_otazky}
+
+Hlavním cílem navrženého řešení je překonat inherentní neprůhlednost tradičních modelů kolaborativního filtrování a vytvořit systém, který nejen přesně doporučuje body zájmu (POI), ale zároveň dokáže své vnitřní stavy srozumitelně interpretovat a poskytnout uživateli nástroje pro jejich přímou úpravu. Pro dosažení tohoto cíle byly stanoveny následující výzkumné otázky (Research Questions, RQ):
+
+\begin{itemize}
+    \item \textbf{RQ1:} Jak efektivně transformovat husté, propletené (\textit{entangled}) latentní reprezentace uživatelů do řídkých a monosémantických rysů bez výrazné ztráty prediktivní přesnosti?
+    \item \textbf{RQ2:} Jakým způsobem lze tyto abstraktní řídké faktory automaticky mapovat na sémanticky pochopitelné tagy a kategorie míst?
+    \item \textbf{RQ3:} Jak matematicky modelovat a v uživatelském rozhraní implementovat zásah uživatele (\textit{steering}) do jeho profilu tak, aby systém okamžitě a konzistentně přepočítal doporučení?
+\end{itemize}
+
+\section{Architektura navrženého systému}
+\label{sec:architektura}
+
+Navržená architektura využívá tzv. vnořený autoenkodér (\textit{nested autoencoder}). Nechť $\mathcal{U}$ je množina uživatelů, $\mathcal{I}$ množina položek (POI) a $\mathbf{X} \in \mathbb{R}^{|\mathcal{U}| \times |\mathcal{I}|}$ je matice uživatelských interakcí. Vstupem modelu pro konkrétního uživatele $u \in \mathcal{U}$ je vektor jeho interakcí $\mathbf{x}_u \in \mathbb{R}^{|\mathcal{I}|}$. 
+
+Celá architektura se skládá ze dvou hlavních modulů: základního modelu kolaborativního filtrování (CFAE) a řídkého autoenkodéru (SAE) \cite{Wang2021}.
+
+\subsection{Modelování kolaborativního filtrování (CFAE)}
+Základní model (např. ELSA nebo MultVAE) se skládá z enkodéru $E_c$ a dekodéru $D_c$. Enkodér $E_c$ mapuje řídký vektor interakcí $\mathbf{x}_u$ do hustého, nízko-dimenzionálního latentního prostoru $\mathbb{R}^d$:
+\begin{equation}
+    \mathbf{y}_u = E_c(\mathbf{x}_u)
+\end{equation}
+kde $\mathbf{y}_u \in \mathbb{R}^d$ představuje tradiční, avšak sémanticky neprůhlednou (\textit{entangled}) reprezentaci uživatele. Standardní model by tuto reprezentaci rovnou dekódoval pro získání predikcí $\mathbf{\hat{x}}_u = D_c(\mathbf{y}_u)$. Abychom však získali interpretovatelné dimenze, vkládáme do architektury SAE.
+
+\subsection{Sparse autoencoder pro interpretovatelné preference}
+Řídký autoenkodér (SAE) přijímá jako vstup hustý vektor $\mathbf{y}_u$ a mapuje jej do podstatně širšího prostoru $\mathbb{R}^k$ ($k \gg d$), přičemž vynucuje, aby většina komponent vektoru byla nulová. SAE je definován vlastním enkodérem $E_s$ a dekodérem $D_s$:
+\begin{equation}
+    \mathbf{z}_u = \phi(\mathbf{W}_{enc}\mathbf{y}_u + \mathbf{b}_{enc})
+\end{equation}
+kde $\mathbf{W}_{enc} \in \mathbb{R}^{k \times d}$ a $\mathbf{b}_{enc} \in \mathbb{R}^k$ jsou váhy a bias enkodéru SAE, a $\phi$ představuje aktivační funkci vynucující řídkost. V závislosti na zvolené variantě SAE může jít o ReLU v kombinaci s $L_1$ regularizací, nebo o funkci $\text{Top-}K$, která ponechá nenulových pouze $K$ neuronů s nejvyšší aktivací \cite{Spisak2024}. 
+
+Vektor $\mathbf{z}_u \in \mathbb{R}^k$ tvoří tzv. \textit{rozpletenou reprezentaci} profilu. Každý nenulový prvek (neuron) tohoto vektoru (tzv. \textit{knob}) kóduje jednu izolovanou sémantickou vlastnost \cite{Wang2021}. Následná rekonstrukce původního hustého vektoru probíhá pomocí dekodéru SAE:
+\begin{equation}
+    \mathbf{\hat{y}}_u = \mathbf{W}_{dec}\mathbf{z}_u + \mathbf{b}_{dec}
+\end{equation}
+
+Trénování vnořeného SAE modulu minimalizuje chybu rekonstrukce hustého vektoru doplněnou o penalizaci řídkosti:
+\begin{equation}
+    \mathcal{L}_{SAE} = \frac{1}{|\mathcal{U}|} \sum_{u \in \mathcal{U}} ||\mathbf{y}_u - \mathbf{\hat{y}}_u||_2^2 + \lambda ||\mathbf{z}_u||_1
+\end{equation}
+Alternativně, v případě modelů optimalizovaných na kosinovou podobnost (např. ELSA), lze L2 ztrátu nahradit maximalizací $\cos(\mathbf{y}_u, \mathbf{\hat{y}}_u)$ \cite{Spisak2024}. Predikce finálních skóre pro doporučení je následně získána aplikací původního CFAE dekodéru na zrekonstruovaný vektor: $\mathbf{\hat{x}}_u = D_c(\mathbf{\hat{y}}_u)$.
+
+\section{Vysvětlitelnost modelu}
+\label{sec:vysvetlitelnost}
+
+Extrahovaný řídký vektor $\mathbf{z}_u$ tvoří matematický základ pro vysvětlitelnost, nicméně jednotlivým dimenzím (neuronům) je nutné přiřadit lidsky srozumitelný význam.
+
+\subsection{Sémantické mapování (Labeling) řídkých faktorů}
+Pro pojmenování faktorů (\textit{labeling}) využijeme matici metadat položek (POI). Nechť $\mathcal{T}$ je množina všech dostupných tagů a kategorií (např. \textit{historie}, \textit{park}, \textit{kavárna}). Každý neuron v prostoru $\mathbb{R}^k$ se aktivuje pro specifickou podmnožinu bodů zájmu. Hodnotíme korelaci (nebo TF-IDF skóre) mezi aktivacemi daného neuronu a výskytem konkrétního tagu $t \in \mathcal{T}$ u těchto položek.
+
+S využitím informační teorie \cite{Wang2021} můžeme mapování formalizovat pomocí zhodnocení entropie $H$ a Kullback-Leiblerovy divergence ($D_{KL}$). Tag, který vykazuje nejvyšší $D_{KL}$ vůči průměrnému rozdělení aktivací a zároveň dostatečně nízkou entropii (je vysoce specifický), je přiřazen k danému neuronu. Každý "knob" $n \in \{1, \dots, k\}$ tak získá svou sémantickou textovou reprezentaci (např. $label(n) = \text{,,Italská kuchyně``}$).
+
+\subsection{Generování vysvětlení}
+Systém u každé navrhované položky identifikuje, které neurony $n$ ze zredukované množiny (kde $\mathbf{z}_{u,n} > 0$) přispěly největší měrou k finálnímu predikčnímu skóre $\mathbf{\hat{x}}_{u,i}$. Uživatel tak vidí důvody vyjádřené tagy odpovídajícími nejvíce aktivním sémantickým dimenzím (např. \textit{„Tato lokace vám byla doporučena na základě vaší afinity k vlastnostem [Park] a [Klidné prostředí]“}).
+
+\section{Ovládání a úprava preferencí (Steering)}
+\label{sec:ovladani}
+
+Možnost řízení doporučení je implementována formou přímé manipulace s hodnotami vektoru $\mathbf{z}_u$ v latentním prostoru, inspirováno přístupem navrženým v \cite{Wang2021}.
+
+\subsection{Matematický model steeringu}
+V uživatelském rozhraní má uživatel k dispozici posuvníky představující sémanticky pojmenované neurony, s nimiž může interagovat. Nechť $\mathbf{z}_u$ představuje aktuální, na jednotkovou sumu normalizovanou, řídkou reprezentaci uživatele (jeho profil). Pokud uživatel vyjádří záměr posílit zájem o konkrétní tag $t$ odpovídající neuronu $n$, zkonstruujeme modifikovaný preferenční vektor $\mathbf{z}'_u$ pomocí interpolace:
+\begin{equation}
+    \mathbf{z}'_u = \alpha \mathbf{z}_u + (1-\alpha)\mathbf{\beta}_n
+\end{equation}
+kde $\mathbf{\beta}_n \in \mathbb{R}^k$ je tzv. \textit{one-hot} kódovaný vektor, který má na pozici neuronu $n$ hodnotu 1 a všude jinde 0. Parametr $\alpha \in [1]$ vyjadřuje sílu původního profilu vůči nově vynucené preferenci. Například pro $\alpha = 0.8$ si uživatel zachová většinu svých původních zvyklostí, ale systém významně dodatečně penalizuje či odměňuje položky související s vybraným aspektem \cite{Wang2021}.
+
+\subsection{Aktualizace doporučení}
+Tento modifikovaný řídký vektor $\mathbf{z}'_u$ je následně bez nutnosti přetrénování modelu rovnou propuštěn skrz dekodéry:
+\begin{equation}
+    \mathbf{\hat{x}}'_u = D_c(\mathbf{W}_{dec}\mathbf{z}'_u + \mathbf{b}_{dec})
+\end{equation}
+Tím dojde k dynamickému a výpočetně velmi levnému přepočítání doporučovacích skóre pro všechny body zájmu. Výsledkem je nový seznam POI s aktualizovaným pořadím, který okamžitě vizuálně reflektuje uživatelův řídící záměr.
+
+\section{Očekávané přínosy}
+\label{sec:ocekavane_prinosy}
+Zavedením rigorózního oddělení kolaborativních signálů (v $\mathbf{y}_u$) od sémantických dimenzí (v $\mathbf{z}_u$) bude dosaženo architektonické modularity. Model nejenže překlene propast mezi přesnými \textit{black-box} přístupy a pochopitelnými heuristikami, ale díky formálně definovanému mechanismu \textit{steeringu} umožní provádět \textit{what-if} scénáře v latentním prostoru v reálném čase.

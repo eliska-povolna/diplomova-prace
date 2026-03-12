@@ -1,0 +1,62 @@
+\chapter{Související práce}
+\label{chap:related_work}
+
+Tato kapitola představuje rešerši současného stavu poznání v oblastech, které se dotýkají zaměření této diplomové práce. Postupně jsou představeny existující přístupy k vysvětlitelnosti doporučovacích systémů, metody pro rozpletení latentních reprezentací (disentanglement), interaktivní a ovladatelné systémy a specifika doporučování v doméně bodů zájmu (POI). Následně je diskutován aktuální trend zapojení velkých jazykových modelů (LLM). V závěru kapitoly jsou tyto proudy syntetizovány a je identifikována výzkumná mezera, kterou se tato práce snaží zaplnit.
+
+\section{Explainable recommendation systems}
+\label{sec:related_xai}
+
+Výzkum v oblasti vysvětlitelných doporučovacích systémů (Explainable Recommendation Systems, XAI-Rec) zaznamenal v posledních letech značný nárůst, což dokládají rozsáhlé přehledové studie \cite{ZhangChen2020, Chen2022}. Cílem těchto systémů je nejen poskytnout uživateli relevantní položku, ale také srozumitelně objasnit důvody, které k tomuto doporučení vedly. V literatuře se tyto přístupy zpravidla dělí do dvou hlavních kategorií: modely se zabudovanou vysvětlitelností (model-based) a metody aplikované dodatečně (post-hoc) \cite{Abusitta2024}.
+
+\subsection{Model-based explainability}
+Model-based (často označované jako ,,white-box``) přístupy začleňují mechanismus vysvětlování přímo do architektury doporučovacího algoritmu \cite{ZhangChen2020}. Tyto systémy jsou z podstaty transparentní, neboť cesta od vstupu k predikci je přímo sledovatelná. Příkladem jsou modely využívající mechanismy pozornosti (attention mechanisms), které se dokážou zaměřit na specifické vlastnosti nebo části uživatelských recenzí a na jejich základě konstruovat jak predikci, tak samotné vysvětlení \cite{Chen2022}. Nevýhodou těchto systémů však může být jejich vyšší výpočetní náročnost a někdy nižší prediktivní přesnost oproti vysoce komplexním ,,black-box`` modelům.
+
+\subsection{Post-hoc explainability}
+Post-hoc vysvětlitelnost zachovává stávající (často neprůhledné) doporučovací modely typu ,,black-box`` v jejich původní podobě a mechanismus vysvětlování nad nimi buduje jako oddělenou vrstvu \cite{Abusitta2024}. Tyto modely typicky analyzují vstupy a výstupy algoritmu a zpětně odhadují příčiny doporučení. 
+
+V kontextu lokačních dat je významným zástupcem tohoto přístupu model ReEL (\textit{Review-Aware Explanation of Location Recommendation}) \cite{Baral2018}. Tento systém extrahuje z textových recenzí uživatelů konkrétní aspekty (např. kvalita jídla, obsluha, cena) a jejich sentiment. Následně formuje uživatelské preference jako bipartitní graf (uživatel-aspekt a místo-aspekt) a pomocí dolování hustých podgrafů dokáže vygenerovat doporučení doprovázené vysvětlením, které reflektuje specifické priority daného uživatele \cite{Baral2018}.
+
+
+\section{Disentangled representations}
+\label{sec:related_disentanglement}
+
+Tradiční modely založené na hlubokém učení sice dosahují vysoké přesnosti, ale vytvářejí husté a propletené (\textit{entangled}) reprezentace, ve kterých jedna dimenze vektoru ovlivňuje mnoho nesouvisejících vlastností položky. K řešení tohoto problému slouží metody, které tvoří tzv. rozpletené reprezentace (\textit{disentangled representations}).
+
+\subsection{VAE a další přístupy}
+Významnou rodinu modelů pro kolaborativní filtrování tvoří autoenkodéry. Modely jako MultVAE \cite{Spisak2024} využívají variační autoenkodéry k modelování komplexních distribucí dat přes pravděpodobnostní latentní prostor. Oblíbené jsou rovněž lineární autoenkodéry, reprezentované například modelem ELSA (\textit{Scalable Linear Shallow Autoencoder}) \cite{Spisak2024}. Modely jako ELSA poskytují velmi konkurenceschopný výkon a škálovatelnost, přestože jsou jejich husté vnitřní vrstvy stále obtížně interpretovatelné z pohledu koncového uživatele.
+
+\subsection{From Knots to Knobs a řídké autoenkodéry}
+Zásadní posun v interpretovatelnosti kolaborativního filtrování přinesl přístup představený v práci \textit{From Knots to Knobs} \cite{Wang2021}, který se zaměřuje na rozpletení latentních prostorů na sémanticky nezávislé koncepty. Jak ve svém nedávném výzkumu ukazují Spišák et al. \cite{Spisak2024}, implementace řídkých autoenkodérů (SAE) do procesu kolaborativního filtrování dokáže nečitelné vnitřní stavy rozplést na samostatné monosémantické rysy. Tyto sémanticky čisté komponenty se mohou přímo mapovat na známé tagy či metadata, čímž vznikají transparentní ovládací prvky (tzv. \textit{knobs}), které mohou uživatelé pochopit a modifikovat \cite{Wang2021}.
+
+\subsection{Sémantické mapování pomocí LLM (Autointerpretability)}
+Zatímco tradiční modely vyžadují pro mapování vnitřních stavů statistické metody nad metadaty (např. TF-IDF), moderní výzkum v oblasti mechanistické interpretability začíná k tzv. auto-interpretaci neuronů využívat velké jazykové modely (LLM) \cite{Bills2023}. LLM dokáže analyzovat texty či položky spojené s nejsilnějšími aktivacemi konkrétního neuronu a na základě svých znalostí vyvodit zastřešující sémantický koncept \cite{ONeill2024}. Integrace LLM tak představuje vysoce efektivní způsob, jak extrahovaným řídkým rysům přiřadit lidsky srozumitelné štítky.
+
+\section{Interaktivní a ovladatelné recommender systémy}
+\label{sec:related_interactive}
+
+Možnost uživatele aktivně zasahovat do doporučovacího procesu je klíčová pro zvýšení důvěry v systém a celkovou spokojenost. Interaktivní a ovladatelné systémy (tzv. \textit{steerable systems}) poskytují uživatelům nástroje k úpravě jejich profilů v reálném čase \cite{Ooge2023}.
+
+\subsection{TasteWeights a příbuzné koncepty}
+Typickým zástupcem vizuálně interaktivního hybridního systému je TasteWeights \cite{Bostandjiev2012}. Tento systém umožňuje uživatelům na úrovni grafického rozhraní dynamicky upravovat váhy různých preferencí (např. interpretů nebo žánrů) a okamžitě sledovat dopad těchto změn na finální seznam doporučení \cite{Bostandjiev2012}. Zviditelnění vlivu uživatelské kontroly napomáhá uživatelům lépe pochopit logiku na pozadí a zvyšuje jejich ochotu systém používat \cite{Ooge2023}.
+
+\subsection{User-controllable personalization}
+Vedle interakce s konkrétními položkami se objevují i přístupy umožňující ovládat přímo zdroje doporučení. Příkladem je práce Parry a Brusilovskyho zaměřená na uživatelsky řízenou personalizaci pomocí systému SetFusion \cite{ParraBrusilovsky2015}. V tomto případě uživatelé pomocí sady ovládacích prvků přímo regulují, nakolik má systém čerpat z kolaborativního filtrování, z obsahové analýzy či jiných zdrojů. Tento explicitní způsob kontroly posiluje uživatelskou autonomii a redukuje frustraci z nežádoucích či nepřesných doporučení.
+\section{Doporučování POI}
+\label{sec:related_poi}
+
+Doporučování bodů zájmu (POI -- \textit{Points of Interest}) je specifickou podoblastí, která se liší silnou závislostí na prostorovém a časovém kontextu (např. vzdálenost mezi lokacemi, denní doba) \cite{Zeng2025}. 
+
+\subsection{Časoprostorové a sekvenční modely}
+Moderní přístupy pro tzv. \textit{Next POI Recommendation} (doporučování dalšího bodu zájmu) využívají sofistikované metody hlubokého učení, včetně rekurentních neuronových sítí (RNN) nebo grafových sítí (GNN) k extrakci prostorově-časových vzorců \cite{Zeng2025}. Většina těchto hybridních metod je však orientována primárně na zlepšení objektivních metrik a uživateli nenabízí srozumitelná vysvětlení ani mechanismy pro přímé interaktivní řízení svých časoprostorových preferencí.
+
+\subsection{Řešení sémantické řídkosti pomocí LLM (Pseudo-profily)}
+Zásadním problémem v doméně POI je, že často chybí bohaté textové recenze nebo detailní sémantické popisy míst, z nichž by bylo možné snadno generovat interpretovatelná vysvětlení. Pokusem o řešení tohoto problému jsou nedávné přístupy jako model \textit{CrossDR-Gen} \cite{Zeng2025}, které zkoumají rozpletené reprezentace napříč geografickými a časovými faktory za pomoci LLM. 
+
+V situacích s nedostatkem explicitních dat o uživateli využívají LLM k těžbě tzv. pseudo-profilů. Na základě historie navštívených kategorií míst dokáže LLM logicky vyvodit zájmy a osobnost uživatele \cite{Zeng2025}. Takto obohacené profily pak slouží nejen ke zpřesnění doporučování, ale zároveň umožňují generování kvalitních a vysoce personalizovaných vysvětlení v přirozeném jazyce, což přímo posiluje transparentnost celého procesu \cite{Hasan2025}.
+
+\section{Shrnutí}
+\label{sec:related_summary}
+
+Z provedené rešerše literatury vyplývá, že ačkoliv jednotlivé oblasti zažívají rychlý vývoj, existuje zřejmá výzkumná mezera na jejich pomezí. Na jedné straně interaktivní systémy jako TasteWeights umožňují uživatelům měnit své preference a modely jako ReEL přinášejí vysvětlení pro doménu POI. Na straně druhé, moderní metody využívající řídké autoenkodéry (SAE) pro tvorbu rozpletených reprezentací a jejich interpretaci pomocí LLM jsou primárně zkoumány v tradičním kolaborativním filtrování, zpracování přirozeného jazyka nebo e-commerce.
+
+Navzdory těmto pokrokům \textbf{zatím nebyl dostatečně prozkoumán přístup, který by propojoval inherentní rozpletení latentních reprezentací pomocí SAE, plynulé interaktivní uživatelské ovládání (steering) a sémantickou syntézu pomocí LLM přímo v kontextu specifik doporučování volnočasových aktivit (POI)}. Předkládaná diplomová práce se proto zaměřuje přesně na průnik těchto oblastí a navrhuje architekturu, která z neprůhledných latentních modelů vytvoří systém plně transparentní a řiditelný samotným uživatelem.
