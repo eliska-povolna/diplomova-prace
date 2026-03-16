@@ -1,0 +1,124 @@
+name: Manage GitHub Project
+
+on:
+  issues:
+    types:
+      - opened
+      - reopened
+      - closed
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - closed
+      - ready_for_review
+
+jobs:
+  add-to-project:
+    name: Add issue or PR to project
+    runs-on: ubuntu-latest
+    if: github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'ready_for_review'
+    permissions: {}
+    steps:
+      - uses: actions/add-to-project@v1.0.2
+        with:
+          project-url: ${{ vars.PROJECT_URL }}
+          github-token: ${{ secrets.ADD_TO_PROJECT_PAT }}
+
+  update-project-status:
+    name: Update project item status on close
+    runs-on: ubuntu-latest
+    if: github.event.action == 'closed'
+    permissions: {}
+    steps:
+      - name: Move closed item to Done
+        env:
+          GH_TOKEN: ${{ secrets.ADD_TO_PROJECT_PAT }}
+          PROJECT_URL: ${{ vars.PROJECT_URL }}
+        run: |
+          # Extract the project number and owner from the PROJECT_URL
+          # Expected format: https://github.com/users/OWNER/projects/NUMBER
+          #                or https://github.com/orgs/OWNER/projects/NUMBER
+          PROJECT_NUMBER=$(echo "$PROJECT_URL" | sed 's|.*/projects/||')
+          OWNER=$(echo "$PROJECT_URL" | sed 's|https://github.com/||; s|/projects/.*||; s|^[^/]*/||')
+          ORG_OR_USER=$(echo "$PROJECT_URL" | sed 's|https://github.com/||; s|/.*||')
+
+          if [ -z "$PROJECT_NUMBER" ] || [ -z "$OWNER" ]; then
+            echo "Could not parse PROJECT_URL: $PROJECT_URL"
+            exit 1
+          fi
+
+          # Determine the item node ID (issue or PR)
+          ITEM_NODE_ID="${{ github.event.issue.node_id }}${{ github.event.pull_request.node_id }}"
+          if [ -z "$ITEM_NODE_ID" ]; then
+            echo "Could not determine item node ID. Neither issue nor pull_request node_id is set."
+            exit 1
+          fi
+
+          # Fetch the project node ID (try user first, then org)
+          if [ "$ORG_OR_USER" = "orgs" ]; then
+            PROJECT_ID=$(gh api graphql -f query="{ organization(login: \"$OWNER\") { projectV2(number: $PROJECT_NUMBER) { id } } }" \
+              --jq ".data.organization.projectV2.id" 2>/dev/null)
+          else
+            PROJECT_ID=$(gh api graphql -f query="{ user(login: \"$OWNER\") { projectV2(number: $PROJECT_NUMBER) { id } } }" \
+              --jq ".data.user.projectV2.id" 2>/dev/null)
+          fi
+
+          if [ -z "$PROJECT_ID" ]; then
+            echo "Could not retrieve project ID. Skipping status update."
+            exit 0
+          fi
+
+          # Add the item to the project (idempotent) and get its project-item ID
+          PROJECT_ITEM_ID=$(gh api graphql -f query="
+            mutation {
+              addProjectV2ItemById(input: {projectId: \"$PROJECT_ID\", contentId: \"$ITEM_NODE_ID\"}) {
+                item { id }
+              }
+            }" --jq '.data.addProjectV2ItemById.item.id')
+
+          if [ -z "$PROJECT_ITEM_ID" ]; then
+            echo "Could not add/find item in project. Skipping status update."
+            exit 0
+          fi
+
+          # Find the Status field and the "Done" option
+          STATUS_FIELD=$(gh api graphql -f query="
+            {
+              node(id: \"$PROJECT_ID\") {
+                ... on ProjectV2 {
+                  fields(first: 20) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }" --jq '.data.node.fields.nodes[] | select(.name == "Status")')
+
+          FIELD_ID=$(echo "$STATUS_FIELD" | jq -r '.id')
+          DONE_OPTION_ID=$(echo "$STATUS_FIELD" | jq -r '.options[] | select(.name == "Done") | .id')
+
+          if [ -z "$FIELD_ID" ] || [ -z "$DONE_OPTION_ID" ]; then
+            echo "Could not find Status field or Done option. Skipping status update."
+            exit 0
+          fi
+
+          # Update the item status to Done
+          gh api graphql -f query="
+            mutation {
+              updateProjectV2ItemFieldValue(input: {
+                projectId: \"$PROJECT_ID\",
+                itemId: \"$PROJECT_ITEM_ID\",
+                fieldId: \"$FIELD_ID\",
+                value: { singleSelectOptionId: \"$DONE_OPTION_ID\" }
+              }) {
+                projectV2Item { id }
+              }
+            }"
+
+          echo "Successfully moved item to Done in project."
