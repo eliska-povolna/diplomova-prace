@@ -2,7 +2,7 @@
 
 ## Úvod
 
-Toto je šablona pro sazbu bakalářských, diplomových, disertačních
+Toto je šablona pro sazbu bakalářských, diplomových, dizertačních
 a rigorozních prací na MFF UK v LaTeXu.
 
 Povinné náležitosti úpravy závěrečných prací jsou dány opatřeními děkana
