@@ -101,6 +101,59 @@ def build_csr(
     )
 
 
+def apply_kcore_filtering(csr: csr_matrix, k: int = 5, max_iterations: int = 10) -> csr_matrix:
+    """Apply k-core filtering to a CSR matrix.
+    
+    Removes users and items with fewer than k interactions iteratively
+    until the matrix converges (no rows or columns can be removed).
+    
+    Parameters
+    ----------
+    csr:
+        Sparse CSR user-item interaction matrix.
+    k:
+        Minimum number of interactions required per user and per item.
+    max_iterations:
+        Maximum iterations to prevent infinite loops.
+    
+    Returns
+    -------
+    csr_matrix
+        Filtered CSR matrix with users and items having >= k interactions.
+    """
+    mat = csr.copy()
+    
+    for iteration in range(max_iterations):
+        old_nnz = mat.nnz
+        
+        # Remove users (rows) with fewer than k interactions
+        row_nnz = np.diff(mat.indptr)
+        keep_rows = row_nnz >= k
+        mat = mat[keep_rows]
+        
+        # Remove items (columns) with fewer than k interactions
+        col_nnz = np.diff(mat.tocsc().indptr)
+        keep_cols = col_nnz >= k
+        mat = mat[:, keep_cols]
+        
+        # Convert to CSR for next iteration
+        mat = mat.tocsr()
+        
+        logger.info(
+            "K-core (k=%d, iter=%d): %d interactions (removed %d)",
+            k, iteration + 1, mat.nnz, old_nnz - mat.nnz
+        )
+        
+        # Check for convergence
+        if mat.nnz == old_nnz:
+            logger.info("K-core filtering converged after %d iterations", iteration + 1)
+            break
+    
+    logger.info("Final k-core result: %d users × %d items, %d interactions",
+                mat.shape[0], mat.shape[1], mat.nnz)
+    return mat
+
+
 # ── Persistence ───────────────────────────────────────────────────────────
 
 def save_dataset(maps: DatasetMaps, out_dir: str | Path) -> None:
