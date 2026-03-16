@@ -30,7 +30,9 @@ jobs:
           root_file: thesis/thesis.tex
           latexmk_use_xelatex: false
           latexmk_shell_escape: false
-          args: -pdf -file-line-error -halt-on-error -interaction=nonstopmode
+          # -cd tells latexmk to change to the root file's directory before
+          # running pdflatex, so \input{metadata.tex} etc. resolve correctly
+          args: -pdf -cd -file-line-error -halt-on-error -interaction=nonstopmode
 
       - name: Upload compiled PDF
         uses: actions/upload-artifact@v4

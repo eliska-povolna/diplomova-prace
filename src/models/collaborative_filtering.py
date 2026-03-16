@@ -23,7 +23,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # Default latent dimension used throughout the codebase
 LATENT_DIM: int = 512
 

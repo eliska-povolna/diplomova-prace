@@ -1,10 +1,10 @@
 """Tests for src.models.collaborative_filtering (ELSA)."""
 
-import torch
-import pytest
-
-from src.models.collaborative_filtering import ELSA, NMSELoss, recall_at_k, ndcg_at_k
 import numpy as np
+import pytest
+import torch
+
+from src.models.collaborative_filtering import ELSA, NMSELoss, ndcg_at_k, recall_at_k
 
 
 @pytest.fixture

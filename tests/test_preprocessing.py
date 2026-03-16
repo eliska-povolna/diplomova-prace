@@ -6,10 +6,10 @@ import pandas as pd
 import pytest
 
 from src.data.preprocessing import (
-    build_id_map,
-    build_csr,
-    user_train_val_split,
     DatasetMaps,
+    build_csr,
+    build_id_map,
+    user_train_val_split,
 )
 
 

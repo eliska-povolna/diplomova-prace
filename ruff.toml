@@ -1,0 +1,11 @@
+# Ruff configuration for the SAE-CF POI recommender project.
+# The yelp_initial_exploration directory contains ad-hoc exploratory scripts
+# and notebooks that are not held to the same style standard as the main code.
+exclude = [
+    "src/yelp_initial_exploration",
+]
+
+line-length = 99
+
+[lint]
+select = ["E", "F", "W", "I"]
