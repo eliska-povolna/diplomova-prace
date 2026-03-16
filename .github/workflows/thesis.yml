@@ -1,0 +1,45 @@
+name: Compile LaTeX Thesis
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "thesis/**"
+      - ".github/workflows/thesis.yml"
+  pull_request:
+    paths:
+      - "thesis/**"
+      - ".github/workflows/thesis.yml"
+  # Allow manual trigger from the GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  build-pdf:
+    name: Build thesis PDF
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compile thesis (thesis.tex via latexmk)
+        uses: xu-cheng/latex-action@v3
+        with:
+          # thesis/thesis.tex is the main file of the MFF UK template
+          root_file: thesis/thesis.tex
+          latexmk_use_xelatex: false
+          latexmk_shell_escape: false
+          # -cd tells latexmk to change to the root file's directory before
+          # running pdflatex, so \input{metadata.tex} etc. resolve correctly
+          args: -pdf -cd -file-line-error -halt-on-error -interaction=nonstopmode
+
+      - name: Upload compiled PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: thesis-pdf
+          path: thesis/thesis.pdf
+          if-no-files-found: error
+          retention-days: 90
+
