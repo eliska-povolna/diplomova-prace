@@ -140,7 +140,17 @@ class ELSASAEModel(nn.Module):
 
         if feature_overrides:
             h = h.clone()
+            sae_hidden_dim = h.size(1)
             for feat_idx, value in feature_overrides.items():
+                if not isinstance(feat_idx, int):
+                    raise ValueError(
+                        f"feature_overrides keys must be integers, got {type(feat_idx).__name__!r}"
+                    )
+                if feat_idx < 0 or feat_idx >= sae_hidden_dim:
+                    raise ValueError(
+                        f"feature_overrides index {feat_idx} is out of bounds for SAE hidden "
+                        f"dimension {sae_hidden_dim}; valid indices are in [0, {sae_hidden_dim})."
+                    )
                 h[:, feat_idx] = value
 
         z_steered = self.sae.decode(h)

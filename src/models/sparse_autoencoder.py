@@ -44,6 +44,18 @@ def topk_mask(x: torch.Tensor, k: int) -> torch.Tensor:
     torch.Tensor
         Binary mask of shape ``(batch, hidden_dim)``.
     """
+    # Validate k to avoid runtime errors from torch.topk, which requires
+    # 1 <= k <= x.shape[1].
+    if not isinstance(k, int):
+        raise TypeError(f"topk_mask: k must be an int, got {type(k).__name__}.")
+    if k <= 0:
+        raise ValueError(f"topk_mask: k must be positive, got {k}.")
+    hidden_dim = x.shape[1]
+    if k > hidden_dim:
+        raise ValueError(
+            f"topk_mask: k ({k}) cannot be greater than hidden dimension ({hidden_dim})."
+        )
+
     _, idx = torch.topk(x.abs(), k, dim=1)
     return torch.zeros_like(x).scatter(1, idx, 1.0)
 

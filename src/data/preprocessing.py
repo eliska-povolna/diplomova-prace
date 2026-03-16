@@ -74,6 +74,11 @@ def build_csr(
     """
     df = interactions[[user_col, item_col]].drop_duplicates()
 
+    if df.empty:
+        logger.info("No interactions after deduplication; returning empty CSR.")
+        empty_mat = csr_matrix((0, 0), dtype=np.float32)
+        return DatasetMaps(user_map={}, item_map={}, csr=empty_mat)
+
     uid_map = build_id_map(df[user_col])
     iid_map = build_id_map(df[item_col])
 

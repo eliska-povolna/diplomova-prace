@@ -48,12 +48,13 @@ class TestTopKSAE:
         assert h_pre.shape == (8, 64)
 
     def test_sparse_code_has_exactly_k_nonzeros(self, sae: TopKSAE) -> None:
-        # With random inputs of dim > k, exactly k features should be active
+        # With random inputs of dim > k, the TopK mask should select exactly k positions
         torch.manual_seed(0)
         x = torch.randn(8, 16)
-        _, h_sparse, _ = sae(x)
-        nonzeros_per_row = (h_sparse != 0).sum(dim=1)
-        assert (nonzeros_per_row == sae.k).all()
+        _, _, h_pre = sae(x)
+        mask = topk_mask(h_pre, sae.k)
+        ones_per_row = mask.sum(dim=1)
+        assert (ones_per_row == sae.k).all()
 
     def test_sparse_code_has_at_most_k_nonzeros(self, sae: TopKSAE) -> None:
         x = torch.randn(8, 16)

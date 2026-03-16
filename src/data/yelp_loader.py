@@ -71,26 +71,29 @@ def load_businesses(
     pd.DataFrame
     """
     parquet_dir = Path(parquet_dir)
-    glob = str(parquet_dir / "business" / "state=*" / "*.parquet")
+    # Use POSIX-style paths for DuckDB and escape single quotes for SQL safety
+    glob = (parquet_dir / "business" / "state=*" / "*.parquet").as_posix().replace("'", "''")
 
     con = connect(db_path)
+    try:
+        # Build the base query with a positional parameter for min_review_count
+        where_clauses = ["review_count >= $1"]
+        params: list = [int(min_review_count)]
 
-    # Build the base query with a positional parameter for min_review_count
-    where_clauses = ["review_count >= $1"]
-    params: list = [int(min_review_count)]
+        if state_filter is not None:
+            # Use a second positional parameter to avoid any string injection
+            where_clauses.append("state = $2")
+            params.append(str(state_filter))
 
-    if state_filter is not None:
-        # Use a second positional parameter to avoid any string injection
-        where_clauses.append("state = $2")
-        params.append(str(state_filter))
-
-    where_sql = " AND ".join(where_clauses)
-    df = con.execute(
-        f"SELECT * FROM read_parquet('{glob}') WHERE {where_sql}",
-        params,
-    ).fetchdf()
-    logger.info("Loaded %d businesses from %s", len(df), parquet_dir)
-    return df
+        where_sql = " AND ".join(where_clauses)
+        df = con.execute(
+            f"SELECT * FROM read_parquet('{glob}') WHERE {where_sql}",
+            params,
+        ).fetchdf()
+        logger.info("Loaded %d businesses from %s", len(df), parquet_dir)
+        return df
+    finally:
+        con.close()
 
 
 def load_reviews(
@@ -146,18 +149,29 @@ def load_reviews(
         param_idx += 1
 
     where_sql = " AND ".join(where)
-    df = con.execute(
-        f"""
-        SELECT user_id, business_id,
-               epoch_ms(CAST(date AS TIMESTAMP)) AS ts, 1 AS implicit
-        FROM read_parquet('{review_glob}')
-        WHERE {where_sql}
-        """,
-        params,
-    ).fetchdf()
 
+    # Optionally restrict to a specific set of business_ids inside DuckDB
     if business_ids is not None:
-        df = df[df["business_id"].isin(business_ids)].reset_index(drop=True)
+        business_filter_df = pd.DataFrame({"business_id": list(business_ids)})
+        con.register("business_filter", business_filter_df)
+        join_clause = "JOIN business_filter USING (business_id)"
+    else:
+        join_clause = ""
+
+    query = f"""
+        SELECT user_id,
+               business_id,
+               epoch_ms(CAST(date AS TIMESTAMP)) AS ts,
+               1 AS implicit
+        FROM read_parquet('{review_glob}')
+        {join_clause}
+        WHERE {where_sql}
+    """
+
+    try:
+        df = con.execute(query, params).fetchdf()
+    finally:
+        con.close()
 
     logger.info("Loaded %d reviews from %s", len(df), parquet_dir)
     return df

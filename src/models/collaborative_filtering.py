@@ -47,7 +47,7 @@ class ELSA(nn.Module):
 
     @property
     def _A_norm(self) -> torch.Tensor:
-        """Return column-normalised item factor matrix (cached per forward call)."""
+        """Return the column-normalised item factor matrix."""
         return F.normalize(self.A, dim=-1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -68,13 +68,14 @@ class ELSA(nn.Module):
         return z @ A.T
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """Produce L2-normalised latent vectors.
+        """Produce L2-normalised latent vectors from dense inputs.
 
         Parameters
         ----------
         x:
-            Dense interaction vectors of shape ``(batch, n_items)`` or
-            a sparse CSR matrix chunk.
+            Dense interaction vectors of shape ``(batch, n_items)`` as a
+            :class:`torch.Tensor`. For SciPy CSR inputs, use
+            :meth:`encode_csr_chunked` instead.
 
         Returns
         -------
