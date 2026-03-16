@@ -2,6 +2,7 @@ name: Compile LaTeX Thesis
 
 on:
   push:
+    branches: [main]
     paths:
       - "thesis/**"
       - ".github/workflows/thesis.yml"
