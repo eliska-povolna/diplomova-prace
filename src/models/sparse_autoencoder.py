@@ -8,12 +8,13 @@ Architecture
 
 Loss
 ----
-    L = cosine_reconstruction_loss(x̂, x) + λ · mean(|h_sparse|)
+    L = MSE_reconstruction(x̂, x) + λ · mean(|h_sparse|)
 
-where ``h_sparse`` has at most ``k`` non-zero entries per sample.
+where ``x̂`` is the reconstructed latent vector and ``h_sparse`` has at most ``k`` non-zero entries per sample.
 
-This matches the implementation in
-``src/yelp_initial_exploration/train_sae.py``.
+CRITICAL: Uses MSE loss (not cosine similarity) to ensure both direction AND magnitude
+are preserved during reconstruction. This aligns the latent-space training objective
+with the item-space evaluation metric (recommendation ranking quality).
 
 Reference
 ---------
@@ -135,7 +136,10 @@ class TopKSAE(nn.Module):
         return self.dec(h_sparse)
 
     def loss(self, x: torch.Tensor) -> torch.Tensor:
-        """Compute combined cosine reconstruction + L1 sparsity loss.
+        """Compute combined MSE reconstruction + L1 sparsity loss.
+        
+        CRITICAL FIX: Changed from cosine similarity to MSE in original space.
+        Cosine loss in latent space doesn't reflect reconstruction quality in item space.
 
         Parameters
         ----------
@@ -148,7 +152,8 @@ class TopKSAE(nn.Module):
             Scalar loss.
         """
         recon, h_sparse, _ = self(x)
-        rec_loss = cosine_recon(recon, x)
+        # Use MSE which preserves both direction AND magnitude
+        rec_loss = F.mse_loss(recon, x)
         l1_loss = self.l1_coef * h_sparse.abs().mean()
         return rec_loss + l1_loss
 
@@ -157,10 +162,4 @@ class TopKSAE(nn.Module):
         """Return the configured TopK sparsity level."""
         return self.k
 
-
-def cosine_recon(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Negative cosine similarity loss (scalar)."""
-    pred_n = F.normalize(pred, dim=-1)
-    target_n = F.normalize(target, dim=-1)
-    return 1.0 - F.cosine_similarity(pred_n, target_n, dim=-1).mean()
 

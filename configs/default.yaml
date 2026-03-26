@@ -8,7 +8,7 @@ data:
   parquet_dir: "../../Yelp-JSON/yelp_parquet"
   db_path: "../../Yelp-JSON/yelp.duckdb"
   state_filter: "CA"                    # Set to null for full dataset, "CA" for quick test
-  min_review_count: 5
+  min_review_count: 20
   pos_threshold: 4.0                    # Stars >= threshold for positive
   year_min: null                        # Optional year range filters
   year_max: null
