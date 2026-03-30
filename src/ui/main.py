@@ -16,8 +16,7 @@ import yaml
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ st.set_page_config(
     page_title="POI Recommender — Sparse Features",
     page_icon="🗺️",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
 # Load config
@@ -49,26 +48,26 @@ try:
         load_labeling_service,
         init_session_state,
     )
-    
+
     # Initialize session state first
     init_session_state()
-    
+
     # Load services (cached across page refreshes)
     logger.info("Initializing services...")
     with st.spinner("Loading models..."):
         inference = load_inference_service(config)
-    
+
     with st.spinner("Loading POI data..."):
         data = load_data_service(config)
-    
+
     with st.spinner("Initializing labeling service..."):
         labels = load_labeling_service(config)
-    
+
     # Store in session for access from pages
     st.session_state.inference = inference
     st.session_state.data = data
     st.session_state.labels = labels
-    
+
     logger.info("✅ All services initialized")
 
 except Exception as e:
