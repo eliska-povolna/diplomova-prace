@@ -7,7 +7,7 @@ import logging
 import streamlit as st
 import yaml
 
-from src.ui.services import (
+from services import (
     InferenceService,
     DataService,
     LabelingService,

@@ -9,10 +9,14 @@ Multi-page app with 4 pages:
 """
 
 from pathlib import Path
+import sys
 import logging
 
 import streamlit as st
 import yaml
+
+# Add project root to Python path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 # Configure logging
 logging.basicConfig(
