@@ -19,16 +19,53 @@ logger = logging.getLogger(__name__)
 
 @st.cache_resource
 def load_config(config_path: Path) -> Dict:
-    """Load configuration from YAML (cached for session)."""
+    """Load configuration from YAML and flatten for UI services."""
     config_path = Path(config_path)
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     with open(config_path) as f:
-        config = yaml.safe_load(f)
+        raw_config = yaml.safe_load(f)
 
+    # Flatten nested config structure for UI services
+    config = {}
+    
+    # Data paths (from data section)
+    if "data" in raw_config:
+        config["duckdb_path"] = raw_config["data"].get("db_path", "")
+        config["parquet_dir"] = raw_config["data"].get("parquet_dir", "")
+    
+    # ELSA hyperparameters
+    if "elsa" in raw_config:
+        config["latent_dim"] = raw_config["elsa"].get("latent_dim", 512)
+        config["device"] = raw_config["elsa"].get("device", "cpu")
+    
+    # SAE hyperparameters (k = sparsity level)
+    if "sae" in raw_config:
+        config["k"] = raw_config["sae"].get("k", 32)
+        config["width_ratio"] = raw_config["sae"].get("width_ratio", 4)
+    
+    # Output & steering defaults
+    config["steering_alpha"] = 0.3  # Default steering interpolation
+    config["model_checkpoint_dir"] = raw_config.get("output", {}).get("base_dir", "outputs")
+    config["neuron_labels_path"] = "outputs/neuron_labels.json"
+    
+    # Compute n_items from parquet data
+    try:
+        import duckdb
+        import pandas as pd
+        parquet_pattern = str(Path(config["parquet_dir"]) / "business" / "**" / "*.parquet")
+        conn = duckdb.connect(":memory:")
+        result = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{parquet_pattern}')").fetchall()
+        config["n_items"] = result[0][0] if result else 50000  # Fallback estimate
+        logger.info(f"   Found {config['n_items']} items in dataset")
+    except Exception as e:
+        logger.warning(f"Could not count items from parquet: {e}. Using estimate.")
+        config["n_items"] = 50000  # Safe estimate for Yelp business data
+    
     logger.info(f"✅ Loaded config from {config_path}")
+    logger.info(f"   Device: {config['device']}, Latent dim: {config['latent_dim']}, SAE k: {config['k']}")
     return config
 
 

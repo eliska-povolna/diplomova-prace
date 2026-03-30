@@ -1,53 +1,43 @@
 ## Python dependencies for POI Recommender Streamlit UI
+## Using pre-built wheels to avoid compilation issues on Windows
 
 # ─────────────────────────────────────────────────────────────────────────
-# Core Frameworks
+# Core Frameworks (essential)
 # ─────────────────────────────────────────────────────────────────────────
 
-streamlit==1.39.0
-streamlit-folium==0.20.0
-folium==0.15.1
+streamlit>=1.28.0
+folium>=0.14.0
+plotly>=5.18.0
 
 # ─────────────────────────────────────────────────────────────────────────
-# Data Processing & ML
+# Data Processing (pre-built wheels)
 # ─────────────────────────────────────────────────────────────────────────
 
-pandas==2.2.0
-numpy==1.26.0
-torch==2.2.0
-torch-hub
-pyarrow==15.0.0
-duckdb==1.0.0
-scipy==1.12.0
+pandas>=2.0.0
+numpy>=1.24.0
+duckdb>=0.9.0
+pyarrow>=14.0.0
 
 # ─────────────────────────────────────────────────────────────────────────
-# Visualization
+# PyTorch CPU (smaller, no compilation needed)
 # ─────────────────────────────────────────────────────────────────────────
 
-plotly==5.20.0
-matplotlib==3.8.3
-seaborn==0.13.0
+torch>=2.0.0 --index-url https://download.pytorch.org/whl/cpu
 
 # ─────────────────────────────────────────────────────────────────────────
-# LLM Integration
+# Configuration & Utilities
 # ─────────────────────────────────────────────────────────────────────────
 
-google-generativeai==0.3.0
-sentence-transformers==2.3.0
+pyyaml>=6.0
+python-dotenv>=1.0
+requests>=2.31
 
 # ─────────────────────────────────────────────────────────────────────────
-# Configuration & Utils
+# Optional (add later if needed)
 # ─────────────────────────────────────────────────────────────────────────
 
-pyyaml==6.0.1
-python-dotenv==1.0.0
-requests==2.31.0
-
-# ─────────────────────────────────────────────────────────────────────────
-# Development (optional)
-# ─────────────────────────────────────────────────────────────────────────
-
-# Uncomment for development:
+# google-generativeai>=0.3.0  # LLM neuron labeling (optional)
+# sentence-transformers>=2.0.0  # Feature embeddings (optional)
 # pytest==7.4.3
 # black==24.1.1
 # flake8==7.0.0

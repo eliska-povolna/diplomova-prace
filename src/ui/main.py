@@ -29,7 +29,7 @@ st.set_page_config(
 )
 
 # Load config
-config_path = Path(__file__).parent.parent / "configs" / "default.yaml"
+config_path = Path(__file__).parent.parent.parent / "configs" / "default.yaml"
 if not config_path.exists():
     st.error(f"Config not found: {config_path}")
     st.stop()
@@ -37,7 +37,7 @@ if not config_path.exists():
 with open(config_path) as f:
     config = yaml.safe_load(f)
 
-logger.info(f"Loaded config from {config_path}")
+logger.info(f"✅ Loaded config from {config_path}")
 
 # Initialize services (via @st.cache_resource)
 try:
