@@ -1,43 +1,22 @@
-## Python dependencies for POI Recommender Streamlit UI
-## Using pre-built wheels to avoid compilation issues on Windows
+## Minimal dependencies for POI Recommender Streamlit UI
+## Using pre-built wheels to avoid compilation
 
-# ─────────────────────────────────────────────────────────────────────────
-# Core Frameworks (essential)
-# ─────────────────────────────────────────────────────────────────────────
-
+# Core UI framework
 streamlit>=1.28.0
-folium>=0.14.0
+
+# Data & visualization
 plotly>=5.18.0
+folium>=0.14.0
 
-# ─────────────────────────────────────────────────────────────────────────
-# Data Processing (pre-built wheels)
-# ─────────────────────────────────────────────────────────────────────────
-
-pandas>=2.0.0
-numpy>=1.24.0
-duckdb>=0.9.0
-pyarrow>=14.0.0
-
-# ─────────────────────────────────────────────────────────────────────────
-# PyTorch CPU (smaller, no compilation needed)
-# ─────────────────────────────────────────────────────────────────────────
-
-torch>=2.0.0 --index-url https://download.pytorch.org/whl/cpu
-
-# ─────────────────────────────────────────────────────────────────────────
-# Configuration & Utilities
-# ─────────────────────────────────────────────────────────────────────────
-
+# Configuration
 pyyaml>=6.0
 python-dotenv>=1.0
-requests>=2.31
 
-# ─────────────────────────────────────────────────────────────────────────
-# Optional (add later if needed)
-# ─────────────────────────────────────────────────────────────────────────
+# Note: numpy, pandas, torch, duckdb are already available 
+# as dependencies of the main project (src/models, src/data)
+# If you need to use the UI standalone, uncomment below:
 
-# google-generativeai>=0.3.0  # LLM neuron labeling (optional)
-# sentence-transformers>=2.0.0  # Feature embeddings (optional)
+# pip install numpy pandas duckdb torch --index-url https://download.pytorch.org/whl/cpu
 # pytest==7.4.3
 # black==24.1.1
 # flake8==7.0.0

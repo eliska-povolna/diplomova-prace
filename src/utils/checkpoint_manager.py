@@ -37,6 +37,7 @@ class CheckpointManager:
         epoch: int | None = None,
         metrics: dict[str, float] | None = None,
         name: str = "checkpoint",
+        metadata: dict[str, Any] | None = None,
     ) -> Path:
         """Save a model checkpoint.
 
@@ -52,6 +53,8 @@ class CheckpointManager:
             Dictionary of metrics to save (optional).
         name:
             Checkpoint name (default: "checkpoint").
+        metadata:
+            Dictionary of dataset/model metadata to save (e.g., n_items, latent_dim).
 
         Returns
         -------
@@ -59,11 +62,12 @@ class CheckpointManager:
             Path to the saved checkpoint.
         """
         checkpoint_path = self.checkpoint_dir / f"{name}.pt"
-        
+
         checkpoint_dict = {
             "model_state_dict": model.state_dict(),
             "epoch": epoch,
             "metrics": metrics or {},
+            "metadata": metadata or {},
         }
 
         if optimizer is not None:
@@ -71,6 +75,8 @@ class CheckpointManager:
 
         torch.save(checkpoint_dict, checkpoint_path)
         logger.info(f"Checkpoint saved to {checkpoint_path}")
+        if metadata:
+            logger.info(f"  Metadata: {metadata}")
 
         return checkpoint_path
 
@@ -109,7 +115,9 @@ class CheckpointManager:
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
 
-        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        checkpoint = torch.load(
+            checkpoint_path, map_location=device, weights_only=False
+        )
         model.load_state_dict(checkpoint["model_state_dict"])
 
         if optimizer is not None and "optimizer_state_dict" in checkpoint:
@@ -142,10 +150,10 @@ class CheckpointManager:
             Path to the saved metrics file.
         """
         metrics_path = self.checkpoint_dir / f"metrics_{split}.json"
-        
+
         with metrics_path.open("w") as f:
             json.dump(metrics, f, indent=2)
-        
+
         logger.info(f"Metrics saved to {metrics_path}")
         return metrics_path
 

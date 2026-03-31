@@ -38,14 +38,11 @@ if not config_path.exists():
     st.error(f"Config not found: {config_path}")
     st.stop()
 
-with open(config_path) as f:
-    config = yaml.safe_load(f)
-
-logger.info(f"✅ Loaded config from {config_path}")
+logger.info(f"Loading config from {config_path}")
 
 # Initialize services (via @st.cache_resource)
 try:
-    from src.ui.cache import (
+    from cache import (
         load_config,
         load_inference_service,
         load_data_service,
@@ -56,8 +53,9 @@ try:
     # Initialize session state first
     init_session_state()
 
-    # Load services (cached across page refreshes)
-    logger.info("Initializing services...")
+    # Load and flatten config
+    logger.info("Loading configuration...")
+    config = load_config(config_path)
     with st.spinner("Loading models..."):
         inference = load_inference_service(config)
 
@@ -82,11 +80,29 @@ except Exception as e:
 # Define multi-page app
 from src.ui.pages import home, results, live_demo, interpretability
 
+
+# Create function aliases with unique names for Streamlit navigation
+def show_home():
+    return home.show()
+
+
+def show_results():
+    return results.show()
+
+
+def show_live_demo():
+    return live_demo.show()
+
+
+def show_interpretability():
+    return interpretability.show()
+
+
 pages = [
-    st.Page(home.show, title="🏠 Home"),
-    st.Page(results.show, title="📊 Results"),
-    st.Page(live_demo.show, title="🎛️ Live Demo"),
-    st.Page(interpretability.show, title="🔍 Interpretability"),
+    st.Page(show_home, title="🏠 Home"),
+    st.Page(show_results, title="📊 Results"),
+    st.Page(show_live_demo, title="🎛️ Live Demo"),
+    st.Page(show_interpretability, title="🔍 Interpretability"),
 ]
 
 # Navigation

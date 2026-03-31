@@ -30,26 +30,44 @@ class DataService:
         Args:
             duckdb_path: Path to yelp.duckdb
             parquet_dir: Path to parquet data directory
-            config: Optional config dict
+            config: Optional config dict with keys:
+                - state_filter: Optional state code (e.g., "CA") to filter businesses
         """
         self.duckdb_path = Path(duckdb_path)
         self.parquet_dir = Path(parquet_dir)
         self.config = config or {}
+        self.state_filter = self.config.get(
+            "state_filter"
+        )  # CRITICAL: stored for consistency
 
         logger.info("Loading POI data...")
         self.conn = duckdb.connect(str(self.duckdb_path))
         self.pois_df = self._load_pois_dataframe()
 
-        logger.info(f"✅ Loaded {len(self.pois_df)} POIs")
+        logger.info(
+            f"✅ Loaded {len(self.pois_df)} POIs (state_filter={self.state_filter})"
+        )
 
     def _load_pois_dataframe(self) -> pd.DataFrame:
         """Load POI metadata from Parquet into memory."""
         parquet_pattern = str(self.parquet_dir / "business" / "**" / "*.parquet")
+        # DuckDB on Windows needs forward slashes in glob patterns
+        parquet_pattern = parquet_pattern.replace("\\", "/")
 
         try:
-            df = self.conn.execute(
-                f"SELECT * FROM read_parquet('{parquet_pattern}')"
-            ).df()
+            # CRITICAL: Apply state filter to match training data
+            if self.state_filter:
+                query = f"""
+                    SELECT * FROM read_parquet('{parquet_pattern}')
+                    WHERE state = '{self.state_filter}'
+                """
+                logger.debug(f"Loading POIs with filter: state = '{self.state_filter}'")
+            else:
+                query = f"SELECT * FROM read_parquet('{parquet_pattern}')"
+                logger.debug("Loading all POIs (no state filter)")
+
+            df = self.conn.execute(query).df()
+            df = df.reset_index(drop=True)  # Ensure clean 0-based indexing
             return df
         except Exception as e:
             logger.error(f"Failed to load Parquet data: {e}")
@@ -113,32 +131,56 @@ class DataService:
         """
         Get top N test users for dropdown selector.
 
+        Filters to users with interactions in the current state_filter.
+
         Returns:
             List of dicts: [{'id': user_id, 'interactions': count}, ...]
         """
         try:
-            # Query review Parquet to find top users by interaction count
             review_pattern = str(self.parquet_dir / "review" / "**" / "*.parquet")
+            business_pattern = str(self.parquet_dir / "business" / "**" / "*.parquet")
+            # DuckDB on Windows needs forward slashes in glob patterns
+            review_pattern = review_pattern.replace("\\", "/")
+            business_pattern = business_pattern.replace("\\", "/")
 
-            users_df = self.conn.execute(
-                f"""
-                SELECT 
-                    user_id,
-                    COUNT(*) as interactions
-                FROM read_parquet('{review_pattern}')
-                WHERE stars >= 4.0
-                GROUP BY user_id
-                ORDER BY interactions DESC
-                LIMIT {limit}
-            """
-            ).df()
+            # Build query to count interactions with businesses matching state filter
+            if self.state_filter:
+                # Count interactions with businesses in this state only
+                query = f"""
+                    SELECT 
+                        reviews.user_id,
+                        COUNT(*) as interactions
+                    FROM read_parquet('{review_pattern}') AS reviews
+                    INNER JOIN read_parquet('{business_pattern}') AS business
+                        ON reviews.business_id = business.business_id
+                    WHERE reviews.stars >= 4.0 AND business.state = '{self.state_filter}'
+                    GROUP BY reviews.user_id
+                    ORDER BY interactions DESC
+                    LIMIT {limit}
+                """
+            else:
+                # No state filter - use all interactions
+                query = f"""
+                    SELECT 
+                        user_id,
+                        COUNT(*) as interactions
+                    FROM read_parquet('{review_pattern}')
+                    WHERE stars >= 4.0
+                    GROUP BY user_id
+                    ORDER BY interactions DESC
+                    LIMIT {limit}
+                """
+
+            users_df = self.conn.execute(query).df()
 
             result = [
                 {"id": row["user_id"], "interactions": int(row["interactions"])}
                 for _, row in users_df.iterrows()
             ]
 
-            logger.info(f"Found {len(result)} test users")
+            logger.info(
+                f"Found {len(result)} test users with state_filter={self.state_filter}"
+            )
             return result
 
         except Exception as e:
@@ -154,12 +196,14 @@ class DataService:
             min_stars: Minimum star rating threshold
 
         Returns:
-            List of POI indices
+            List of POI indices (filtered to match pois_df, respecting state_filter)
         """
         try:
             review_pattern = str(self.parquet_dir / "review" / "**" / "*.parquet")
+            # DuckDB on Windows needs forward slashes in glob patterns
+            review_pattern = review_pattern.replace("\\", "/")
 
-            # Get business IDs for this user
+            # Get business IDs for this user with minimum rating
             business_ids = self.conn.execute(
                 f"""
                 SELECT DISTINCT business_id
@@ -169,13 +213,21 @@ class DataService:
             ).df()
 
             # Map business IDs to POI indices
+            # Only include businesses that are in pois_df (already filtered by state)
             poi_indices = []
             for bid in business_ids["business_id"]:
                 # Find this business in pois_df
+                # Since pois_df is already state-filtered, we only get valid indices
                 matches = self.pois_df[
                     self.pois_df["business_id"] == bid
                 ].index.tolist()
                 poi_indices.extend(matches)
+
+            if poi_indices:
+                logger.debug(
+                    f"User {user_id}: {len(poi_indices)} interactions "
+                    f"(state={self.state_filter})"
+                )
 
             return poi_indices
 

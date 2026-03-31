@@ -38,7 +38,7 @@ def show():
     with col2:
         if st.button("🎛️ Use in Live Demo"):
             st.session_state.selected_neuron = neuron_idx
-            st.switch_page("pages:Live Demo")
+            st.switch_page("src.ui.main:show_live_demo")
 
     st.divider()
 

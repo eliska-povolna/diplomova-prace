@@ -99,9 +99,10 @@ def cosine_recon_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     """Cosine reconstruction loss (1 - cosine_similarity)."""
     recon_norm = torch.nn.functional.normalize(recon, dim=-1)
     target_norm = torch.nn.functional.normalize(target, dim=-1)
-    return 1.0 - torch.nn.functional.cosine_similarity(
-        recon_norm, target_norm, dim=-1
-    ).mean()
+    return (
+        1.0
+        - torch.nn.functional.cosine_similarity(recon_norm, target_norm, dim=-1).mean()
+    )
 
 
 def train_elsa(
@@ -158,8 +159,10 @@ def train_elsa(
     best_val_loss = float("inf")
     patience_counter = 0
 
-    logger.info(f"Config: latent_dim={elsa_cfg['latent_dim']}, "
-                f"lr={elsa_cfg['learning_rate']}, epochs={elsa_cfg['num_epochs']}")
+    logger.info(
+        f"Config: latent_dim={elsa_cfg['latent_dim']}, "
+        f"lr={elsa_cfg['learning_rate']}, epochs={elsa_cfg['num_epochs']}"
+    )
 
     for epoch in range(elsa_cfg["num_epochs"]):
         # Training
@@ -201,7 +204,18 @@ def train_elsa(
         if val_loss < best_val_loss - 1e-6:
             best_val_loss = val_loss
             patience_counter = 0
-            checkpoint_mgr.save(model, epoch=epoch, metrics=metrics.to_dict(), name="elsa_best")
+            # Save with dataset metadata
+            metadata = {
+                "n_items": model.A.shape[0],
+                "latent_dim": model.latent_dim,
+            }
+            checkpoint_mgr.save(
+                model,
+                epoch=epoch,
+                metrics=metrics.to_dict(),
+                name="elsa_best",
+                metadata=metadata,
+            )
         else:
             patience_counter += 1
             if patience_counter >= elsa_cfg["patience"]:
@@ -282,9 +296,11 @@ def train_sae(
     best_val_loss = float("inf")
     patience_counter = 0
 
-    logger.info(f"Config: width_ratio={sae_cfg['width_ratio']}, "
-                f"hidden_dim={hidden_dim}, k={sae_cfg['k']}, "
-                f"l1_coef={sae_cfg['l1_coef']}, epochs={sae_cfg['num_epochs']}")
+    logger.info(
+        f"Config: width_ratio={sae_cfg['width_ratio']}, "
+        f"hidden_dim={hidden_dim}, k={sae_cfg['k']}, "
+        f"l1_coef={sae_cfg['l1_coef']}, epochs={sae_cfg['num_epochs']}"
+    )
 
     for epoch in range(sae_cfg["num_epochs"]):
         # Training
@@ -355,11 +371,18 @@ def train_sae(
         if (best_val_loss - val_recon_loss) > sae_cfg["min_delta"]:
             best_val_loss = val_recon_loss
             patience_counter = 0
+            # Save with hyperparameter metadata
+            metadata = {
+                "k": sae_cfg["k"],
+                "width_ratio": sae_cfg["width_ratio"],
+                "latent_dim": elsa_model.latent_dim,
+            }
             checkpoint_mgr.save(
                 sae,
                 epoch=epoch,
                 metrics=metrics.to_dict(),
                 name=f"sae_r{sae_cfg['width_ratio']}_k{sae_cfg['k']}_best",
+                metadata=metadata,
             )
         else:
             patience_counter += 1
@@ -368,8 +391,15 @@ def train_sae(
                 break
 
     # Load best model
-    model_path = checkpoint_mgr.checkpoint_dir / f"sae_r{sae_cfg['width_ratio']}_k{sae_cfg['k']}_best.pt"
-    sae.load_state_dict(torch.load(model_path, map_location=device, weights_only=False)["model_state_dict"])
+    model_path = (
+        checkpoint_mgr.checkpoint_dir
+        / f"sae_r{sae_cfg['width_ratio']}_k{sae_cfg['k']}_best.pt"
+    )
+    sae.load_state_dict(
+        torch.load(model_path, map_location=device, weights_only=False)[
+            "model_state_dict"
+        ]
+    )
     checkpoint_mgr.save_metrics(metrics.to_dict(), split="sae_train")
 
     logger.info(f"SAE training complete. Best val_recon={best_val_loss:.6f}")
@@ -424,7 +454,7 @@ def main() -> None:
             year_min=config["data"].get("year_min"),
             year_max=config["data"].get("year_max"),
         )
-        
+
         # Filter by state (if specified)
         state_filter = config["data"].get("state_filter")
         if state_filter:
@@ -435,23 +465,29 @@ def main() -> None:
                 min_review_count=config["data"].get("min_review_count", 5),
             )
             business_ids = set(businesses["business_id"].values)
-            logger.info(f"Filtering by state {state_filter}: {len(business_ids)} businesses")
+            logger.info(
+                f"Filtering by state {state_filter}: {len(business_ids)} businesses"
+            )
             reviews = reviews[reviews["business_id"].isin(business_ids)]
-        
+
         logger.info(f"Loaded {len(reviews)} reviews")
 
         # Build CSR matrix
         logger.info("Building CSR matrix...")
         dataset = build_csr(reviews)
         X_csr = dataset.csr
-        logger.info(f"Built CSR: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
-                    f"{X_csr.nnz} interactions")
+        logger.info(
+            f"Built CSR: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
+            f"{X_csr.nnz} interactions"
+        )
 
         # Apply k-core filtering
         logger.info("Applying k-core filtering (k=5)...")
         X_csr = apply_kcore_filtering(X_csr, k=5)
-        logger.info(f"After k-core: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
-                    f"{X_csr.nnz} interactions")
+        logger.info(
+            f"After k-core: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
+            f"{X_csr.nnz} interactions"
+        )
 
         # Train/test split
         n_users = X_csr.shape[0]
@@ -479,6 +515,7 @@ def main() -> None:
 
         # Create subset datasets
         from torch.utils.data import Subset
+
         X_train_split = Subset(X_train_dataset, train_idx)
         X_val_split = Subset(X_train_dataset, val_idx)
 
@@ -492,14 +529,24 @@ def main() -> None:
         elsa_model.eval()
         with torch.no_grad():
             # Use chunked encoding for sparse matrices to avoid memory overflow
-            Z_train = elsa_model.encode_csr_chunked(X_train_csr, chunk_size=4096, device=device)
-            Z_val = elsa_model.encode_csr_chunked(X_train_csr[val_idx], chunk_size=4096, device=device)
-            Z_test = elsa_model.encode_csr_chunked(X_test_csr, chunk_size=4096, device=device)
+            Z_train = elsa_model.encode_csr_chunked(
+                X_train_csr, chunk_size=4096, device=device
+            )
+            Z_val = elsa_model.encode_csr_chunked(
+                X_train_csr[val_idx], chunk_size=4096, device=device
+            )
+            Z_test = elsa_model.encode_csr_chunked(
+                X_test_csr, chunk_size=4096, device=device
+            )
 
-        logger.info(f"Encoded: z_train={Z_train.shape}, z_val={Z_val.shape}, z_test={Z_test.shape}")
+        logger.info(
+            f"Encoded: z_train={Z_train.shape}, z_val={Z_val.shape}, z_test={Z_test.shape}"
+        )
 
         # Train SAE
-        sae_model, sae_best_loss = train_sae(config, elsa_model, Z_train, Z_val, checkpoint_mgr)
+        sae_model, sae_best_loss = train_sae(
+            config, elsa_model, Z_train, Z_val, checkpoint_mgr
+        )
 
         # Final evaluation on test set
         logger.info("=" * 60)
@@ -515,16 +562,20 @@ def main() -> None:
             test_recon_loss = cosine_recon_loss(z_recon, Z_test).item()
             z_recon_norm = torch.nn.functional.normalize(z_recon, dim=-1)
             z_test_norm = torch.nn.functional.normalize(Z_test, dim=-1)
-            test_cosine_sim = torch.nn.functional.cosine_similarity(
-                z_recon_norm, z_test_norm, dim=-1
-            ).mean().item()
+            test_cosine_sim = (
+                torch.nn.functional.cosine_similarity(z_recon_norm, z_test_norm, dim=-1)
+                .mean()
+                .item()
+            )
 
             # Sparsity analysis
             active_neurons = (h_test != 0).sum(dim=1).float().mean().item()
 
         logger.info(f"Test reconstruction loss: {test_recon_loss:.6f}")
         logger.info(f"Test cosine similarity: {test_cosine_sim:.4f}")
-        logger.info(f"Average active neurons: {active_neurons:.1f}/{config['sae']['width_ratio'] * config['elsa']['latent_dim']}")
+        logger.info(
+            f"Average active neurons: {active_neurons:.1f}/{config['sae']['width_ratio'] * config['elsa']['latent_dim']}"
+        )
 
         # Save summary
         summary = {
@@ -563,4 +614,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
