@@ -217,8 +217,9 @@ def load_data_service(config: Dict) -> DataService:
     DuckDB + Parquet files cached in memory.
     Uses item2index mapping to ensure POI indices match model coordinate space.
     """
-    # Path to item2index mapping from training
-    item2index_path = Path(__file__).parent.parent / "data" / "processed_yelp_easystudy" / "item2index.pkl"
+    # Path to k-core FILTERED item2index mapping from training
+    # This mapping has 2212 items (after k-core filtering), matching the model
+    item2index_path = Path(__file__).parent.parent / "data" / "processed_yelp_easystudy" / "item2index_filtered.pkl"
     
     service = DataService(
         duckdb_path=Path(config["duckdb_path"]),
