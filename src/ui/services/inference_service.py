@@ -30,6 +30,7 @@ class InferenceService:
         elsa_checkpoint_path: Path,
         sae_checkpoint_path: Path,
         config: Optional[Dict] = None,
+        labels: Optional[object] = None,
     ):
         """
         Initialize inference service and load models.
@@ -43,6 +44,7 @@ class InferenceService:
                 - width_ratio: SAE hidden dim ratio (default 4)
                 - steering_alpha: interpolation strength (default 0.3)
                 - device: 'cpu' or 'cuda' (default 'cpu')
+            labels: LabelingService instance for neuron labels (optional)
 
             Note: n_items is read from the ELSA checkpoint metadata, NOT from config.
                   The checkpoint metadata is the definitive source of truth.
@@ -50,6 +52,7 @@ class InferenceService:
         self.config = config or {}
         self.device = self.config.get("device", "cpu")
         self.alpha = self.config.get("steering_alpha", 0.3)
+        self.labels = labels
 
         # Model hyperparameters
         # n_items is NOT read from config - it will be loaded from checkpoint metadata
@@ -320,11 +323,16 @@ class InferenceService:
 
         result = []
         for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
+            # Get label from LabelingService (or fallback to Feature N)
+            label = "Feature {idx}"
+            if hasattr(self, 'labels') and self.labels:
+                label = self.labels.get_label(idx)
+            
             result.append(
                 {
                     "neuron_idx": idx,
                     "activation": float(val),
-                    "label": f"Feature {idx}",  # TODO: Get from LabelingService
+                    "label": label,
                 }
             )
 

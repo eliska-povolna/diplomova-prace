@@ -202,7 +202,10 @@ def load_inference_service(config: Dict) -> InferenceService:
     logger.info(f"Loading ELSA from {elsa_ckpt}")
     logger.info(f"Loading SAE from {sae_ckpt}")
 
-    service = InferenceService(elsa_ckpt, sae_ckpt, config)
+    # Load labels service
+    labels = load_labels_service(config)
+
+    service = InferenceService(elsa_ckpt, sae_ckpt, config, labels=labels)
     if HAS_STREAMLIT:
         st.success("✅ Models loaded")
     logger.info("✅ Models loaded successfully")
@@ -246,7 +249,7 @@ def load_data_service(config: Dict) -> DataService:
 
 
 @st_cache_resource
-def load_labeling_service(config: Dict) -> LabelingService:
+def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
     """
     Load neuron labeling service.
 
@@ -279,6 +282,7 @@ def load_labeling_service(config: Dict) -> LabelingService:
         ),
         interpreter=interpreter,
         config=config,
+        data_service=data_service,
     )
     return service
 

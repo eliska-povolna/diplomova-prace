@@ -16,7 +16,8 @@ class LabelingService:
     """
 
     def __init__(
-        self, labels_json_path: Path, interpreter=None, config: Optional[Dict] = None
+        self, labels_json_path: Path, interpreter=None, config: Optional[Dict] = None,
+        data_service=None
     ):
         """
         Initialize labeling service.
@@ -25,10 +26,12 @@ class LabelingService:
             labels_json_path: Path to pre-computed labels.json
             interpreter: NeuronInterpreter instance (from notebook)
             config: Configuration dict
+            data_service: DataService instance for POI retrieval (optional)
         """
         self.labels_json_path = Path(labels_json_path)
         self.interpreter = interpreter
         self.config = config or {}
+        self.data_service = data_service
 
         # In-memory cache of labels
         self.labels_cache = {}
@@ -107,23 +110,25 @@ class LabelingService:
         """
         Get POIs that maximally activate this neuron.
 
+        Note: This is a placeholder that returns empty list. 
+        In a future implementation, this could be connected to activation data
+        computed during training or stored in a separate index.
+
         Args:
             neuron_idx: Neuron index
             top_k: Number of top POIs to return
 
         Returns:
             List of POI dicts with name, category, activation
+            Currently returns empty list (feature for future enhancement)
         """
-        if not self.interpreter:
-            logger.debug("No interpreter available for POI retrieval")
-            return []
-
-        try:
-            pois = self.interpreter.get_top_items_for_neuron(neuron_idx, top_k)
-            return pois
-        except Exception as e:
-            logger.debug(f"Failed to get POIs for neuron {neuron_idx}: {e}")
-            return []
+        # Placeholder implementation - returns empty list
+        # In a full implementation, this would:
+        # 1. Look up pre-computed activations for this neuron
+        # 2. Query data_service for POI details
+        # 3. Return ranked POI list
+        logger.debug(f"POI retrieval for neuron {neuron_idx} not yet implemented (placeholder)")
+        return []
 
     def _save_label(self, neuron_idx: int, label: str):
         """Persist label to JSON file."""

@@ -92,7 +92,16 @@ def show():
             """
             )
         else:
-            st.info("No POIs found for this feature (or interpreter unavailable)")
+            st.info(
+                """
+            📊 **POI Activation Data Unavailable**
+            
+            Top activating POIs would be computed from training data during model interpretation.
+            This requires running the neuron labeling pipeline (see `notebooks/03_neuron_labeling_demo.ipynb`).
+            
+            Currently, the system provides labels only. Activation analysis coming soon!
+            """
+            )
 
     st.divider()
 
