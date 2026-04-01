@@ -203,7 +203,7 @@ def load_inference_service(config: Dict) -> InferenceService:
     logger.info(f"Loading SAE from {sae_ckpt}")
 
     # Load labels service
-    labels = load_labels_service(config)
+    labels = load_labeling_service(config)
 
     service = InferenceService(elsa_ckpt, sae_ckpt, config, labels=labels)
     if HAS_STREAMLIT:
