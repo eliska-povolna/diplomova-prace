@@ -215,11 +215,16 @@ def load_data_service(config: Dict) -> DataService:
     Load POI data once per session.
 
     DuckDB + Parquet files cached in memory.
+    Uses item2index mapping to ensure POI indices match model coordinate space.
     """
+    # Path to item2index mapping from training
+    item2index_path = Path(__file__).parent.parent / "data" / "processed_yelp_easystudy" / "item2index.pkl"
+    
     service = DataService(
         duckdb_path=Path(config["duckdb_path"]),
         parquet_dir=Path(config["parquet_dir"]),
         config=config,
+        item2index_path=item2index_path,
     )
     if HAS_STREAMLIT:
         st.success(f"✅ Loaded {service.num_pois} POIs")

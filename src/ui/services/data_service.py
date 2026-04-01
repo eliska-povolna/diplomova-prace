@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import json
 import logging
+import pickle
 
 import pandas as pd
 import duckdb
@@ -19,10 +20,14 @@ class DataService:
     - POI details with photos
     - Test user filtering
     - Batch lookups
+    
+    NOTE: Uses item2index mapping from training to ensure POI indices match
+    the model's coordinate space (0 to n_items).
     """
 
     def __init__(
-        self, duckdb_path: Path, parquet_dir: Path, config: Optional[Dict] = None
+        self, duckdb_path: Path, parquet_dir: Path, config: Optional[Dict] = None,
+        item2index_path: Optional[Path] = None
     ):
         """
         Initialize DataService.
@@ -30,15 +35,23 @@ class DataService:
         Args:
             duckdb_path: Path to yelp.duckdb
             parquet_dir: Path to parquet data directory
-            config: Optional config dict with keys:
-                - state_filter: Optional state code (e.g., "CA") to filter businesses
+            config: Optional config dict
+            item2index_path: Path to item2index.pkl mapping (business_id -> model index)
         """
         self.duckdb_path = Path(duckdb_path)
         self.parquet_dir = Path(parquet_dir)
         self.config = config or {}
-        self.state_filter = self.config.get(
-            "state_filter"
-        )  # CRITICAL: stored for consistency
+        self.state_filter = self.config.get("state_filter")
+
+        # Load item2index mapping from training
+        # This ensures POI indices stay in model coordinate space
+        if item2index_path and Path(item2index_path).exists():
+            with open(item2index_path, 'rb') as f:
+                self.item2index = pickle.load(f)
+            logger.info(f"✅ Loaded item2index mapping with {len(self.item2index)} items")
+        else:
+            self.item2index = None
+            logger.warning("item2index mapping not found - POI indices may not match model")
 
         logger.info("Loading POI data...")
         self.conn = duckdb.connect(str(self.duckdb_path))
@@ -50,13 +63,16 @@ class DataService:
 
     def _load_pois_dataframe(self) -> pd.DataFrame:
         """Load POI metadata from Parquet into memory."""
-        parquet_pattern = str(self.parquet_dir / "business" / "**" / "*.parquet")
-        # DuckDB on Windows needs forward slashes in glob patterns
+        # Use same glob pattern as training: business/state=*/...
+        # This ensures state is available as a column for filtering
+        parquet_pattern = str(self.parquet_dir / "business" / "state=*" / "*.parquet")
+        # DuckDB needs forward slashes (POSIX paths)
         parquet_pattern = parquet_pattern.replace("\\", "/")
 
         try:
-            # CRITICAL: Apply state filter to match training data
+            # Build query with state filter if provided
             if self.state_filter:
+                # Use parameterized query to match training approach
                 query = f"""
                     SELECT * FROM read_parquet('{parquet_pattern}')
                     WHERE state = '{self.state_filter}'
@@ -68,9 +84,10 @@ class DataService:
 
             df = self.conn.execute(query).df()
             df = df.reset_index(drop=True)  # Ensure clean 0-based indexing
+            logger.info(f"Loaded {len(df)} POIs from parquet")
             return df
         except Exception as e:
-            logger.error(f"Failed to load Parquet data: {e}")
+            logger.error(f"Failed to load Parquet data with pattern '{parquet_pattern}': {e}")
             return pd.DataFrame()
 
     def get_poi_details(self, poi_idx: int) -> Dict:
@@ -137,9 +154,9 @@ class DataService:
             List of dicts: [{'id': user_id, 'interactions': count}, ...]
         """
         try:
-            review_pattern = str(self.parquet_dir / "review" / "**" / "*.parquet")
-            business_pattern = str(self.parquet_dir / "business" / "**" / "*.parquet")
-            # DuckDB on Windows needs forward slashes in glob patterns
+            review_pattern = str(self.parquet_dir / "review" / "year=*" / "*.parquet")
+            business_pattern = str(self.parquet_dir / "business" / "state=*" / "*.parquet")
+            # DuckDB needs forward slashes (POSIX paths)
             review_pattern = review_pattern.replace("\\", "/")
             business_pattern = business_pattern.replace("\\", "/")
 
@@ -191,16 +208,18 @@ class DataService:
         """
         Get list of POI indices the user has interacted with.
 
+        Uses item2index mapping to ensure indices match model coordinate space.
+
         Args:
             user_id: Yelp user ID
             min_stars: Minimum star rating threshold
 
         Returns:
-            List of POI indices (filtered to match pois_df, respecting state_filter)
+            List of POI indices (in model coordinate space 0 to n_items)
         """
         try:
-            review_pattern = str(self.parquet_dir / "review" / "**" / "*.parquet")
-            # DuckDB on Windows needs forward slashes in glob patterns
+            review_pattern = str(self.parquet_dir / "review" / "year=*" / "*.parquet")
+            # DuckDB needs forward slashes (POSIX paths)
             review_pattern = review_pattern.replace("\\", "/")
 
             # Get business IDs for this user with minimum rating
@@ -212,21 +231,26 @@ class DataService:
             """
             ).df()
 
-            # Map business IDs to POI indices
-            # Only include businesses that are in pois_df (already filtered by state)
+            # Map business IDs to POI indices using item2index mapping
             poi_indices = []
-            for bid in business_ids["business_id"]:
-                # Find this business in pois_df
-                # Since pois_df is already state-filtered, we only get valid indices
-                matches = self.pois_df[
-                    self.pois_df["business_id"] == bid
-                ].index.tolist()
-                poi_indices.extend(matches)
+            if self.item2index:
+                # Use trained model's item2index mapping
+                for bid in business_ids["business_id"]:
+                    if bid in self.item2index:
+                        poi_indices.append(self.item2index[bid])
+            else:
+                # Fallback: map to pois_df index (will have wrong coordinate space)
+                for bid in business_ids["business_id"]:
+                    matches = self.pois_df[
+                        self.pois_df["business_id"] == bid
+                    ].index.tolist()
+                    poi_indices.extend(matches)
 
             if poi_indices:
+                max_idx = max(poi_indices)
                 logger.debug(
-                    f"User {user_id}: {len(poi_indices)} interactions "
-                    f"(state={self.state_filter})"
+                    f"User {user_id}: {len(poi_indices)} interactions, "
+                    f"max_idx={max_idx}"
                 )
 
             return poi_indices
