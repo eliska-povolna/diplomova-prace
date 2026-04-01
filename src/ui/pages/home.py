@@ -116,15 +116,15 @@ def show():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("📊 View Evaluation Results", use_container_width=True):
+        if st.button("📊 View Evaluation Results", width='stretch'):
             st.switch_page("src.ui.main:show_results")
 
     with col2:
-        if st.button("🎛️ Try Interactive Steering", use_container_width=True):
+        if st.button("🎛️ Try Interactive Steering", width='stretch'):
             st.switch_page("src.ui.main:show_live_demo")
 
     with col3:
-        if st.button("🔍 Browse Features", use_container_width=True):
+        if st.button("🔍 Browse Features", width='stretch'):
             st.switch_page("src.ui.main:show_interpretability")
 
     # Footer

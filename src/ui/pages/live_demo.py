@@ -426,7 +426,7 @@ def plot_feature_activations(activations: List[Dict]):
         xaxis_title="Activation Magnitude",
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 def build_folium_map(recommendations: List[Dict], data_service) -> folium.Map:

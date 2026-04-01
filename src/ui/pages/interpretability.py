@@ -84,7 +84,7 @@ def show():
                 )
 
             pois_df = pd.DataFrame(pois_records)
-            st.dataframe(pois_df, use_container_width=True, hide_index=True)
+            st.dataframe(pois_df, width='stretch', hide_index=True)
 
             st.caption(
                 """
