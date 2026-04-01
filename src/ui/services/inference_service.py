@@ -488,7 +488,7 @@ class InferenceService:
             List of dicts with neuron_idx and contribution score
         """
         # If h_sparse is latent (not sparse), encode it first
-        if h_sparse.shape[0] != self.sae.encoder[0].out_features:
+        if h_sparse.shape[0] != self.sae.hidden_dim:
             # It's a latent vector, encode it
             with torch.no_grad():
                 h_sparse = self.sae.encode(h_sparse.unsqueeze(0)).squeeze(0)
