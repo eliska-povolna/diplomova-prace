@@ -27,7 +27,8 @@ class DataService:
 
     def __init__(
         self, duckdb_path: Path, parquet_dir: Path, config: Optional[Dict] = None,
-        item2index_path: Optional[Path] = None
+        item2index_path: Optional[Path] = None,
+        local_photos_dir: Optional[Path] = None
     ):
         """
         Initialize DataService.
@@ -37,11 +38,13 @@ class DataService:
             parquet_dir: Path to parquet data directory
             config: Optional config dict
             item2index_path: Path to item2index.pkl mapping (business_id -> model index)
+            local_photos_dir: Path to local photos directory (business_id.jpg format)
         """
         self.duckdb_path = Path(duckdb_path)
         self.parquet_dir = Path(parquet_dir)
         self.config = config or {}
         self.state_filter = self.config.get("state_filter")
+        self.local_photos_dir = Path(local_photos_dir) if local_photos_dir else None
 
         # Load item2index mapping from training
         # This ensures POI indices stay in model coordinate space
@@ -94,31 +97,40 @@ class DataService:
         """
         Get complete POI information by index.
 
-        Includes real Yelp photos from dataset.
+        Includes real Yelp photos from dataset or local directory.
 
         Returns:
             Dict with keys:
                 - poi_idx, business_id, name, category
                 - lat, lon, rating, review_count, url
-                - photos (list of URLs), primary_photo, photo_count
+                - photos (list of URLs or local paths), primary_photo, photo_count
         """
         if poi_idx >= len(self.pois_df):
             logger.warning(f"POI index {poi_idx} out of range")
             return {}
 
         row = self.pois_df.iloc[poi_idx]
+        business_id = str(row.get("business_id", ""))
 
-        # Parse photos field (JSON list from Yelp dataset)
+        # Try to load local photo first
         photos = []
-        photos_field = row.get("photos", "")
-        if photos_field:
-            try:
-                if isinstance(photos_field, str):
-                    photos = json.loads(photos_field)
-                elif isinstance(photos_field, list):
-                    photos = photos_field
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug(f"Could not parse photos for POI {poi_idx}: {e}")
+        if self.local_photos_dir:
+            local_photo_path = self.local_photos_dir / f"{business_id}.jpg"
+            if local_photo_path.exists():
+                photos = [str(local_photo_path)]
+                logger.debug(f"Loaded local photo for {business_id}")
+        
+        # If no local photo, parse from Yelp dataset
+        if not photos:
+            photos_field = row.get("photos", "")
+            if photos_field:
+                try:
+                    if isinstance(photos_field, str):
+                        photos = json.loads(photos_field)
+                    elif isinstance(photos_field, list):
+                        photos = photos_field
+                except (json.JSONDecodeError, TypeError) as e:
+                    logger.debug(f"Could not parse photos for POI {poi_idx}: {e}")
 
         return {
             "poi_idx": poi_idx,

@@ -216,21 +216,32 @@ def load_data_service(config: Dict) -> DataService:
 
     DuckDB + Parquet files cached in memory.
     Uses item2index mapping to ensure POI indices match model coordinate space.
+    Loads local photos from yelp_photos folder if available.
     """
     # Path to k-core FILTERED item2index mapping from training
     # This mapping has 2212 items (after k-core filtering), matching the model
     # Project layout: src/ui/cache.py -> need to go up 3 levels to project root
     item2index_path = Path(__file__).parent.parent.parent / "data" / "processed_yelp_easystudy" / "item2index_filtered.pkl"
     
+    # Path to local photos folder
+    local_photos_path = Path(__file__).parent.parent.parent / "yelp_photos"
+    if not local_photos_path.exists():
+        local_photos_path = None
+    
     service = DataService(
         duckdb_path=Path(config["duckdb_path"]),
         parquet_dir=Path(config["parquet_dir"]),
         config=config,
         item2index_path=item2index_path,
+        local_photos_dir=local_photos_path,
     )
     if HAS_STREAMLIT:
         st.success(f"✅ Loaded {service.num_pois} POIs")
+        if local_photos_path:
+            st.info(f"📷 Local photos enabled: {local_photos_path}")
     logger.info(f"✅ Loaded {service.num_pois} POIs")
+    if local_photos_path:
+        logger.info(f"📷 Local photos enabled: {local_photos_path}")
     return service
 
 
