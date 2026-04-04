@@ -1,3 +1,4 @@
+
 # Streamlit POI Recommender UI — Detailed Implementation Plan
 
 **Created**: 2026-03-30  
@@ -807,6 +808,7 @@ google-generativeai==0.3.0
 sentence-transformers==2.3.0
 pyyaml==6.0.1
 python-dotenv==1.0.0
+wordcloud==1.9.3
 ```
 
 ### Environment (`streamlit_config.toml`)
@@ -815,6 +817,117 @@ python-dotenv==1.0.0
 [theme]
 primaryColor = "#FF6E40"
 backgroundColor = "#FFFFFF"
+```
+
+---
+
+## 🚀 Phase 3: Data Pipeline Enhancement & Performance Optimization
+
+**Scope**: Support PA dataset retraining, precompute expensive statistics, and add neuron visualization.
+
+### 3.1 Initiative 1: Configurable State Selection for Retraining
+
+**Goal**: Enable switching between CA, PA, or other states by changing one config variable.
+
+**Changes**:
+1. **`configs/default.yaml`**: Add optional state override
+   - `state_filter: "PA"` → trains on PA data
+   - `state_filter: null` → trains on full dataset
+
+2. **`src/train.py`**: Respect state_filter in config
+
+3. **`scripts/run_training.py`**: Auto-detect state from config and name outputs accordingly
+   - Outputs go to `outputs/PA_20260404_xyz/` format
+   - Checkpoints and neuron_labels.json stored per-state
+
+4. **`data/processed_yelp_easystudy/`**: Support per-state subdirectories
+   - `data/processed_yelp_CA/` for existing model
+   - `data/processed_yelp_PA/` for new PA model
+
+**No code changes needed for**:
+- DuckDB loading (already respects state_filter)
+- Streamlit UI (config auto-selects based on available state dirs)
+
+---
+
+### 3.2 Initiative 2: Precomputation Service for Streamlit Performance
+
+**Goal**: Avoid recomputing statistics on app startup/interaction. Generate once during training, load in Streamlit.
+
+**New precomputation module**: `src/precompute_ui_cache.py`
+
+When training finishes, notebooks save:
+- **Neuron word clouds**: Top K activations → text → cloud data (JSON)
+- **Neuron statistics**: Mean activation, sparsity, top-K feature interactions
+- **POI activations index**: For each POI, top neurons (sparse matrix)
+- **User embedding cache**: Pre-computed for common test users
+
+When Streamlit starts:
+- Load precomputed caches from disk (1-2 seconds)
+- Avoid model scoring at startup
+- Serve word clouds instantly
+
+**Output structure**:
+```
+outputs/PA_20260404_xyz/
+├── checkpoints/              (training outputs)
+├── precomputed_ui_cache/
+│   ├── neuron_wordclouds/    # {idx}.json: {"text": "pizza italian fast", "freq": [10, 8, 5], ...}
+│   ├── neuron_stats.json     # {"0": {"mean_act": 0.45, "sparsity": 0.12}, ...}
+│   ├── poi_activations/      # Sparse index of top neurons per POI
+│   └── test_user_embeddings.pkl  # Pre-computed z_u for N test users
+```
+
+**Step-by-step**:
+1. Add `src/precompute_ui_cache.py` module with precomputation logic
+2. Call from notebooks after SAE training completes
+3. Update `cache.py` to load precomputed data if available
+4. Update Streamlit pages to use precomputed word clouds
+
+---
+
+### 3.3 Initiative 3: Word Cloud Visualization for Neurons
+
+**Goal**: Explore neurons visually via word clouds to build intuition.
+
+**New component**: `src/ui/components/neuron_wordcloud.py`
+- Input: neuron_idx or label
+- Output: Streamlit-rendered word cloud
+
+**Visualization in Streamlit**:
+- **Interpretability page**: Add "Word Cloud Explorer" tab
+  - Neuron slider + word cloud below
+  - Toggle between precomputed and live generation
+- **Live Demo page**: Show word cloud for top activated neurons
+  - Use precomputed version for instant load
+
+**Implementation**:
+1. Create `wordcloud_builder()` function to render PIL Image
+2. Cache function with `@st.cache_resource` with neuron_idx parameter
+3. Display with `st.image()`
+4. Optional: Export cloud as PNG when clicked
+
+---
+
+## 📅 Implementation Sequence
+
+**Week 1**:
+1. ✅ Update config system: state_filter parameter
+2. ✅ Update training script: auto-naming based on state
+3. ✅ Update data preprocessing: per-state directories
+4. ✅ Prepare notebooks for PA retraining
+
+**Week 2**:
+5. ✅ Create precomputation module  
+6. ✅ Add precomputation calls to notebooks
+7. ✅ Update cache.py to load precomputed data
+8. ✅ Test performance improvement
+
+**Week 3**:
+9. ✅ Create word cloud component
+10. ✅ Add to Interpretability page
+11. ✅ Add to Live Demo page
+12. ✅ Polish UX
 secondaryBackgroundColor = "#F5F5F5"
 textColor = "#262730"
 

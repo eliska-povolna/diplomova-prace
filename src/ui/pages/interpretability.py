@@ -2,6 +2,13 @@
 
 import streamlit as st
 import pandas as pd
+from pathlib import Path
+try:
+    from src.ui.components.neuron_wordcloud import display_neuron_wordcloud
+    from src.ui.cache import get_precomputed_cache_dir
+    HAS_WORDCLOUD = True
+except ImportError:
+    HAS_WORDCLOUD = False
 
 
 def show():
@@ -63,6 +70,26 @@ def show():
 
         # Copy button for label
         st.code(label, language="text")
+        
+        # Word cloud visualization (if available)
+        if HAS_WORDCLOUD:
+            st.divider()
+            st.subheader("☁️ Word Cloud")
+            st.markdown("Top words from POIs activating this feature.")
+            
+            cache_dir = get_precomputed_cache_dir()
+            try:
+                display_neuron_wordcloud(
+                    neuron_idx,
+                    label="",
+                    precomputed_wordcloud_dir=cache_dir,
+                    width=400,
+                    height=200,
+                    colormap="viridis",
+                    show_info=False,
+                )
+            except Exception as e:
+                st.warning(f"Word cloud unavailable: {str(e)[:50]}")
 
     with col_right:
         st.subheader("📍 Top Activating POIs")
