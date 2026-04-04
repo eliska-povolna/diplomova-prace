@@ -345,7 +345,7 @@ def show():
                     st.warning(f"Map rendering failed: {e}")
                     logger.debug(f"Folium error: {e}")
             else:
-                st.info("Install streamlit-folium for map visualization")
+                st.info("📦 Install streamlit-folium for map visualization: `pip install streamlit-folium`")
 
         # ===================================================================
         # Section 4: POI Cards
@@ -489,7 +489,7 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
         # Display photo if available
         if poi.get("primary_photo"):
             try:
-                st.image(poi["primary_photo"], use_column_width=True)
+                st.image(poi["primary_photo"], width=200)
             except Exception as e:
                 st.caption(f"📸 Photo unavailable")
         else:
