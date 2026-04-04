@@ -270,6 +270,37 @@ def load_data_service(config: Dict) -> DataService:
 
 
 @st_cache_resource
+def get_precomputed_cache_dir() -> Optional[Path]:
+    """Detect if precomputed UI cache exists and return its path.
+    
+    Looks for precomputed_ui_cache/ in the latest outputs/PA_* or outputs/*/ directories.
+    Returns None if not found (app will compute on-demand).
+    """
+    project_root = Path(__file__).parent.parent.parent
+    outputs_dir = project_root / "outputs"
+    
+    if not outputs_dir.exists():
+        return None
+    
+    # Find all state-prefixed output directories (PA_*, CA_*, etc.)
+    import os
+    output_dirs = sorted(
+        [d for d in outputs_dir.iterdir() if d.is_dir()],
+        key=lambda d: os.path.getmtime(d),
+        reverse=True,
+    )
+    
+    for output_dir in output_dirs:
+        cache_dir = output_dir / "precomputed_ui_cache"
+        if cache_dir.exists():
+            logger.info(f"✓ Found precomputed cache at {cache_dir}")
+            return cache_dir
+    
+    logger.info("No precomputed cache found (app will compute on-demand)")
+    return None
+
+
+@st_cache_resource
 def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
     """
     Load neuron labeling service.
