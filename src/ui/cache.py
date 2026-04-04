@@ -38,6 +38,7 @@ else:
 def load_config(config_path: Path) -> Dict:
     """Load configuration from YAML and flatten for UI services."""
     config_path = Path(config_path)
+    project_root = config_path.parent.parent
 
     if not config_path.exists():
         raise FileNotFoundError(f"Config not found: {config_path}")
@@ -45,13 +46,28 @@ def load_config(config_path: Path) -> Dict:
     with open(config_path) as f:
         raw_config = yaml.safe_load(f)
 
+    def _resolve_to_project_root(path_value: str) -> str:
+        """Resolve path values relative to project root unless already absolute."""
+        if not path_value:
+            return ""
+        candidate = Path(path_value)
+        if candidate.is_absolute():
+            return str(candidate)
+        return str((project_root / candidate).resolve())
+
     # Flatten nested config structure for UI services
     config = {}
+    config["project_root"] = str(project_root.resolve())
+    config["config_path"] = str(config_path.resolve())
 
     # Data paths (from data section)
     if "data" in raw_config:
-        config["duckdb_path"] = raw_config["data"].get("db_path", "")
-        config["parquet_dir"] = raw_config["data"].get("parquet_dir", "")
+        config["duckdb_path"] = _resolve_to_project_root(
+            raw_config["data"].get("db_path", "")
+        )
+        config["parquet_dir"] = _resolve_to_project_root(
+            raw_config["data"].get("parquet_dir", "")
+        )
 
     # ELSA hyperparameters
     if "elsa" in raw_config:
@@ -65,10 +81,12 @@ def load_config(config_path: Path) -> Dict:
 
     # Output & steering defaults
     config["steering_alpha"] = 0.3  # Default steering interpolation
-    config["model_checkpoint_dir"] = raw_config.get("output", {}).get(
-        "base_dir", "outputs"
+    checkpoint_dir = raw_config.get("model", {}).get(
+        "checkpoint_dir",
+        raw_config.get("output", {}).get("base_dir", "outputs"),
     )
-    config["neuron_labels_path"] = "outputs/neuron_labels.json"
+    config["model_checkpoint_dir"] = _resolve_to_project_root(checkpoint_dir)
+    config["neuron_labels_path"] = _resolve_to_project_root("outputs/neuron_labels.json")
 
     # Compute n_items from parquet data (apply same filters as training)
     # NOTE: This is now only for informational purposes. The inference service
@@ -226,10 +244,13 @@ def load_data_service(config: Dict) -> DataService:
     # Project layout: src/ui/cache.py -> need to go up 3 levels to project root
     item2index_path = Path(__file__).parent.parent.parent / "data" / "processed_yelp_easystudy" / "item2index_filtered.pkl"
     
-    # Path to local photos folder
-    local_photos_path = Path(__file__).parent.parent.parent / "yelp_photos"
-    if not local_photos_path.exists():
-        local_photos_path = None
+    # Path to local photos folder (support common folder naming variants)
+    project_root = Path(__file__).parent.parent.parent
+    photo_candidates = [
+        project_root / "yelp_photos",
+        project_root / "Yelp-Photos",
+    ]
+    local_photos_path = next((p for p in photo_candidates if p.exists()), None)
     
     service = DataService(
         duckdb_path=Path(config["duckdb_path"]),
