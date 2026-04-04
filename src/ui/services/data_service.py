@@ -1,13 +1,13 @@
 """Data service for loading and serving POI metadata."""
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import json
 import logging
 import pickle
 
-import pandas as pd
 import duckdb
+import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +20,18 @@ class DataService:
     - POI details with photos
     - Test user filtering
     - Batch lookups
-    
+
     NOTE: Uses item2index mapping from training to ensure POI indices match
     the model's coordinate space (0 to n_items).
     """
 
     def __init__(
-        self, duckdb_path: Path, parquet_dir: Path, config: Optional[Dict] = None,
+        self,
+        duckdb_path: Path,
+        parquet_dir: Path,
+        config: Optional[Dict] = None,
         item2index_path: Optional[Path] = None,
-        local_photos_dir: Optional[Path] = None
+        local_photos_dir: Optional[Path] = None,
     ):
         """
         Initialize DataService.
@@ -38,7 +41,7 @@ class DataService:
             parquet_dir: Path to parquet data directory
             config: Optional config dict
             item2index_path: Path to item2index.pkl mapping (business_id -> model index)
-            local_photos_dir: Path to local photos directory (business_id.jpg format)
+            local_photos_dir: Path to local photos directory
         """
         self.duckdb_path = Path(duckdb_path)
         self.parquet_dir = Path(parquet_dir)
@@ -46,36 +49,41 @@ class DataService:
         self.state_filter = self.config.get("state_filter")
         self.local_photos_dir = Path(local_photos_dir) if local_photos_dir else None
 
-        # Load item2index mapping from training
-        # This ensures POI indices stay in model coordinate space
+        # Load item2index mapping from training.
         if item2index_path and Path(item2index_path).exists():
-            with open(item2index_path, 'rb') as f:
+            with open(item2index_path, "rb") as f:
                 self.item2index = pickle.load(f)
-            logger.info(f"✅ Loaded item2index mapping with {len(self.item2index)} items")
+            logger.info(
+                f"Loaded item2index mapping with {len(self.item2index)} items"
+            )
         else:
             self.item2index = None
-            logger.warning("item2index mapping not found - POI indices may not match model")
+            logger.warning("item2index mapping not found; index alignment may be incorrect")
+
+        # Reverse lookup: model idx -> business_id.
+        self.index2item = (
+            {idx: business_id for business_id, idx in self.item2index.items()}
+            if self.item2index
+            else {}
+        )
 
         logger.info("Loading POI data...")
         self.conn = duckdb.connect(str(self.duckdb_path))
         self.pois_df = self._load_pois_dataframe()
+        self.business_to_row_idx = self._build_business_index()
+        self.local_photo_index = self._build_local_photo_index()
 
         logger.info(
-            f"✅ Loaded {len(self.pois_df)} POIs (state_filter={self.state_filter})"
+            f"Loaded {len(self.pois_df)} POIs (state_filter={self.state_filter})"
         )
 
     def _load_pois_dataframe(self) -> pd.DataFrame:
         """Load POI metadata from Parquet into memory."""
-        # Use same glob pattern as training: business/state=*/...
-        # This ensures state is available as a column for filtering
         parquet_pattern = str(self.parquet_dir / "business" / "state=*" / "*.parquet")
-        # DuckDB needs forward slashes (POSIX paths)
         parquet_pattern = parquet_pattern.replace("\\", "/")
 
         try:
-            # Build query with state filter if provided
             if self.state_filter:
-                # Use parameterized query to match training approach
                 query = f"""
                     SELECT * FROM read_parquet('{parquet_pattern}')
                     WHERE state = '{self.state_filter}'
@@ -86,74 +94,187 @@ class DataService:
                 logger.debug("Loading all POIs (no state filter)")
 
             df = self.conn.execute(query).df()
-            df = df.reset_index(drop=True)  # Ensure clean 0-based indexing
+            df = df.reset_index(drop=True)
             logger.info(f"Loaded {len(df)} POIs from parquet")
             return df
         except Exception as e:
-            logger.error(f"Failed to load Parquet data with pattern '{parquet_pattern}': {e}")
+            logger.error(
+                f"Failed to load Parquet data with pattern '{parquet_pattern}': {e}"
+            )
             return pd.DataFrame()
+
+    def _build_business_index(self) -> Dict[str, int]:
+        """Create fast lookup map from business_id to row index in pois_df."""
+        if self.pois_df.empty or "business_id" not in self.pois_df.columns:
+            return {}
+
+        return {
+            str(business_id): int(row_idx)
+            for row_idx, business_id in enumerate(self.pois_df["business_id"])
+            if pd.notna(business_id)
+        }
+
+    def _build_local_photo_index(self) -> Dict[str, List[str]]:
+        """
+        Build business_id -> local photo paths index from Yelp photo dataset layout.
+
+        Expected layout:
+        - <local_photos_dir>/photos.json (JSONL with photo_id + business_id)
+        - <local_photos_dir>/photos/*.jpg
+        """
+        if not self.local_photos_dir or not self.local_photos_dir.exists():
+            return {}
+
+        photos_json_path = self.local_photos_dir / "photos.json"
+        photos_dir = self.local_photos_dir / "photos"
+
+        if not photos_json_path.exists() or not photos_dir.exists():
+            return {}
+
+        photo_index: Dict[str, List[str]] = {}
+        target_business_ids = set(self.business_to_row_idx.keys())
+
+        try:
+            with open(photos_json_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    try:
+                        photo_record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    business_id = str(photo_record.get("business_id", ""))
+                    photo_id = str(photo_record.get("photo_id", ""))
+
+                    if not business_id or not photo_id:
+                        continue
+                    if business_id not in target_business_ids:
+                        continue
+
+                    photo_path = photos_dir / f"{photo_id}.jpg"
+                    if not photo_path.exists():
+                        continue
+
+                    photo_index.setdefault(business_id, []).append(str(photo_path))
+        except OSError as e:
+            logger.warning(
+                f"Failed to build local photo index from {photos_json_path}: {e}"
+            )
+            return {}
+
+        if photo_index:
+            logger.info(
+                f"Indexed local photos for {len(photo_index)} businesses from {photos_json_path}"
+            )
+        return photo_index
+
+    def _resolve_business_and_row(
+        self, poi_idx: int
+    ) -> Tuple[Optional[str], Optional[pd.Series]]:
+        """Resolve model-space POI index to business_id and POI row."""
+        if poi_idx < 0:
+            return None, None
+
+        if self.index2item:
+            business_id = self.index2item.get(poi_idx)
+            if business_id is None:
+                return None, None
+
+            row_idx = self.business_to_row_idx.get(business_id)
+            if row_idx is None:
+                return business_id, None
+
+            return business_id, self.pois_df.iloc[row_idx]
+
+        if poi_idx >= len(self.pois_df):
+            return None, None
+
+        row = self.pois_df.iloc[poi_idx]
+        return str(row.get("business_id", "")), row
+
+    def _get_local_photos_for_business(self, business_id: str) -> List[str]:
+        """Return local photo paths for a business if available."""
+        if not business_id:
+            return []
+
+        indexed_paths = self.local_photo_index.get(business_id, [])
+        if indexed_paths:
+            return indexed_paths
+
+        # Backward-compatible fallback for legacy <business_id>.<ext> naming.
+        if not self.local_photos_dir:
+            return []
+
+        for ext in (".jpg", ".jpeg", ".png", ".webp"):
+            legacy_path = self.local_photos_dir / f"{business_id}{ext}"
+            if legacy_path.exists():
+                return [str(legacy_path)]
+
+        return []
+
+    def _parse_dataset_photos(self, photos_field) -> List[str]:
+        """Parse photos field from dataset row into a list of URLs."""
+        if not photos_field:
+            return []
+
+        if isinstance(photos_field, list):
+            return [str(photo) for photo in photos_field if photo]
+
+        if isinstance(photos_field, str):
+            photos_text = photos_field.strip()
+            if not photos_text:
+                return []
+
+            if photos_text.startswith("["):
+                try:
+                    parsed = json.loads(photos_text)
+                except json.JSONDecodeError:
+                    return []
+                if isinstance(parsed, list):
+                    return [str(photo) for photo in parsed if photo]
+
+            if photos_text.startswith("http://") or photos_text.startswith("https://"):
+                return [photos_text]
+
+        return []
 
     def get_poi_details(self, poi_idx: int) -> Dict:
         """
-        Get complete POI information by index.
+        Get complete POI information by model-space index.
 
-        Includes real Yelp photos from dataset or local directory.
-
-        Returns:
-            Dict with keys:
-                - poi_idx, business_id, name, category
-                - lat, lon, rating, review_count, url
-                - photos (list of URLs or local paths), primary_photo, photo_count
+        Includes local photos (if available) or Yelp URL photos from dataset.
         """
-        if poi_idx >= len(self.pois_df):
-            logger.warning(f"POI index {poi_idx} out of range")
+        business_id, row = self._resolve_business_and_row(poi_idx)
+        if row is None:
+            logger.warning(f"POI index {poi_idx} could not be resolved to POI metadata")
             return {}
 
-        row = self.pois_df.iloc[poi_idx]
-        business_id = str(row.get("business_id", ""))
-
-        # Try to load local photo first
-        photos = []
-        if self.local_photos_dir:
-            local_photo_path = self.local_photos_dir / f"{business_id}.jpg"
-            if local_photo_path.exists():
-                photos = [str(local_photo_path)]
-                logger.debug(f"Loaded local photo for {business_id}")
-        
-        # If no local photo, parse from Yelp dataset
+        photos = self._get_local_photos_for_business(business_id or "")
         if not photos:
-            photos_field = row.get("photos", "")
-            if photos_field:
-                try:
-                    if isinstance(photos_field, str):
-                        photos = json.loads(photos_field)
-                    elif isinstance(photos_field, list):
-                        photos = photos_field
-                except (json.JSONDecodeError, TypeError) as e:
-                    logger.debug(f"Could not parse photos for POI {poi_idx}: {e}")
+            photos = self._parse_dataset_photos(row.get("photos", ""))
+
+        resolved_business_id = str(row.get("business_id", business_id or ""))
 
         return {
             "poi_idx": poi_idx,
-            "business_id": str(row.get("business_id", "")),
+            "business_id": resolved_business_id,
             "name": str(row.get("name", "Unnamed")),
             "category": str(row.get("categories", "")),
             "lat": float(row.get("latitude", 0)),
             "lon": float(row.get("longitude", 0)),
             "rating": float(row.get("stars", 0)),
             "review_count": int(row.get("review_count", 0)),
-            "url": f"https://www.yelp.com/biz/{row.get('business_id')}",
-            # Photo information
+            "url": f"https://www.yelp.com/biz/{resolved_business_id}",
             "photos": photos,
             "primary_photo": photos[0] if photos else None,
             "photo_count": len(photos),
         }
 
     def get_pois_batch(self, poi_indices: List[int]) -> List[Dict]:
-        """
-        Bulk lookup for multiple POIs.
-
-        More efficient than repeated get_poi_details() calls.
-        """
+        """Bulk lookup for multiple POIs."""
         return [self.get_poi_details(idx) for idx in poi_indices]
 
     def get_test_users(self, limit: int = 50) -> List[Dict]:
@@ -161,22 +282,18 @@ class DataService:
         Get top N test users for dropdown selector.
 
         Filters to users with interactions in the current state_filter.
-
-        Returns:
-            List of dicts: [{'id': user_id, 'interactions': count}, ...]
         """
         try:
             review_pattern = str(self.parquet_dir / "review" / "year=*" / "*.parquet")
-            business_pattern = str(self.parquet_dir / "business" / "state=*" / "*.parquet")
-            # DuckDB needs forward slashes (POSIX paths)
+            business_pattern = str(
+                self.parquet_dir / "business" / "state=*" / "*.parquet"
+            )
             review_pattern = review_pattern.replace("\\", "/")
             business_pattern = business_pattern.replace("\\", "/")
 
-            # Build query to count interactions with businesses matching state filter
             if self.state_filter:
-                # Count interactions with businesses in this state only
                 query = f"""
-                    SELECT 
+                    SELECT
                         reviews.user_id,
                         COUNT(*) as interactions
                     FROM read_parquet('{review_pattern}') AS reviews
@@ -188,9 +305,8 @@ class DataService:
                     LIMIT {limit}
                 """
             else:
-                # No state filter - use all interactions
                 query = f"""
-                    SELECT 
+                    SELECT
                         user_id,
                         COUNT(*) as interactions
                     FROM read_parquet('{review_pattern}')
@@ -201,7 +317,6 @@ class DataService:
                 """
 
             users_df = self.conn.execute(query).df()
-
             result = [
                 {"id": row["user_id"], "interactions": int(row["interactions"])}
                 for _, row in users_df.iterrows()
@@ -221,37 +336,25 @@ class DataService:
         Get list of POI indices the user has interacted with.
 
         Uses item2index mapping to ensure indices match model coordinate space.
-
-        Args:
-            user_id: Yelp user ID
-            min_stars: Minimum star rating threshold
-
-        Returns:
-            List of POI indices (in model coordinate space 0 to n_items)
         """
         try:
             review_pattern = str(self.parquet_dir / "review" / "year=*" / "*.parquet")
-            # DuckDB needs forward slashes (POSIX paths)
             review_pattern = review_pattern.replace("\\", "/")
 
-            # Get business IDs for this user with minimum rating
             business_ids = self.conn.execute(
                 f"""
                 SELECT DISTINCT business_id
                 FROM read_parquet('{review_pattern}')
                 WHERE user_id = '{user_id}' AND stars >= {min_stars}
-            """
+                """
             ).df()
 
-            # Map business IDs to POI indices using item2index mapping
-            poi_indices = []
+            poi_indices: List[int] = []
             if self.item2index:
-                # Use trained model's item2index mapping
                 for bid in business_ids["business_id"]:
                     if bid in self.item2index:
                         poi_indices.append(self.item2index[bid])
             else:
-                # Fallback: map to pois_df index (will have wrong coordinate space)
                 for bid in business_ids["business_id"]:
                     matches = self.pois_df[
                         self.pois_df["business_id"] == bid
@@ -261,8 +364,7 @@ class DataService:
             if poi_indices:
                 max_idx = max(poi_indices)
                 logger.debug(
-                    f"User {user_id}: {len(poi_indices)} interactions, "
-                    f"max_idx={max_idx}"
+                    f"User {user_id}: {len(poi_indices)} interactions, max_idx={max_idx}"
                 )
 
             return poi_indices
