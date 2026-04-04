@@ -13,10 +13,11 @@ import sys
 import logging
 
 import streamlit as st
-import yaml
 
 # Add project root to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+# Add UI directory so "from cache import ..." is stable from any working directory.
+sys.path.insert(0, str(Path(__file__).parent))
 
 # Configure logging
 logging.basicConfig(
@@ -40,6 +41,32 @@ if not config_path.exists():
 
 logger.info(f"Loading config from {config_path}")
 
+
+def _show_startup_diagnostics(config: dict) -> None:
+    """Display high-signal diagnostics for common path/config issues."""
+    checks = [
+        ("Config", config.get("config_path")),
+        ("Checkpoint root", config.get("model_checkpoint_dir")),
+        ("DuckDB", config.get("duckdb_path")),
+        ("Parquet root", config.get("parquet_dir")),
+    ]
+
+    missing = []
+    with st.expander("Startup diagnostics", expanded=False):
+        for label, path_str in checks:
+            exists = bool(path_str and Path(path_str).exists())
+            status = "OK" if exists else "MISSING"
+            st.write(f"{label}: `{path_str}` [{status}]")
+            if not exists:
+                missing.append(label)
+
+    if missing:
+        st.warning(
+            "Some required paths are missing: "
+            + ", ".join(missing)
+            + ". Check configs/default.yaml path values."
+        )
+
 # Initialize services (via @st.cache_resource)
 try:
     from cache import (
@@ -56,6 +83,7 @@ try:
     # Load and flatten config
     logger.info("Loading configuration...")
     config = load_config(config_path)
+    _show_startup_diagnostics(config)
     with st.spinner("Loading models..."):
         inference = load_inference_service(config)
 
