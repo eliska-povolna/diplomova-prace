@@ -1,0 +1,70 @@
+# Streamlit UI Configuration
+# Points to model checkpoints and data paths
+
+# Model configuration
+model:
+  # Checkpoint directory containing elsa_best.pt and sae_best.pt
+  checkpoint_dir: "../../outputs/20260326_093131/checkpoints"
+  
+  # Model hyperparameters (must match training config)
+  n_items: 2212
+  latent_dim: 512
+  k: 32
+  width_ratio: 4
+  l1_coef: 0.0003
+  
+  # Inference configuration
+  steering_alpha: 0.3        # Interpolation strength for steering
+  steering_range: 2.0        # Max slider value (symmetric: -1.0 to +2.0)
+  steering_center: 0.0       # Neutral steering value
+  
+  # Scoring configuration
+  top_k_features: 15         # Features to show in steering UI
+  top_k_recommendations: 20  # Recommendations to generate
+
+# Data configuration
+data:
+  # Yelp data paths
+  parquet_dir: "../../Yelp-JSON/yelp_parquet"
+  db_path: "../../Yelp-JSON/yelp.duckdb"
+  
+  # Data filters (must match training)
+  state_filter: "CA"
+  min_review_count: 20
+  pos_threshold: 4.0
+  
+  # Cache settings
+  cache_user_interactions: true
+  cache_poi_details: true
+
+# LLM configuration (for neuron labeling)
+llm:
+  provider: "google"         # "google" or "openai"
+  api_key: "${GEMINI_API_KEY}"  # Read from environment
+  model: "gemini-2.0-flash"
+  
+  # Labeling behavior
+  cache_labels: true         # Cache labels locally
+  label_batch_size: 10       # Batch LLM calls for efficiency
+  timeout_seconds: 30
+
+# Streamlit app settings
+streamlit:
+  # Session management
+  max_users_dropdown: 50
+  session_timeout_minutes: 60
+  
+  # UI preferences
+  cards_per_row: 3
+  photo_height: 300
+  default_map_center: [37.5, -121.5]  # California
+  default_map_zoom: 8
+  
+  # Performance
+  lazy_load_photos: true
+  lazy_load_labels: true
+
+# Logging
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

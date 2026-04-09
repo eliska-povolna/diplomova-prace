@@ -1,37 +1,50 @@
-# Training & evaluation configuration
-# Hyperparameters match src/yelp_initial_exploration/train_elsa.py and train_sae.py
-# Override individual values with: python src/train.py --config configs/custom.yaml
+# Default configuration for ELSA + TopK SAE training pipeline
+# Hyperparameters match src/yelp_initial_exploration/ reference code
+#
+# Usage: python src/train.py --config configs/default.yaml
 
+# Data configuration
 data:
-  parquet_dir: yelp_parquet          # root dir with business/ and review/ subdirs
-  processed_dir: data/processed       # output dir for CSR matrix + ID maps
-  pos_threshold: 4.0                  # stars >= threshold → implicit positive
-  val_ratio: 0.1
+  parquet_dir: "../../Yelp-JSON/yelp_parquet"
+  db_path: "../../Yelp-JSON/yelp.duckdb"
+  state_filter: "PA"                    # Set to "CA", "PA", null for full dataset
+  min_review_count: 20
+  pos_threshold: 4.0                    # Stars >= threshold for positive
+  year_min: null                        # Optional year range filters
+  year_max: null
+  train_test_split: 0.8                 # 80% train, 20% test
+  val_split: 0.1                        # 10% of train as validation
   seed: 42
 
+# ELSA model configuration
 elsa:
-  latent_dim: 512                     # embedding dimension (= SAE input dim)
-  n_epochs: 25
+  latent_dim: 512
+  learning_rate: 0.0003              # 3e-4
   batch_size: 1024
-  lr: 3.0e-4
-  beta1: 0.9                          # Adam beta1
-  beta2: 0.99                         # Adam beta2
-  patience: 10                        # early stopping patience
-
-sae:
-  width_ratio: 4                      # hidden_dim = width_ratio * latent_dim = 2048
-  k: 32                               # TopK sparsity: active features per user
-  l1_coef: 3.0e-4                     # L1 coefficient on sparse activations
-  n_epochs: 50
-  batch_size: 1024
-  lr: 3.0e-4
-  beta1: 0.9                          # Adam beta1
-  beta2: 0.99                         # Adam beta2
+  num_epochs: 25
   patience: 10
+  weight_decay: 0.0
+  device: "cpu"                        # or "cuda"
 
+# TopK SAE configuration
+sae:
+  width_ratio: 4                        # hidden_dim = width_ratio * latent_dim
+  k: 32                                 # Sparsity: keep top-k activations
+  learning_rate: 0.0003              # 3e-4
+  l1_coef: 0.0003                    # 3e-4
+  batch_size: 1024
+  num_epochs: 50
+  patience: 10
+  min_delta: 0.0001                  # 1e-4
+  device: "cpu"                        # or "cuda"
+
+# Output configuration
+output:
+  base_dir: "outputs"
+  log_level: "INFO"                     # DEBUG, INFO, WARNING, ERROR
+  save_frequency: 5                     # Save checkpoint every N epochs
+
+# Evaluation configuration
 evaluation:
-  k_values: [10, 20]                  # Recall@K, NDCG@K
-
-logging:
-  log_every_n_steps: 100
-  checkpoint_dir: models/
+  k_values: [10, 20, 50]                # Compute metrics @ k
+  device: "cuda"                        # or "cpu"

@@ -69,6 +69,24 @@ instance/
 # Sphinx documentation
 docs/_build/
 
+# Local analysis & internal documentation (not for version control)
+docs/analysis/
+
+# ── Data files (not for version control) ─────────────────────────────────────
+# Binary data and outputs
+outputs/
+*.json
+*.jsonl
+*.png
+*.npz
+*.duckdb
+notebooks/*.duckdb
+data/processed_yelp_easystudy/*.json
+
+# Photo directories
+yelp_photos/
+Yelp-Photos/
+
 # PyBuilder
 .pybuilder/
 target/

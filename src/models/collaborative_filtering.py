@@ -65,6 +65,7 @@ class ELSA(nn.Module):
         """
         A = self._A_norm
         z = x @ A
+        z = F.normalize(z, dim=-1)  # Normalize latent before reconstruction
         return z @ A.T
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
