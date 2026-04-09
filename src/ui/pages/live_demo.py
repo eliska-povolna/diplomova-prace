@@ -116,7 +116,7 @@ def show():
 
         with col2:
             if st.button("🏠 Home"):
-                st.switch_page("pages:Home")
+                st.switch_page("🏠 Home")
 
     # =====================================================================
     # MAIN AREA

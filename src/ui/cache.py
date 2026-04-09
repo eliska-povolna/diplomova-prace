@@ -23,6 +23,7 @@ from services import (
     DataService,
     LabelingService,
     ModelLoader,
+    WordcloudService,
 )
 
 logger = logging.getLogger(__name__)
@@ -336,6 +337,39 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
         config=config,
         data_service=data_service,
     )
+    return service
+
+
+@st_cache_resource
+def load_wordcloud_service(config: Dict) -> "WordcloudService":
+    """
+    Load wordcloud service for neuron feature visualization.
+
+    Provides wordcloud generation from neuron category data.
+    """
+    try:
+        from services import WordcloudService
+    except ImportError:
+        logger.error("WordcloudService not available")
+        return None
+    
+    # Find paths to label and metadata files
+    output_dir = Path(config.get("model_checkpoint_dir", "outputs")).parent
+    labels_path = output_dir / "neuron_labels.json"
+    metadata_path = output_dir / "neuron_category_metadata.json"
+    
+    # Fallback to outputs directory if parent doesn't have files
+    if not labels_path.exists():
+        labels_path = Path("outputs") / "neuron_labels.json"
+    if not metadata_path.exists():
+        metadata_path = Path("outputs") / "neuron_category_metadata.json"
+    
+    service = WordcloudService(
+        category_metadata_path=metadata_path if metadata_path.exists() else None,
+        labels_path=labels_path if labels_path.exists() else None,
+    )
+    
+    logger.info("✅ Wordcloud service initialized")
     return service
 
 

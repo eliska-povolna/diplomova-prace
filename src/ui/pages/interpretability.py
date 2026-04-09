@@ -1,42 +1,47 @@
-"""Interpretability page — Feature browser."""
+"""Interpretability page — Feature browser with labels and wordclouds."""
 
 import streamlit as st
 import pandas as pd
 from pathlib import Path
-try:
-    from src.ui.components.neuron_wordcloud import display_neuron_wordcloud
-    from src.ui.cache import get_precomputed_cache_dir
-    HAS_WORDCLOUD = True
-except ImportError:
-    HAS_WORDCLOUD = False
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def show():
-    """Display interpretability page."""
-    labels = st.session_state.get("labels")
-    data = st.session_state.get("data")
-
-    if not labels:
-        st.error("Labeling service not initialized")
-        return
-
+    """Display interpretability page with neuron labels and wordclouds."""
+    
     st.title("🔍 Feature Interpretability")
 
     st.markdown(
         """
     Browse all learned features and understand what each neuron represents
-    by examining the POIs that maximally activate it.
+    through human-readable labels and visual wordclouds of activating business categories.
     """
     )
+
+    # Initialize services
+    labels_service = st.session_state.get("labels")
+    wordcloud_service = st.session_state.get("wordcloud")
+    
+    if not labels_service:
+        st.error("❌ Labeling service not initialized")
+        return
+    
+    if not wordcloud_service:
+        st.warning("⚠️ Wordcloud service not available - labels will display without visualizations")
 
     # Feature selector
     col1, col2 = st.columns([2, 1])
 
     with col1:
+        # Get maximum neuron count
+        max_neuron = 63  # Default for SAE k=32 or similar
+        
         neuron_idx = st.slider(
             "Select Feature",
             min_value=0,
-            max_value=63,  # TODO: Make dynamic based on SAE k
+            max_value=max_neuron,
             value=0,
             step=1,
             key="neuron_slider",
@@ -45,57 +50,83 @@ def show():
     with col2:
         if st.button("🎛️ Use in Live Demo"):
             st.session_state.selected_neuron = neuron_idx
-            st.switch_page("src.ui.main:show_live_demo")
+            st.switch_page("🎛️ Live Demo")
 
     st.divider()
 
-    # Feature details
-    col_left, col_right = st.columns([1, 2])
+    # Feature details - Two column layout
+    col_left, col_right = st.columns([1, 1.5])
 
     with col_left:
+        # Label section
         st.subheader("📝 Label")
-
-        # Get label (will use LLM if available)
-        label = labels.get_label(neuron_idx)
+        
+        # Get label from service
+        try:
+            label = labels_service.get_label(neuron_idx)
+        except Exception as e:
+            label = f"Feature {neuron_idx}"
+            logger.warning(f"Failed to get label: {e}")
 
         st.markdown(
             f"""
         ### {label}
         
-        **Feature Index**: `{neuron_idx}`
-        
-        **Semantic**: Interpretable dimension learned by SAE
+        **Feature Index**: `{neuron_idx}`  
+        **Type**: Interpretable dimension (SAE neuron)
         """
         )
 
-        # Copy button for label
+        # Copy-friendly code block
         st.code(label, language="text")
         
-        # Word cloud visualization (if available)
-        if HAS_WORDCLOUD:
-            st.divider()
-            st.subheader("☁️ Word Cloud")
-            st.markdown("Top words from POIs activating this feature.")
-            
-            cache_dir = get_precomputed_cache_dir()
+        # Get categories if available
+        if wordcloud_service:
             try:
-                display_neuron_wordcloud(
-                    neuron_idx,
-                    label="",
-                    precomputed_wordcloud_dir=cache_dir,
-                    width=400,
-                    height=200,
-                    colormap="viridis",
-                    show_info=False,
-                )
+                categories = wordcloud_service.get_categories_for_neuron(neuron_idx)
+                if categories:
+                    st.subheader("📂 Top Categories")
+                    # Display as pills
+                    for i in range(0, len(categories), 2):
+                        cols = st.columns(2)
+                        with cols[0]:
+                            st.caption(f"• {categories[i]}")
+                        if i + 1 < len(categories):
+                            with cols[1]:
+                                st.caption(f"• {categories[i+1]}")
             except Exception as e:
-                st.warning(f"Word cloud unavailable: {str(e)[:50]}")
+                logger.debug(f"Could not display categories: {e}")
+
+    with col_right:
+        st.subheader("☁️ Category Wordcloud")
+        st.markdown("Frequencies of business categories that activate this feature.")
+        
+        if wordcloud_service:
+            try:
+                # Generate wordcloud
+                fig = wordcloud_service.generate_wordcloud_fig(
+                    neuron_idx,
+                    figsize=(7, 4),
+                    width=600,
+                    height=400,
+                    colormap='tab20'
+                )
+                
+                if fig is not None:
+                    st.pyplot(fig, use_container_width=True)
+                else:
+                    st.info("📊 No wordcloud data available for this feature")
+            except Exception as e:
+                st.warning(f"⚠️ Wordcloud generation failed: {str(e)[:80]}")
+                logger.error(f"Wordcloud generation error: {e}")
+        else:
+            st.info("📊 Wordcloud service not available")
 
     with col_right:
         st.subheader("📍 Top Activating POIs")
 
         # Get top POIs for this neuron
-        top_pois = labels.get_pois_for_neuron(neuron_idx, top_k=10)
+        top_pois = labels_service.get_pois_for_neuron(neuron_idx, top_k=10) if labels_service else []
 
         if top_pois:
             # Convert to DataFrame for display

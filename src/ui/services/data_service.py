@@ -5,11 +5,35 @@ from typing import Dict, List, Optional, Tuple
 import json
 import logging
 import pickle
+from dataclasses import dataclass
 
 import duckdb
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PhotoMetadata:
+    """Photo metadata extracted from photos.json."""
+    photo_id: str
+    business_id: str
+    path: str
+    label: str = "other"  # e.g., 'outside', 'inside', 'food', 'drink', 'menu'
+    caption: str = ""
+
+    @staticmethod
+    def label_priority(label: str) -> int:
+        """Return priority score for photo label (higher = better)."""
+        priorities = {
+            "outside": 5,
+            "inside": 4,
+            "food": 3,
+            "drink": 2,
+            "menu": 1,
+            "other": 0,
+        }
+        return priorities.get(label.lower(), 0)
 
 
 class DataService:
@@ -114,13 +138,15 @@ class DataService:
             if pd.notna(business_id)
         }
 
-    def _build_local_photo_index(self) -> Dict[str, List[str]]:
+    def _build_local_photo_index(self) -> Dict[str, List[PhotoMetadata]]:
         """
-        Build business_id -> local photo paths index from Yelp photo dataset layout.
+        Build business_id -> sorted photo metadata index from Yelp photo dataset layout.
 
         Expected layout:
-        - <local_photos_dir>/photos.json (JSONL with photo_id + business_id)
+        - <local_photos_dir>/photos.json (JSONL with photo_id, business_id, label, caption)
         - <local_photos_dir>/photos/*.jpg
+
+        Photos are sorted by label priority (outside > inside > food > drink > menu > other).
         """
         if not self.local_photos_dir or not self.local_photos_dir.exists():
             return {}
@@ -131,7 +157,7 @@ class DataService:
         if not photos_json_path.exists() or not photos_dir.exists():
             return {}
 
-        photo_index: Dict[str, List[str]] = {}
+        photo_index: Dict[str, List[PhotoMetadata]] = {}
         target_business_ids = set(self.business_to_row_idx.keys())
 
         try:
@@ -158,17 +184,43 @@ class DataService:
                     if not photo_path.exists():
                         continue
 
-                    photo_index.setdefault(business_id, []).append(str(photo_path))
+                    # Extract label and caption (new fields)
+                    label = str(photo_record.get("label", "other"))
+                    caption = str(photo_record.get("caption", ""))
+
+                    photo_meta = PhotoMetadata(
+                        photo_id=photo_id,
+                        business_id=business_id,
+                        path=str(photo_path),
+                        label=label,
+                        caption=caption,
+                    )
+
+                    photo_index.setdefault(business_id, []).append(photo_meta)
         except OSError as e:
             logger.warning(
                 f"Failed to build local photo index from {photos_json_path}: {e}"
             )
             return {}
 
-        if photo_index:
-            logger.info(
-                f"Indexed local photos for {len(photo_index)} businesses from {photos_json_path}"
+        # Sort photos by label priority (descending) for each business
+        for business_id in photo_index:
+            photo_index[business_id].sort(
+                key=lambda p: PhotoMetadata.label_priority(p.label), reverse=True
             )
+
+        if photo_index:
+            total_photos = sum(len(photos) for photos in photo_index.values())
+            logger.info(
+                f"Indexed {total_photos} local photos for {len(photo_index)} businesses from {photos_json_path}"
+            )
+            # Log label distribution for validation
+            label_dist = {}
+            for photos in photo_index.values():
+                for photo in photos:
+                    label_dist[photo.label] = label_dist.get(photo.label, 0) + 1
+            logger.info(f"Photo label distribution: {label_dist}")
+
         return photo_index
 
     def _resolve_business_and_row(
@@ -196,13 +248,14 @@ class DataService:
         return str(row.get("business_id", "")), row
 
     def _get_local_photos_for_business(self, business_id: str) -> List[str]:
-        """Return local photo paths for a business if available."""
+        """Return local photo paths for a business if available, sorted by label priority."""
         if not business_id:
             return []
 
-        indexed_paths = self.local_photo_index.get(business_id, [])
-        if indexed_paths:
-            return indexed_paths
+        indexed_photos = self.local_photo_index.get(business_id, [])
+        if indexed_photos:
+            # Extract paths from sorted PhotoMetadata objects
+            return [photo.path for photo in indexed_photos]
 
         # Backward-compatible fallback for legacy <business_id>.<ext> naming.
         if not self.local_photos_dir:

@@ -447,13 +447,43 @@ def main() -> None:
             raise FileNotFoundError(f"Parquet directory not found: {parquet_dir}")
 
         # Load with all applicable filters from config
-        reviews = load_reviews(
+        # ⭐ FIRST: Create UNIVERSAL mappings from ALL data BEFORE any filtering
+        # This ensures we have complete mappings for all possible items
+        logger.info("Creating universal item/business mappings...")
+        all_reviews = load_reviews(
             parquet_dir,
             db_path=db_path,
             pos_threshold=config["data"]["pos_threshold"],
             year_min=config["data"].get("year_min"),
             year_max=config["data"].get("year_max"),
         )
+
+        # Build universal mappings from all data
+        all_users = all_reviews["user_id"].unique()
+        all_businesses = all_reviews["business_id"].unique()
+
+        universal_user_map = {uid: idx for idx, uid in enumerate(all_users)}
+        universal_business_map = {bid: idx for idx, bid in enumerate(all_businesses)}
+
+        logger.info(f"Universal mappings created:")
+        logger.info(f"  Total unique users: {len(universal_user_map)}")
+        logger.info(f"  Total unique businesses: {len(universal_business_map)}")
+
+        # Save universal mappings for downstream use (e.g., labeling notebook)
+        import pickle
+
+        mappings_dir = output_dir / "mappings"
+        mappings_dir.mkdir(parents=True, exist_ok=True)
+
+        with open(mappings_dir / "user2index_universal.pkl", "wb") as f:
+            pickle.dump(universal_user_map, f)
+        with open(mappings_dir / "business2index_universal.pkl", "wb") as f:
+            pickle.dump(universal_business_map, f)
+
+        logger.info(f"Universal mappings saved to {mappings_dir}")
+
+        # ⭐ NOW apply filtering on top of universal data
+        reviews = all_reviews.copy()
 
         # Filter by state (if specified)
         state_filter = config["data"].get("state_filter")
@@ -470,10 +500,10 @@ def main() -> None:
             )
             reviews = reviews[reviews["business_id"].isin(business_ids)]
 
-        logger.info(f"Loaded {len(reviews)} reviews")
+        logger.info(f"Loaded {len(reviews)} reviews (after state filtering)")
 
-        # Build CSR matrix
-        logger.info("Building CSR matrix...")
+        # Build CSR matrix FROM FILTERED DATA
+        logger.info("Building CSR matrix from filtered data...")
         dataset = build_csr(reviews)
         X_csr = dataset.csr
         logger.info(

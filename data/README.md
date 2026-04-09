@@ -22,7 +22,27 @@ yelp_dataset/
 
 ### 2. Convert JSON to Parquet
 
-Use the dedicated conversion script to convert Yelp JSON files to Parquet format (for faster loading and reduced memory usage):
+**Option A: Automatic conversion in preprocessing notebook (recommended)**
+
+The preprocessing notebook (`notebooks/00_preprocessing.ipynb`) automatically converts JSON to Parquet on first run:
+
+1. Open `notebooks/00_preprocessing.ipynb`
+2. Run the "Convert Raw JSON to Parquet" cell
+3. If Parquet files don't exist, the notebook:
+   - Reads raw Yelp JSON files
+   - Creates DataFrames using pandas
+   - Saves partitioned Parquet files:
+     - **Business data** partitioned by state: `business/state=XX/part-0.parquet`
+     - **Review data** partitioned by year: `review/year=YYYY/part-0.parquet`
+
+**Why partitioning?**
+- State partitioning: Enables fast filtering for per-state analysis
+- Year partitioning: Enables temporal analysis and efficient range queries
+- Compression: Uses Snappy compression for smaller file sizes
+
+**Option B: Manual script conversion (legacy)**
+
+If you prefer standalone conversion, use:
 
 ```bash
 cd <repo_root>
@@ -31,25 +51,15 @@ python src/data/convert_json_to_parquet.py \
     --parquet_dir /path/to/yelp_parquet
 ```
 
-**Options:**
-- `--max_rows N`: Convert only the first N rows per file (useful for testing)
-- `--chunk_size N`: Adjust memory usage (default: 50,000)
-- `--tables business review user`: Convert specific tables (default: all)
-
-**Example** (testing with first 100k rows):
-```bash
-python src/data/convert_json_to_parquet.py \
-    --json_dir /path/to/yelp_dataset \
-    --parquet_dir /path/to/yelp_parquet \
-    --max_rows 100000
-```
-
-This produces:
+This produces the same partitioned structure:
 ```
 yelp_parquet/
-    business.parquet
-    review.parquet
-    user.parquet
+    business/state=AZ/part-0.parquet
+    business/state=CA/part-0.parquet
+    ...
+    review/year=2005/part-0.parquet
+    review/year=2006/part-0.parquet
+    ...
 ```
 
 ## Directory layout
@@ -67,8 +77,52 @@ After conversion, update your config to point to the Parquet directory:
 **In `configs/default.yaml`:**
 ```yaml
 data:
-  parquet_dir: "/path/to/yelp_parquet"  # Point to where convert_json_to_parquet.py output files are
+  parquet_dir: "Yelp-JSON/yelp_parquet"  # Point to where Parquet files are stored
   db_path: "yelp.duckdb"
 ```
 
-Then training will automatically load from Parquet files instead of JSON.
+## Preprocessing Pipeline
+
+### Complete workflow: JSON → Parquet → CSR matrices
+
+The **preprocessing notebook** (`notebooks/00_preprocessing.ipynb`) orchestrates the full end-to-end pipeline:
+
+1. **JSON → Parquet conversion** (if needed)
+   - Reads raw Yelp JSON files
+   - Converts to DataFrames using pandas
+   - Saves partitioned Parquet files
+
+2. **Build global ID mappings**
+   - Extracts all unique user_ids → creates `user2index.pkl`
+   - Extracts all unique business_ids → creates `item2index.pkl`
+   - Ensures consistent indices across all experiments
+
+3. **Create CSR matrices**
+   - Full matrix: `R_full.npz` (all states, all users)
+   - Per-state variants: `R_{STATE}_compact.npz` (only active users/items)
+   - Statistics: `state_statistics.csv`
+
+**Outputs saved to:** `data/preprocessed_yelp/`
+
+### Why separate preprocessing?
+
+- **Consistent indices**: Fixed user/item mappings enable reproducible neuron labeling
+- **One-time conversion**: Parquet created once, then reused for multiple experiments
+- **Explicit filtering**: Business filtering (k-core, state selection) happens during training, not preprocessing
+- **Traceability**: `metadata.json` documents preprocessing decisions
+
+### Running the preprocessing pipeline
+
+```python
+# Open and run: notebooks/00_preprocessing.ipynb
+# The notebook will:
+# - Check if Parquet files exist
+# - Convert JSON → Parquet if needed (automatic)
+# - Build CSR matrices and ID mappings
+# - Save all preprocessed data to data/preprocessed_yelp/
+```
+
+After preprocessing completes, you can run the **training notebook** (`notebooks/02_training.ipynb`):
+- Loads preprocessed CSR matrices
+- Applies k-core filtering (k=5)
+- Trains models on the filtered data
