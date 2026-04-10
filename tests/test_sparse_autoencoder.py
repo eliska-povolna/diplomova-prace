@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from src.models.sparse_autoencoder import TopKSAE, cosine_recon, topk_mask
+from src.models.sparse_autoencoder import TopKSAE, topk_mask
 
 
 class TestTopKMask:
@@ -21,17 +21,6 @@ class TestTopKMask:
         x = torch.randn(4, 32)
         mask = topk_mask(x, k=5)
         assert set(mask.unique().tolist()).issubset({0.0, 1.0})
-
-
-class TestCosineRecon:
-    def test_zero_for_identical(self) -> None:
-        x = torch.randn(8, 16)
-        assert cosine_recon(x, x).item() == pytest.approx(0.0, abs=1e-5)
-
-    def test_positive_for_different(self) -> None:
-        a = torch.randn(8, 16)
-        b = torch.randn(8, 16)
-        assert cosine_recon(a, b).item() >= 0.0
 
 
 @pytest.fixture

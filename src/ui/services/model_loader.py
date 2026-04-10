@@ -52,22 +52,21 @@ class ModelLoader:
 
     @staticmethod
     def load_models(
-        elsa_ckpt_path: Path, sae_ckpt_path: Path, device: str = "cpu"
-    ) -> Tuple:
+        elsa_ckpt_path: Path, device: str = "cpu"
+    ):
         """
-        Load ELSA and SAE models from checkpoint paths.
+        Load ELSA model from checkpoint path.
 
         Args:
             elsa_ckpt_path: Path to elsa_best.pt
-            sae_ckpt_path: Path to sae_best.pt
             device: 'cpu' or 'cuda'
 
         Returns:
-            Tuple of (elsa_model, sae_model)
+            Loaded ELSA model
         """
         from src.models.sae_cf_model import ELSASAEModel
 
-        logger.info(f"Loading models from {elsa_ckpt_path.parent}")
+        logger.info(f"Loading model from {elsa_ckpt_path}")
 
         # Load checkpoint
         checkpoint = torch.load(elsa_ckpt_path, map_location=device)
@@ -87,7 +86,7 @@ class ModelLoader:
         model.to(device)
         model.eval()
 
-        logger.info("✅ Models loaded successfully")
+        logger.info("✅ Model loaded successfully")
         return model
 
     @staticmethod

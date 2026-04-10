@@ -18,11 +18,10 @@ except ImportError:
 
 import yaml
 
-from services import (
+from .services import (
     InferenceService,
     DataService,
     LabelingService,
-    ModelLoader,
     WordcloudService,
 )
 
@@ -274,8 +273,8 @@ def load_data_service(config: Dict) -> DataService:
 def get_precomputed_cache_dir() -> Optional[Path]:
     """Detect if precomputed UI cache exists and return its path.
     
-    Looks for precomputed_ui_cache/ in the latest outputs/PA_* or outputs/*/ directories.
-    Returns None if not found (app will compute on-demand).
+    Looks for precomputed_ui_cache/neuron_wordclouds/ in the latest outputs/*/ directories.
+    Returns the neuron_wordclouds subdirectory or None if not found (app will compute on-demand).
     """
     project_root = Path(__file__).parent.parent.parent
     outputs_dir = project_root / "outputs"
@@ -283,7 +282,7 @@ def get_precomputed_cache_dir() -> Optional[Path]:
     if not outputs_dir.exists():
         return None
     
-    # Find all state-prefixed output directories (PA_*, CA_*, etc.)
+    # Find all output directories, sorted by modification time
     import os
     output_dirs = sorted(
         [d for d in outputs_dir.iterdir() if d.is_dir()],
@@ -292,7 +291,7 @@ def get_precomputed_cache_dir() -> Optional[Path]:
     )
     
     for output_dir in output_dirs:
-        cache_dir = output_dir / "precomputed_ui_cache"
+        cache_dir = output_dir / "precomputed_ui_cache" / "neuron_wordclouds"
         if cache_dir.exists():
             logger.info(f"✓ Found precomputed cache at {cache_dir}")
             return cache_dir

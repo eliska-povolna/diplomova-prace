@@ -41,7 +41,6 @@ def show():
         st.metric("📍 POIs", f"{data.num_pois:,}", delta=None, delta_color="off")
 
     with col3:
-        test_users = data.get_test_users(limit=1)
         st.metric(
             "👥 Test Users",
             len(data.get_test_users(limit=50)),

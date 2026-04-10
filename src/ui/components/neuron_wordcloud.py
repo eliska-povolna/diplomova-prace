@@ -2,13 +2,11 @@
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict
 
 import streamlit as st
 from wordcloud import WordCloud
 from PIL import Image
-import io
-import matplotlib.pyplot as plt
 
 logger = logging.getLogger(__name__)
 

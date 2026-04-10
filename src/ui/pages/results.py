@@ -76,7 +76,7 @@ def show_actual_results(results: dict):
         # Metrics table
         if "metrics" in results:
             metrics_df = pd.DataFrame(results["metrics"])
-            st.dataframe(metrics_df, width="stretch")
+            st.dataframe(metrics_df, use_container_width=True)
         else:
             st.info("Metrics data not available in results.")
 
@@ -159,10 +159,10 @@ def show_actual_results(results: dict):
                     "variable": "Metric",
                 },
             )
-            st.plotly_chart(fig, use_container_width=True, key="ablation_sparsity_line")
+            st.plotly_chart(fig, use_container_width=True)
 
             # Table
-            st.dataframe(ablations_df, width="stretch")
+            st.dataframe(ablations_df, use_container_width=True)
         else:
             st.info(
                 """
@@ -250,7 +250,7 @@ def show_placeholder_results():
         }
 
         metrics_df = pd.DataFrame(metrics_data)
-        st.dataframe(metrics_df, width="stretch")
+        st.dataframe(metrics_df, use_container_width=True)
 
         # Metric explanations in expandable sections
         with st.expander("📖 Metric Explanations", expanded=False):
@@ -308,7 +308,7 @@ def show_placeholder_results():
                 "Recall@20": "Recall@20",
             },
         )
-        st.plotly_chart(fig, use_container_width=True, key="quality_vs_size_scatter")
+        st.plotly_chart(fig, use_container_width=True)
 
         st.markdown(
             """
@@ -345,7 +345,7 @@ def show_placeholder_results():
         }
 
         ablation_df = pd.DataFrame(ablation_data)
-        st.dataframe(ablation_df, width="stretch")
+        st.dataframe(ablation_df, use_container_width=True)
 
         # Dual-axis plot
         fig = go.Figure()

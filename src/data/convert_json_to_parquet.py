@@ -98,13 +98,22 @@ def convert_jsonl_to_parquet(
                         except (ValueError, TypeError):
                             logger.debug(f"Could not cast {col} to {dt}, skipping")
 
-            df.to_parquet(
-                output_path,
-                engine="pyarrow",
-                compression="zstd",
-                index=False,
-                append=output_path.exists(),
-            )
+            # Write each chunk to a separate part file to avoid append issues
+            if not output_path.exists():
+                df.to_parquet(
+                    output_path,
+                    engine="pyarrow",
+                    compression="zstd",
+                    index=False,
+                )
+            else:
+                # For incremental writes, use parquet writer or create separate part files
+                from pyarrow import parquet as pq
+                import pyarrow as pa
+                
+                table = pa.Table.from_pandas(df)
+                writer = pq.ParquetWriter(str(output_path), table.schema)
+                writer.write_table(table)
             total_rows += len(rows)
             rows = []
             logger.info(f"  ... wrote {total_rows} rows so far")
