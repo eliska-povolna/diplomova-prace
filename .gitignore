@@ -72,8 +72,27 @@ docs/_build/
 # Local analysis & internal documentation (not for version control)
 docs/analysis/
 
+# ── Development scripts & debug files ────────────────────────────────────────
+# Debug, test, and utility scripts (keep in scripts/ folder)
+scripts/
+
 # ── Data files (not for version control) ─────────────────────────────────────
-# Binary data and outputs
+# LARGE DATASETS - Keep locally or in cloud storage, do NOT commit
+# - Yelp-JSON/yelp.duckdb (1-2 GB)
+# - Yelp-JSON/yelp_parquet/ (2-3 GB)
+# + See DEPLOYMENT.md for cloud storage strategy
+
+# Development/Local data
+Yelp-JSON/
+Yelp/
+data/preprocessed_yelp/
+data/processed_yelp_easystudy/*.duckdb
+
+# BUT: DO COMMIT test_data/ with sample datasets for CI/testing
+!test_data/
+test_data/**/.gitkeep
+
+# Binary data files
 outputs/
 *.json
 *.jsonl
@@ -81,11 +100,15 @@ outputs/
 *.npz
 *.duckdb
 notebooks/*.duckdb
-data/processed_yelp_easystudy/*.json
 
 # Photo directories
 yelp_photos/
 Yelp-Photos/
+yelp_dataset/
+
+# UI caches - small, commit these
+!data/ui_cache/
+data/ui_cache/**/.gitkeep
 
 # PyBuilder
 .pybuilder/

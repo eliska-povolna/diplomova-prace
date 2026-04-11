@@ -113,7 +113,7 @@ def show():
                 )
                 
                 if fig is not None:
-                    st.pyplot(fig, use_container_width=True)
+                    st.pyplot(fig, width='stretch')
                 else:
                     st.info("📊 No wordcloud data available for this feature")
             except Exception as e:
@@ -142,7 +142,7 @@ def show():
                 )
 
             pois_df = pd.DataFrame(pois_records)
-            st.dataframe(pois_df, use_container_width=True, hide_index=True)
+            st.dataframe(pois_df, width='stretch', hide_index=True)
 
             st.caption(
                 """

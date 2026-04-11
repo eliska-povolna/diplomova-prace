@@ -18,7 +18,7 @@ except ImportError:
 
 import yaml
 
-from .services import (
+from src.ui.services import (
     InferenceService,
     DataService,
     LabelingService,
@@ -236,13 +236,13 @@ def load_data_service(config: Dict) -> DataService:
     Load POI data once per session.
 
     DuckDB + Parquet files cached in memory.
-    Uses item2index mapping to ensure POI indices match model coordinate space.
+    Uses universal item2index mapping so users retain all their interactions.
+    Interactions are automatically filtered to model coordinate space when needed.
     Loads local photos from yelp_photos folder if available.
     """
-    # Path to k-core FILTERED item2index mapping from training
-    # This mapping has 2212 items (after k-core filtering), matching the model
-    # Project layout: src/ui/cache.py -> need to go up 3 levels to project root
-    item2index_path = Path(__file__).parent.parent.parent / "data" / "processed_yelp_easystudy" / "item2index_filtered.pkl"
+    # Path to UNIVERSAL item2index mapping (all ~17k businesses)
+    # This preserves user interaction history before filtering
+    item2index_path = Path(__file__).parent.parent.parent / "data" / "processed_yelp_easystudy" / "item2index.pkl"
     
     # Path to local photos folder (support common folder naming variants)
     project_root = Path(__file__).parent.parent.parent

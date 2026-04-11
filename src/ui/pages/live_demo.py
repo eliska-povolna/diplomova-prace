@@ -2,11 +2,13 @@
 
 import logging
 from typing import List, Dict
+from io import BytesIO
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from PIL import Image, ImageDraw
 
 try:
     import folium
@@ -337,13 +339,17 @@ def show():
 
             if HAS_FOLIUM:
                 try:
-                    map_html = build_folium_map(
+                    map_obj = build_folium_map(
                         st.session_state.current_recommendations, data
                     )
-                    st_folium(map_html, width=None, height=500)
+                    if map_obj is None:
+                        st.info("📍 No valid POI locations to display on map")
+                        logger.warning("Map object returned None")
+                    else:
+                        st_folium(map_obj, width=None, height=500)
                 except Exception as e:
-                    st.warning(f"Map rendering failed: {e}")
-                    logger.debug(f"Folium error: {e}")
+                    st.error(f"❌ Map rendering failed: {e}")
+                    logger.exception(f"Folium map error: {e}")
             else:
                 st.info("📦 Install streamlit-folium for map visualization: `pip install streamlit-folium`")
 
@@ -358,15 +364,24 @@ def show():
 
             # Display POI cards
             cols = st.columns(recs_per_row)
+            displayed_count = 0
 
             for idx, reco in enumerate(recommendations):
-                with cols[idx % recs_per_row]:
+                poi_details = data.get_poi_details(reco["poi_idx"])
+                
+                # Skip empty/invalid POIs (already validated in get_poi_details)
+                if not poi_details:
+                    logger.debug(f"Skipping invalid POI at index {reco['poi_idx']}")
+                    continue
+                
+                with cols[displayed_count % recs_per_row]:
                     try:
-                        poi_details = data.get_poi_details(reco["poi_idx"])
                         draw_poi_card(poi_details, reco, show_scores)
+                        displayed_count += 1
                     except Exception as e:
-                        st.error(f"Failed to display POI: {e}")
-                        logger.debug(f"POI card error: {e}")
+                        logger.exception(f"POI card error for {poi_details.get('name', 'Unknown')}: {e}")
+                        # Skip this POI and continue to next
+                        continue
 
         # ===================================================================
         # Section 5: User History (optional)
@@ -380,15 +395,26 @@ def show():
 
                 if history:
                     history_pois = [data.get_poi_details(idx) for idx in history]
+                    # Filter out empty/invalid POIs
+                    history_pois = [p for p in history_pois if p]
 
-                    with st.expander(
-                        f"Show {len(history)} past visits", expanded=False
-                    ):
-                        hist_cols = st.columns(recs_per_row)
+                    if history_pois:
+                        with st.expander(
+                            f"Show {len(history_pois)} past visits", expanded=False
+                        ):
+                            hist_cols = st.columns(recs_per_row)
+                            displayed_count = 0
 
-                        for idx, poi in enumerate(history_pois):
-                            with hist_cols[idx % recs_per_row]:
-                                draw_poi_card(poi, {}, show_scores=False)
+                            for poi in history_pois:
+                                try:
+                                    with hist_cols[displayed_count % recs_per_row]:
+                                        draw_poi_card(poi, {}, show_scores=False)
+                                        displayed_count += 1
+                                except Exception as e:
+                                    logger.exception(f"History POI card error for {poi.get('name', 'Unknown')}: {e}")
+                                    continue
+                    else:
+                        st.info("Your past visits had no valid location data")
 
                 else:
                     st.info("No interaction history found")
@@ -429,104 +455,219 @@ def plot_feature_activations(activations: List[Dict]):
     st.plotly_chart(fig, width='stretch')
 
 
-def build_folium_map(recommendations: List[Dict], data_service) -> folium.Map:
+def build_folium_map(recommendations: List[Dict], data_service) -> folium.Map | None:
     """Build interactive Folium map with POI markers."""
 
-    if not HAS_FOLIUM or not recommendations:
+    if not HAS_FOLIUM:
+        logger.warning("Folium not available for map rendering")
+        return None
+    
+    if not recommendations:
+        logger.warning("No recommendations to display on map")
         return None
 
     try:
         # Get POI details for all recommendations
         pois = [data_service.get_poi_details(r["poi_idx"]) for r in recommendations]
-
-        pois = [p for p in pois if p]  # Filter out invalid
+        pois = [p for p in pois if p and p.get("lat") and p.get("lon")]
 
         if not pois:
+            logger.warning("No valid POI data with coordinates for map")
             return None
 
         # Calculate center
-        lats = [p["lat"] for p in pois]
-        lons = [p["lon"] for p in pois]
+        lats = [p["lat"] for p in pois if p.get("lat")]
+        lons = [p["lon"] for p in pois if p.get("lon")]
+        
+        if not lats or not lons:
+            logger.warning("No valid coordinates for map center")
+            return None
 
         center_lat = np.mean(lats)
         center_lon = np.mean(lons)
 
+        logger.debug(f"Creating map centered at ({center_lat:.4f}, {center_lon:.4f}) with {len(pois)} POIs")
+
         # Create map
         m = folium.Map(
-            location=[center_lat, center_lon], zoom_start=13, tiles="OpenStreetMap"
+            location=[center_lat, center_lon], 
+            zoom_start=13, 
+            tiles="OpenStreetMap"
         )
 
         # Add markers
         for i, poi in enumerate(pois):
-            color = get_feature_color(i % 10)
+            try:
+                color = get_feature_color(i % 10)
+                
+                # Build popup with info
+                popup_text = f"<b>{poi.get('name', 'Unknown')}</b><br>"
+                if poi.get("category"):
+                    popup_text += f"{poi['category']}<br>"
+                popup_text += f"⭐ {poi.get('rating', 0)} ({poi.get('review_count', 0)} reviews)"
 
-            # Build popup with photo
-            popup_text = f"<b>{poi['name']}</b><br>"
-            popup_text += f"{poi['category']}<br>"
-            popup_text += f"⭐ {poi['rating']} ({poi['review_count']} reviews)"
+                folium.Marker(
+                    location=[poi["lat"], poi["lon"]],
+                    popup=folium.Popup(popup_text, max_width=250),
+                    tooltip=poi.get("name", f"POI {i}"),
+                    icon=folium.Icon(color=color, icon="info-sign"),
+                ).add_to(m)
+            except Exception as e:
+                logger.debug(f"Failed to add marker for POI {i}: {e}")
+                continue
 
-            if poi.get("primary_photo"):
-                popup_text += f"<br><img src='{poi['primary_photo']}' width='200'>"
-
-            folium.Marker(
-                location=[poi["lat"], poi["lon"]],
-                popup=folium.Popup(popup_text, max_width=250),
-                tooltip=poi["name"],
-                icon=folium.Icon(color=color, icon="info-sign"),
-            ).add_to(m)
-
+        logger.info(f"✅ Map created with {len(pois)} markers")
         return m
-
+        
     except Exception as e:
-        logger.error(f"Failed to build map: {e}")
+        logger.error(f"Failed to build map: {e}", exc_info=True)
         return None
 
 
+def _create_placeholder_image(width: int = 300, height: int = 300) -> Image.Image:
+    """Create a placeholder image when no photo is available."""
+    img = Image.new("RGB", (width, height), color=(220, 220, 220))
+    draw = ImageDraw.Draw(img)
+    
+    # Draw centered text
+    text = "📷 No Photo"
+    text_bbox = draw.textbbox((0, 0), text)
+    text_width = text_bbox[2] - text_bbox[0]
+    text_height = text_bbox[3] - text_bbox[1]
+    
+    x = (width - text_width) // 2
+    y = (height - text_height) // 2
+    
+    draw.text((x, y), text, fill=(100, 100, 100))
+    return img
+
+
+def _crop_image_to_aspect_ratio(image_url: str, target_ratio: float = 1.0, max_width: int = 300) -> Image.Image | None:
+    """Placeholder function - not used, Streamlit handles image display."""
+    return None
+
+
 def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
-    """Draw a single POI recommendation card with photo."""
-
+    """
+    Draw a single POI recommendation card with photo - fixed pixel-based sizing.
+    
+    Card layout:
+    - Photo: 280x280 px (displayed at fixed size)
+    - Content: Flexible height with scrolling if needed
+    - Total card: 750px fixed height for consistent grid alignment
+    
+    Skips invalid POIs silently (already filtered upstream).
+    """
+    # Skip empty POI dicts (return silently, not an error)
+    if not poi or "name" not in poi or not poi.get("name"):
+        logger.debug(f"Skipping empty/invalid POI: {poi}")
+        return
+    
     try:
-        # Display photo if available
-        if poi.get("primary_photo"):
-            try:
-                st.image(poi["primary_photo"], width=200)
-            except Exception as e:
-                st.caption(f"📸 Photo unavailable")
-        else:
-            st.info("📸 No photos available")
+        # Inject CSS once per page for card sizing
+        st.markdown("""
+        <style>
+        /* POI Card fixed sizing - creates uniform grid */
+        .poi-card-wrapper {
+            height: 750px;
+            display: flex;
+            flex-direction: column;
+            border: 1px solid #d0d0d0;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .poi-card-photo-container {
+            width: 100%;
+            height: 280px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #f5f5f5;
+            overflow: hidden;
+        }
+        .poi-card-photo-container img {
+            width: 280px !important;
+            height: 280px !important;
+            object-fit: cover;
+        }
+        .poi-card-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 16px;
+            min-height: 0;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # Use container with border
+        with st.container(border=True):
+            # PHOTO SECTION - Exactly 280x280 px
+            with st.container():
+                st.markdown('<div class="poi-card-photo-container">', unsafe_allow_html=True)
+                
+                photo_loaded = False
+                if poi.get("primary_photo"):
+                    try:
+                        # Display at fixed 280px width - Streamlit will maintain aspect ratio
+                        st.image(poi["primary_photo"], width=280)
+                        photo_loaded = True
+                    except Exception as e:
+                        logger.debug(f"Failed to load photo: {e}")
+                
+                if not photo_loaded:
+                    # Show placeholder
+                    try:
+                        placeholder = _create_placeholder_image(280, 280)
+                        st.image(placeholder, width=280)
+                    except Exception as e:
+                        logger.debug(f"Failed to create placeholder: {e}")
+                        st.write("📷")
+                
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            # CONTENT SECTION - Scrollable
+            st.markdown('<div class="poi-card-content">', unsafe_allow_html=True)
+            
+            st.divider()
+            
+            # NAME - No truncation
+            st.markdown(f"**{poi.get('name', 'Unknown')}**")
+            
+            # RATING + REVIEWS
+            rating = poi.get("rating", 0.0)
+            reviews = poi.get("review_count", 0)
+            st.caption(f"⭐ {rating:.1f} • {reviews:,} reviews")
 
-        # POI info
-        st.markdown(f"### {poi['name']}")
+            # CATEGORY
+            category = poi.get("category", "")
+            if category:
+                st.caption(f"📂 {category}")
 
-        # Rating + review count
-        st.markdown(f"⭐ {poi['rating']:.1f} " f"({poi['review_count']:,} reviews)")
+            # PHOTO COUNT
+            if poi.get("photo_count", 0) > 1:
+                st.caption(f"📷 +{poi['photo_count']-1} more")
 
-        # Category
-        st.caption(poi["category"])
+            # RECOMMENDATION
+            if recommendation.get("contributing_neurons"):
+                features = recommendation["contributing_neurons"][:1]
+                for feat in features:
+                    feature_label = feat.get("label", f"Feature {feat.get('idx')}")
+                    st.caption(f"🧠 _{feature_label}_")
 
-        # Photo count
-        if poi.get("photo_count", 0) > 1:
-            st.caption(f"📷 +{poi['photo_count']-1} photos on Yelp")
+            # SCORE
+            if show_scores and recommendation.get("score"):
+                st.caption(f"Score: {recommendation['score']:.3f}")
 
-        # Recommendation explanation
-        if recommendation.get("contributing_neurons"):
-            features = recommendation["contributing_neurons"][:2]
-            explanation = "**Why recommended**: "
-            for feat in features:
-                feature_label = feat.get("label", f'Feature {feat.get("idx")}')
-                explanation += f"_{feature_label}_"
-            st.caption(explanation)
-
-        # Score (optional)
-        if show_scores and recommendation.get("score"):
-            st.metric("Score", f"{recommendation['score']:.3f}")
-
-        # Yelp link
-        st.markdown(f"[View on Yelp]({poi['url']})", unsafe_allow_html=False)
+            # YELP LINK
+            url = poi.get("url", "")
+            if url:
+                st.markdown(f"[View on Yelp]({url})", unsafe_allow_html=False)
+            
+            st.markdown('</div>', unsafe_allow_html=True)
 
     except Exception as e:
-        st.error(f"Error rendering POI: {e}")
-        logger.debug(f"POI card error: {e}")
+        logger.debug(f"POI card error for {poi.get('name', 'Unknown')}: {e}")
 
 
 def get_feature_color(index: int) -> str:

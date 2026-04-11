@@ -20,7 +20,3 @@ enableXsrfProtection = true
 
 [browser]
 gatherUsageStats = false
-
-# Deployment configuration
-[client]
-showErrorDetails = false
