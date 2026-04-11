@@ -1,6 +1,7 @@
 """Live Demo page — Interactive steering (main interactive page)."""
 
 import logging
+import base64
 from typing import List, Dict
 from io import BytesIO
 
@@ -547,12 +548,44 @@ def _crop_image_to_aspect_ratio(image_url: str, target_ratio: float = 1.0, max_w
     return None
 
 
+def _crop_image_to_square(image_path: str, size: int = 280) -> bytes:
+    """Crop image to 1:1 square and return as bytes."""
+    try:
+        from PIL import Image
+        img = Image.open(image_path)
+        # Crop to square (crop from center)
+        if img.width != img.height:
+            min_dim = min(img.width, img.height)
+            left = (img.width - min_dim) // 2
+            top = (img.height - min_dim) // 2
+            img = img.crop((left, top, left + min_dim, top + min_dim))
+        # Resize to target size
+        img = img.resize((size, size), Image.Resampling.LANCZOS)
+        # Convert to bytes
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG")
+        return buffer.getvalue()
+    except Exception as e:
+        logger.debug(f"Failed to crop image: {e}")
+        return None
+
+
+def _image_to_base64(image_bytes: bytes) -> str:
+    """Convert image bytes to base64 string for HTML embedding."""
+    import base64
+    try:
+        return base64.b64encode(image_bytes).decode("utf-8")
+    except Exception as e:
+        logger.debug(f"Failed to convert image to base64: {e}")
+        return ""
+
+
 def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
     """
     Draw a single POI recommendation card with photo - fixed pixel-based sizing.
     
     Card layout:
-    - Photo: 280x280 px (displayed at fixed size)
+    - Photo: 280x280 px (CROPPED with object-fit: cover)
     - Content: Flexible height with scrolling if needed
     - Total card: 750px fixed height for consistent grid alignment
     
@@ -583,13 +616,14 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
             display: flex;
             align-items: center;
             justify-content: center;
-            background-color: #f5f5f5;
+            background-color: #e8e8e8;
             overflow: hidden;
         }
         .poi-card-photo-container img {
-            width: 280px !important;
-            height: 280px !important;
+            width: 280px;
+            height: 280px;
             object-fit: cover;
+            display: block;
         }
         .poi-card-content {
             flex: 1;
@@ -602,33 +636,42 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
         
         # Use container with border
         with st.container(border=True):
-            # PHOTO SECTION - Exactly 280x280 px
-            with st.container():
-                st.markdown('<div class="poi-card-photo-container">', unsafe_allow_html=True)
-                
-                photo_loaded = False
-                if poi.get("primary_photo"):
-                    try:
-                        # Display at fixed 280px width - Streamlit will maintain aspect ratio
-                        st.image(poi["primary_photo"], width=280)
+            # PHOTO SECTION - Exactly 280x280 px with 1:1 cropping
+            photo_loaded = False
+            if poi.get("primary_photo"):
+                try:
+                    photo_path = poi["primary_photo"]
+                    # Crop to square and convert to base64
+                    img_bytes = _crop_image_to_square(photo_path, size=280)
+                    if img_bytes:
+                        b64_image = _image_to_base64(img_bytes)
+                        st.markdown(
+                            f'<div class="poi-card-photo-container"><img src="data:image/jpeg;base64,{b64_image}" alt="photo"/></div>',
+                            unsafe_allow_html=True
+                        )
                         photo_loaded = True
-                    except Exception as e:
-                        logger.debug(f"Failed to load photo: {e}")
-                
-                if not photo_loaded:
-                    # Show placeholder
-                    try:
-                        placeholder = _create_placeholder_image(280, 280)
-                        st.image(placeholder, width=280)
-                    except Exception as e:
-                        logger.debug(f"Failed to create placeholder: {e}")
-                        st.write("📷")
-                
-                st.markdown('</div>', unsafe_allow_html=True)
+                except Exception as e:
+                    logger.debug(f"Failed to load photo {poi.get('primary_photo')}: {e}")
+            
+            if not photo_loaded:
+                # Show placeholder
+                try:
+                    placeholder = _create_placeholder_image(280, 280)
+                    buffer = BytesIO()
+                    placeholder.save(buffer, format="PNG")
+                    b64_placeholder = base64.b64encode(buffer.getvalue()).decode("utf-8")
+                    st.markdown(
+                        f'<div class="poi-card-photo-container"><img src="data:image/png;base64,{b64_placeholder}" alt="placeholder"/></div>',
+                        unsafe_allow_html=True
+                    )
+                except Exception as e:
+                    logger.debug(f"Failed to create placeholder: {e}")
+                    st.markdown(
+                        '<div class="poi-card-photo-container" style="font-size: 48px;">📷</div>',
+                        unsafe_allow_html=True
+                    )
             
             # CONTENT SECTION - Scrollable
-            st.markdown('<div class="poi-card-content">', unsafe_allow_html=True)
-            
             st.divider()
             
             # NAME - No truncation
@@ -663,8 +706,6 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
             url = poi.get("url", "")
             if url:
                 st.markdown(f"[View on Yelp]({url})", unsafe_allow_html=False)
-            
-            st.markdown('</div>', unsafe_allow_html=True)
 
     except Exception as e:
         logger.debug(f"POI card error for {poi.get('name', 'Unknown')}: {e}")

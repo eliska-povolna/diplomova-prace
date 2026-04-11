@@ -106,14 +106,14 @@ def show():
                 # Generate wordcloud
                 fig = wordcloud_service.generate_wordcloud_fig(
                     neuron_idx,
-                    figsize=(7, 4),
+                    figsize=(6, 4),
                     width=600,
                     height=400,
                     colormap='tab20'
                 )
                 
                 if fig is not None:
-                    st.pyplot(fig, width='stretch')
+                    st.pyplot(fig, use_container_width=True)
                 else:
                     st.info("📊 No wordcloud data available for this feature")
             except Exception as e:
@@ -123,43 +123,38 @@ def show():
             st.info("📊 Wordcloud service not available")
 
     with col_right:
-        st.subheader("📍 Top Activating POIs")
+        st.subheader("📍 Top Activating Categories")
 
-        # Get top POIs for this neuron
-        top_pois = labels_service.get_pois_for_neuron(neuron_idx, top_k=10) if labels_service else []
-
-        if top_pois:
-            # Convert to DataFrame for display
-            pois_records = []
-            for poi in top_pois:
-                pois_records.append(
-                    {
-                        "Name": poi.get("name", "Unknown"),
-                        "Category": poi.get("category", ""),
-                        "Activation": f"{poi.get('activation', 0):.3f}",
-                        "Rating": f"⭐ {poi.get('rating', 0):.1f}",
-                    }
-                )
-
-            pois_df = pd.DataFrame(pois_records)
-            st.dataframe(pois_df, width='stretch', hide_index=True)
-
-            st.caption(
-                """
-            These POIs have the highest average activation for this feature.
-            """
-            )
+        # Get categories for this neuron (from wordcloud service)
+        if wordcloud_service:
+            try:
+                categories = wordcloud_service.get_categories_for_neuron(neuron_idx)
+                
+                if categories:
+                    # Display categories as a formatted list
+                    st.markdown("**Business categories that strongly activate this feature:**")
+                    
+                    # Create columns for 2-column layout
+                    cols = st.columns(2)
+                    for i, category in enumerate(categories[:20]):  # Show top 20
+                        with cols[i % 2]:
+                            st.caption(f"• {category}")
+                    
+                    if len(categories) > 20:
+                        st.caption(f"... and {len(categories) - 20} more")
+                else:
+                    st.info(
+                        """
+                    📊 **Category Data Unavailable**
+                    
+                    This feature would display business categories extracted during model training.
+                    Run the training pipeline to generate category metadata.
+                    """
+                    )
+            except Exception as e:
+                st.warning(f"Could not load categories: {e}")
         else:
-            st.info(
-                """
-            📊 **POI Activation Data Unavailable**
-            
-            Top activating POIs would be computed from training data during model interpretation.
-            This requires running the neuron labeling pipeline (see `notebooks/03_neuron_labeling_demo.ipynb`).
-            
-            Currently, the system provides labels only. Activation analysis coming soon!
-            """
-            )
+            st.info("⚠️ Wordcloud service not available")
 
     st.divider()
 
@@ -210,8 +205,8 @@ def show():
         )
 
     if st.button("Compare"):
-        label_1 = labels.get_label(compare_idx_1)
-        label_2 = labels.get_label(compare_idx_2)
+        label_1 = labels_service.get_label(compare_idx_1)
+        label_2 = labels_service.get_label(compare_idx_2)
 
         st.markdown(
             f"""

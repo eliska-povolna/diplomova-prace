@@ -126,9 +126,10 @@ class WordcloudService:
             logger.warning(f"No categories for neuron {neuron_id}")
             return None
 
-        # Create frequency dict: each category weighted by occurrence
-        # In a real scenario, could use activation-weighted frequencies
-        text = " ".join(categories)
+        # Repeat categories for better visibility (especially if only 2-3 categories)
+        # This ensures they appear prominently in the wordcloud
+        repeated_categories = categories * max(5, 10 // max(1, len(categories)))
+        text = " ".join(repeated_categories)
         
         if not text.strip():
             logger.warning(f"Empty text for wordcloud (neuron {neuron_id})")
@@ -141,7 +142,7 @@ class WordcloudService:
                 background_color=background_color,
                 colormap=colormap,
                 relative_scaling=0.5,
-                min_font_size=10,
+                min_font_size=8,
             ).generate(text)
             
             logger.debug(f"Generated wordcloud for neuron {neuron_id}")

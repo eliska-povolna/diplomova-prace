@@ -308,6 +308,44 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
     Labels are lazy-loaded on first access (no startup delay).
     If no LLM provider is available (no API keys), uses basic pre-computed labels.
     """
+    # Find latest timestamped output directory
+    latest_run_path = Path("outputs") / "LATEST_RUN.txt"
+    output_dir = None
+    
+    if latest_run_path.exists():
+        try:
+            with open(latest_run_path, "r") as f:
+                output_dir_str = f.read().strip()
+            output_dir = Path(output_dir_str)
+            logger.debug(f"Found latest output dir: {output_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
+    
+    # Fallback: find most recent timestamped directory
+    if not output_dir or not output_dir.exists():
+        outputs_base = Path("outputs")
+        if outputs_base.exists():
+            timestamped_dirs = [
+                d for d in outputs_base.iterdir() 
+                if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
+            ]
+            if timestamped_dirs:
+                output_dir = sorted(timestamped_dirs)[-1]
+                logger.debug(f"Using most recent output dir: {output_dir}")
+    
+    # Use labels from output dir if available
+    labels_path = None
+    if output_dir:
+        candidate = output_dir / "neuron_labels.json"
+        if candidate.exists():
+            labels_path = candidate
+            logger.info(f"✅ Using labels from: {labels_path}")
+    
+    # Fallback to default path
+    if not labels_path:
+        labels_path = Path("outputs") / "neuron_labels.json"
+        logger.warning(f"Using fallback labels path: {labels_path}")
+    
     # Try to load NeuronInterpreter - let it auto-detect provider
     interpreter = None
     try:
@@ -329,9 +367,7 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
         interpreter = None
 
     service = LabelingService(
-        labels_json_path=Path(
-            config.get("neuron_labels_path", "outputs/neuron_labels.json")
-        ),
+        labels_json_path=labels_path,
         interpreter=interpreter,
         config=config,
         data_service=data_service,
@@ -352,20 +388,54 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
         logger.error("WordcloudService not available")
         return None
     
-    # Find paths to label and metadata files
-    output_dir = Path(config.get("model_checkpoint_dir", "outputs")).parent
-    labels_path = output_dir / "neuron_labels.json"
-    metadata_path = output_dir / "neuron_category_metadata.json"
+    # Find latest timestamped output directory
+    latest_run_path = Path("outputs") / "LATEST_RUN.txt"
+    output_dir = None
     
-    # Fallback to outputs directory if parent doesn't have files
-    if not labels_path.exists():
-        labels_path = Path("outputs") / "neuron_labels.json"
-    if not metadata_path.exists():
-        metadata_path = Path("outputs") / "neuron_category_metadata.json"
+    if latest_run_path.exists():
+        try:
+            with open(latest_run_path, "r") as f:
+                output_dir_str = f.read().strip()
+            output_dir = Path(output_dir_str)
+            logger.debug(f"Found latest output dir from LATEST_RUN.txt: {output_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
+    
+    # Fallback: find most recent timestamped directory
+    if not output_dir or not output_dir.exists():
+        outputs_base = Path("outputs")
+        if outputs_base.exists():
+            timestamped_dirs = [
+                d for d in outputs_base.iterdir() 
+                if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
+            ]
+            if timestamped_dirs:
+                output_dir = sorted(timestamped_dirs)[-1]  # Most recent
+                logger.debug(f"Using most recent output dir: {output_dir}")
+    
+    # Look for label and metadata files
+    labels_path = None
+    metadata_path = None
+    
+    if output_dir:
+        labels_path = output_dir / "neuron_labels.json"
+        metadata_path = output_dir / "neuron_category_metadata.json"
+        
+        if labels_path.exists():
+            logger.info(f"Found labels at: {labels_path}")
+        else:
+            logger.warning(f"Labels not found at: {labels_path}")
+            labels_path = None
+            
+        if metadata_path.exists():
+            logger.info(f"Found metadata at: {metadata_path}")
+        else:
+            logger.warning(f"Metadata not found at: {metadata_path}")
+            metadata_path = None
     
     service = WordcloudService(
-        category_metadata_path=metadata_path if metadata_path.exists() else None,
-        labels_path=labels_path if labels_path.exists() else None,
+        category_metadata_path=metadata_path if metadata_path else None,
+        labels_path=labels_path,
     )
     
     logger.info("✅ Wordcloud service initialized")
