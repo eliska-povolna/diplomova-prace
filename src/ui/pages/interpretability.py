@@ -123,67 +123,118 @@ def show():
             st.info("📊 Wordcloud service not available")
 
     with col_right:
-        st.subheader("📍 Top Activating Categories")
+        st.subheader("� Top Activating Categories")
 
-        # Get categories for this neuron (from wordcloud service)
+        # Get categories sorted by activation strength (from wordcloud service)
         if wordcloud_service:
             try:
-                categories = wordcloud_service.get_categories_for_neuron(neuron_idx)
+                top_categories = wordcloud_service.get_top_activating_categories(neuron_idx, top_k=10)
                 
-                if categories:
-                    # Display categories as a formatted list
-                    st.markdown("**Business categories that strongly activate this feature:**")
+                if top_categories:
+                    # Display categories with activation strength bars
+                    st.markdown("**Categories by average activation strength:**")
                     
-                    # Create columns for 2-column layout
-                    cols = st.columns(2)
-                    for i, category in enumerate(categories[:20]):  # Show top 20
-                        with cols[i % 2]:
-                            st.caption(f"• {category}")
+                    # Find max activation for normalization
+                    max_activation = max([c['avg_activation'] for c in top_categories]) if top_categories else 1.0
                     
-                    if len(categories) > 20:
-                        st.caption(f"... and {len(categories) - 20} more")
+                    # Create a simple bar-like visualization using progress bars and text
+                    for item in top_categories:
+                        category = item['category']
+                        avg_activation = item['avg_activation']
+                        frequency = item['frequency']
+                        
+                        # Normalize for display (assuming activations are typically 0-1)
+                        strength_pct = min(100, max(0, int(avg_activation * 100)))
+                        normalized_strength = avg_activation / max_activation if max_activation > 0 else 0
+                        
+                        # Multi-line display with activation strength and frequency
+                        col_name, col_strength = st.columns([2, 1])
+                        
+                        with col_name:
+                            st.caption(f"**{category}**")
+                        
+                        with col_strength:
+                            st.caption(f"σ={avg_activation:.2f} (n={frequency})")
+                        
+                        # Progress bar for visual strength
+                        st.progress(min(1.0, normalized_strength), text=f"{strength_pct}%")
                 else:
                     st.info(
                         """
                     📊 **Category Data Unavailable**
                     
-                    This feature would display business categories extracted during model training.
+                    This feature would display business categories extracted during model training,
+                    sorted by average activation strength.
                     Run the training pipeline to generate category metadata.
                     """
                     )
             except Exception as e:
-                st.warning(f"Could not load categories: {e}")
+                st.warning(f"Could not load activation categories: {e}")
         else:
             st.info("⚠️ Wordcloud service not available")
 
     st.divider()
 
-    # Feature statistics / relationships
-    st.subheader("🔗 Related Features")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown(
-            """
-        **Frequently Co-Activated With**
-        - Feature 5 (Italian Restaurants)
-        - Feature 12 (Upscale Venues)
-        - Feature 23 (Downtown Area)
-        """
-        )
-
-    with col2:
-        st.markdown(
-            """
-        **Rarely Co-Activated With**
-        - Feature 2 (Budget-Friendly)
-        - Feature 8 (Fast Food)
-        - Feature 19 (Casual Dining)
-        """
-        )
+    # Top activating businesses section
+    if wordcloud_service:
+        st.subheader("🏢 Top Activating Businesses")
+        try:
+            top_items = wordcloud_service.get_top_items(neuron_idx, top_k=5)
+            if top_items:
+                st.markdown("**Places that most strongly activate this feature:**")
+                for i, item in enumerate(top_items, 1):
+                    # Display business name/info if available
+                    business_name = item.get("name", item.get("business_id", f"Business {i}"))
+                    activation = item.get("activation", item.get("avg_activation", 0))
+                    
+                    col_rank, col_name, col_stats = st.columns([0.5, 2, 1])
+                    with col_rank:
+                        st.caption(f"#{i}")
+                    with col_name:
+                        st.caption(f"**{business_name}**")
+                    with col_stats:
+                        st.caption(f"σ={activation:.2f}")
+            else:
+                st.info(
+                    """
+                🏢 **Top Businesses Not Yet Available**
+                
+                This section will show top-activating businesses once the notebook exports
+                this data (requires re-running notebook 03 with updated export code).
+                """
+                )
+        except Exception as e:
+            st.caption(f"⚠️ Could not load top businesses: {e}")
 
     st.divider()
+
+    # Related Features (co-activation section)
+    coactivation_service = st.session_state.get("coactivation")
+    
+    if coactivation_service:
+        st.subheader("🔗 Related Features")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("**Frequently Co-Activated With**")
+            highly_coactivated = coactivation_service.get_highly_coactivated(neuron_idx)
+            if highly_coactivated:
+                for item in highly_coactivated:
+                    st.caption(f"• {item['label']} (Feature {item['neuron_id']})")
+            else:
+                st.caption("*No positive co-activation data found*")
+        
+        with col2:
+            st.markdown("**Rarely Co-Activated With**")
+            rarely_coactivated = coactivation_service.get_rarely_coactivated(neuron_idx)
+            if rarely_coactivated:
+                for item in rarely_coactivated:
+                    st.caption(f"• {item['label']} (Feature {item['neuron_id']})")
+            else:
+                st.caption("*No negative correlations found*")
+        
+        st.divider()
 
     # Feature comparison
     st.subheader("🔀 Compare Features")
@@ -208,6 +259,16 @@ def show():
         label_1 = labels_service.get_label(compare_idx_1)
         label_2 = labels_service.get_label(compare_idx_2)
 
+        # Get categories if available
+        categories_1 = []
+        categories_2 = []
+        if wordcloud_service:
+            try:
+                categories_1 = wordcloud_service.get_categories_for_neuron(compare_idx_1)
+                categories_2 = wordcloud_service.get_categories_for_neuron(compare_idx_2)
+            except Exception as e:
+                logger.debug(f"Could not get categories: {e}")
+
         st.markdown(
             f"""
         ### Comparison
@@ -215,8 +276,6 @@ def show():
         | | Feature {compare_idx_1} | Feature {compare_idx_2} |
         |---|---|---|
         | **Label** | {label_1} | {label_2} |
-        | **Co-activation** | ? | ? |
-        | **Avg POI Rating** | 4.2 ⭐ | 4.1 ⭐ |
-        | **Top Category** | Restaurant | Cafe |
+        | **Categories** | {', '.join(categories_1) if categories_1 else 'N/A'} | {', '.join(categories_2) if categories_2 else 'N/A'} |
         """
         )

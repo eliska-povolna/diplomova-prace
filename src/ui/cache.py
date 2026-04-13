@@ -24,6 +24,7 @@ from src.ui.services import (
     LabelingService,
     WordcloudService,
 )
+from src.ui.services.coactivation_service import CoactivationService
 
 logger = logging.getLogger(__name__)
 
@@ -439,6 +440,55 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
     )
     
     logger.info("✅ Wordcloud service initialized")
+    return service
+
+
+@st_cache_resource
+def load_coactivation_service(config: Dict) -> Optional["CoactivationService"]:
+    """
+    Load co-activation service for neuron relationship visualization.
+
+    Provides co-activation relationships between neurons.
+    """
+    # Find latest timestamped output directory
+    latest_run_path = Path("outputs") / "LATEST_RUN.txt"
+    output_dir = None
+    
+    if latest_run_path.exists():
+        try:
+            with open(latest_run_path, "r") as f:
+                output_dir_str = f.read().strip()
+            output_dir = Path(output_dir_str)
+            logger.debug(f"Found latest output dir from LATEST_RUN.txt: {output_dir}")
+        except Exception as e:
+            logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
+    
+    # Fallback: find most recent timestamped directory
+    if not output_dir or not output_dir.exists():
+        outputs_base = Path("outputs")
+        if outputs_base.exists():
+            timestamped_dirs = [
+                d for d in outputs_base.iterdir() 
+                if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
+            ]
+            if timestamped_dirs:
+                output_dir = sorted(timestamped_dirs)[-1]  # Most recent
+                logger.debug(f"Using most recent output dir: {output_dir}")
+    
+    # Look for coactivation file
+    coactivation_path = None
+    
+    if output_dir:
+        coactivation_path = output_dir / "neuron_coactivation.json"
+        
+        if coactivation_path.exists():
+            logger.info(f"Found co-activation data at: {coactivation_path}")
+        else:
+            logger.debug(f"Co-activation file not found at: {coactivation_path}")
+            coactivation_path = None
+    
+    service = CoactivationService(coactivation_path=coactivation_path)
+    logger.info("✅ Co-activation service initialized")
     return service
 
 

@@ -44,10 +44,18 @@ class LabelingService:
         if self.labels_json_path.exists():
             try:
                 with open(self.labels_json_path, "r") as f:
-                    self.labels_cache = json.load(f)
-                logger.info(f"Loaded {len(self.labels_cache)} cached labels")
+                    data = json.load(f)
+                    # Extract neuron_labels if structure is {metadata: ..., neuron_labels: {...}}
+                    if isinstance(data, dict) and "neuron_labels" in data:
+                        self.labels_cache = data["neuron_labels"]
+                    else:
+                        # Fallback if structure is different
+                        self.labels_cache = data
+                logger.info(f"✅ Loaded {len(self.labels_cache)} cached neuron labels from {self.labels_json_path.name}")
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to load labels.json: {e}")
+        else:
+            logger.warning(f"Labels file not found: {self.labels_json_path}")
 
     def get_label(self, neuron_idx: int) -> str:
         """

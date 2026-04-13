@@ -75,6 +75,7 @@ try:
         load_data_service,
         load_labeling_service,
         load_wordcloud_service,
+        load_coactivation_service,
         init_session_state,
     )
 
@@ -97,11 +98,15 @@ try:
     with st.spinner("Initializing wordcloud service..."):
         wordcloud = load_wordcloud_service(config)
 
+    with st.spinner("Initializing co-activation service..."):
+        coactivation = load_coactivation_service(config)
+
     # Store in session for access from pages
     st.session_state.inference = inference
     st.session_state.data = data
     st.session_state.labels = labels
     st.session_state.wordcloud = wordcloud
+    st.session_state.coactivation = coactivation
 
     logger.info("✅ All services initialized")
 
