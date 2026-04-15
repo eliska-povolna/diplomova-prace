@@ -18,11 +18,11 @@ def show():
         with debug_cols[0]:
             st.write(f"**Model n_items**: {inference.n_items}")
             st.write(f"**Data POIs**: {data.num_pois}")
-            item2index_size = getattr(data, 'item2index', None)
+            item2index_size = getattr(data, "item2index", None)
             if item2index_size:
                 st.write(f"**item2index mapping size**: {len(item2index_size)}")
             else:
-                st.write(f"**item2index**: Not loaded")
+                st.write("**item2index**: Not loaded")
             test_users = data.get_test_users(limit=50)
             st.write(f"**Test users loaded**: {len(test_users)}")
             if test_users:
@@ -89,7 +89,9 @@ def show():
         """
         )
 
-    with st.expander("2️⃣ Sparse Autoencoder (SAE) — Feature Extraction", expanded=False):
+    with st.expander(
+        "2️⃣ Sparse Autoencoder (SAE) — Feature Extraction", expanded=False
+    ):
         st.markdown(
             f"""
         **Sparse Autoencoder** decomposes ELSA embeddings into **{getattr(inference.sae, 'k', 64)} interpretable features**:
@@ -138,15 +140,15 @@ def show():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("📊 View Evaluation Results", width='stretch'):
+        if st.button("📊 View Evaluation Results", width="stretch"):
             st.switch_page("📊 Results")
 
     with col2:
-        if st.button("🎛️ Try Interactive Steering", width='stretch'):
+        if st.button("🎛️ Try Interactive Steering", width="stretch"):
             st.switch_page("🎛️ Live Demo")
 
     with col3:
-        if st.button("🔍 Browse Features", width='stretch'):
+        if st.button("🔍 Browse Features", width="stretch"):
             st.switch_page("🔍 Interpretability")
 
     # Footer

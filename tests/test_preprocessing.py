@@ -17,8 +17,34 @@ from src.data.preprocessing import (
 def sample_interactions() -> pd.DataFrame:
     """Small implicit-feedback DataFrame (12 unique user–item pairs)."""
     data = {
-        "user_id": ["u1", "u1", "u2", "u2", "u3", "u3", "u4", "u4", "u5", "u5", "u5", "u5"],
-        "business_id": ["b1", "b2", "b1", "b3", "b2", "b4", "b3", "b5", "b1", "b2", "b3", "b4"],
+        "user_id": [
+            "u1",
+            "u1",
+            "u2",
+            "u2",
+            "u3",
+            "u3",
+            "u4",
+            "u4",
+            "u5",
+            "u5",
+            "u5",
+            "u5",
+        ],
+        "business_id": [
+            "b1",
+            "b2",
+            "b1",
+            "b3",
+            "b2",
+            "b4",
+            "b3",
+            "b5",
+            "b1",
+            "b2",
+            "b3",
+            "b4",
+        ],
     }
     return pd.DataFrame(data)
 
@@ -54,14 +80,20 @@ class TestBuildCSR:
 
     def test_maps_cover_all_ids(self, sample_interactions: pd.DataFrame) -> None:
         result = build_csr(sample_interactions)
-        assert set(result.user_map.keys()) == set(sample_interactions["user_id"].unique())
-        assert set(result.item_map.keys()) == set(sample_interactions["business_id"].unique())
+        assert set(result.user_map.keys()) == set(
+            sample_interactions["user_id"].unique()
+        )
+        assert set(result.item_map.keys()) == set(
+            sample_interactions["business_id"].unique()
+        )
 
     def test_deduplicates_interactions(self) -> None:
-        df = pd.DataFrame({
-            "user_id": ["u1", "u1"],
-            "business_id": ["b1", "b1"],  # duplicate
-        })
+        df = pd.DataFrame(
+            {
+                "user_id": ["u1", "u1"],
+                "business_id": ["b1", "b1"],  # duplicate
+            }
+        )
         result = build_csr(df)
         assert result.csr.nnz == 1
 

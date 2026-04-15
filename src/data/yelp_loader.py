@@ -72,7 +72,11 @@ def load_businesses(
     """
     parquet_dir = Path(parquet_dir)
     # Use POSIX-style paths for DuckDB and escape single quotes for SQL safety
-    glob = (parquet_dir / "business" / "state=*" / "*.parquet").as_posix().replace("'", "''")
+    glob = (
+        (parquet_dir / "business" / "state=*" / "*.parquet")
+        .as_posix()
+        .replace("'", "''")
+    )
 
     con = connect(db_path)
     try:
@@ -175,4 +179,3 @@ def load_reviews(
 
     logger.info("Loaded %d reviews from %s", len(df), parquet_dir)
     return df
-

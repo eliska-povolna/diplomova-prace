@@ -8,16 +8,11 @@ Multi-page app with 4 pages:
 4. 🔍 Interpretability - Feature browser
 """
 
-from pathlib import Path
-import sys
 import logging
-import os
+import sys
+from pathlib import Path
 
-from dotenv import load_dotenv
 import streamlit as st
-
-# Load environment variables from .env file FIRST
-load_dotenv()
 
 # Add project root to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -72,16 +67,17 @@ def _show_startup_diagnostics(config: dict) -> None:
             + ". Check configs/default.yaml path values."
         )
 
+
 # Initialize services (via @st.cache_resource)
 try:
     from cache import (
+        init_session_state,
+        load_coactivation_service,
         load_config,
-        load_inference_service,
         load_data_service,
+        load_inference_service,
         load_labeling_service,
         load_wordcloud_service,
-        load_coactivation_service,
-        init_session_state,
     )
 
     # Initialize session state first
@@ -121,7 +117,7 @@ except Exception as e:
     st.stop()
 
 # Define multi-page app
-from src.ui.pages import home, results, live_demo, interpretability
+from src.ui.pages import home, interpretability, live_demo, results
 
 
 # Create function aliases with unique names for Streamlit navigation

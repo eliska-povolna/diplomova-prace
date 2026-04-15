@@ -2,11 +2,11 @@
 
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 import streamlit as st
-from wordcloud import WordCloud
 from PIL import Image
+from wordcloud import WordCloud
 
 logger = logging.getLogger(__name__)
 
@@ -16,13 +16,13 @@ def get_wordcloud_text(
     precomputed_wordcloud_dir: Optional[Path] = None,
 ) -> str:
     """Get word cloud text for a neuron.
-    
+
     First tries precomputed cache, otherwise returns placeholder.
-    
+
     Args:
         neuron_idx: Neuron index
         precomputed_wordcloud_dir: Path to precomputed word clouds (optional)
-        
+
     Returns:
         Text suitable for WordCloud generation
     """
@@ -31,13 +31,16 @@ def get_wordcloud_text(
         wordcloud_file = precomputed_wordcloud_dir / f"neuron_{neuron_idx}.json"
         if wordcloud_file.exists():
             import json
+
             try:
                 with open(wordcloud_file) as f:
                     data = json.load(f)
                 return data.get("text", "")
             except Exception as e:
-                logger.warning(f"Failed to load precomputed cloud for neuron {neuron_idx}: {e}")
-    
+                logger.warning(
+                    f"Failed to load precomputed cloud for neuron {neuron_idx}: {e}"
+                )
+
     # Fallback: placeholder text
     return f"feature neuron {neuron_idx} representation embedding activation"
 
@@ -49,13 +52,13 @@ def render_wordcloud(
     colormap: str = "viridis",
 ) -> Image.Image:
     """Render text as a word cloud PIL Image.
-    
+
     Args:
         text: Text for word cloud (space-separated words)
         width: Image width in pixels
         height: Image height in pixels
         colormap: Matplotlib colormap name
-        
+
     Returns:
         PIL Image
     """
@@ -63,7 +66,7 @@ def render_wordcloud(
         # Return blank image if no text
         img = Image.new("RGB", (width, height), color="white")
         return img
-    
+
     try:
         wc = WordCloud(
             width=width,
@@ -73,7 +76,7 @@ def render_wordcloud(
             relative_scaling=0.5,
             min_font_size=10,
         ).generate(text)
-        
+
         # Convert to PIL Image
         img_array = wc.to_array()
         img = Image.fromarray(img_array)
@@ -93,7 +96,7 @@ def cached_wordcloud_for_neuron(
     colormap: str = "viridis",
 ) -> Image.Image:
     """Cached word cloud rendering (called by display_neuron_wordcloud).
-    
+
     Streamlit caches the Image object to avoid re-rendering.
     """
     return render_wordcloud(text, width, height, colormap)
@@ -109,7 +112,7 @@ def display_neuron_wordcloud(
     show_info: bool = True,
 ) -> None:
     """Display a word cloud for a single neuron.
-    
+
     Args:
         neuron_idx: Neuron index
         label: Optional label for the neuron (e.g., "Italian Restaurant")
@@ -124,10 +127,10 @@ def display_neuron_wordcloud(
             st.markdown(f"**Neuron {neuron_idx}: {label}**")
         else:
             st.markdown(f"**Neuron {neuron_idx}**")
-    
+
     # Get text for this neuron
     text = get_wordcloud_text(neuron_idx, precomputed_wordcloud_dir)
-    
+
     # Render and cache
     img = cached_wordcloud_for_neuron(
         neuron_idx,
@@ -136,7 +139,7 @@ def display_neuron_wordcloud(
         height,
         colormap,
     )
-    
+
     # Display
     st.image(img, width=width, use_column_width=False)
 
@@ -150,7 +153,7 @@ def display_neuron_wordcloud_grid(
     height: int = 200,
 ) -> None:
     """Display multiple word clouds in a grid.
-    
+
     Args:
         neuron_indices: List of neuron indices to display
         labels: Optional dict mapping neuron_idx to label
@@ -160,17 +163,17 @@ def display_neuron_wordcloud_grid(
         height: Image height for each cloud
     """
     labels = labels or {}
-    
+
     for i in range(0, len(neuron_indices), cols):
         columns = st.columns(cols)
         for col_idx, col in enumerate(columns):
             idx = i + col_idx
             if idx >= len(neuron_indices):
                 break
-            
+
             neuron_idx = neuron_indices[idx]
             label = labels.get(neuron_idx, "")
-            
+
             with col:
                 display_neuron_wordcloud(
                     neuron_idx,

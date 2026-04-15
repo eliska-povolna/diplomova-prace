@@ -1,8 +1,8 @@
 """Streamlit caching and session state management."""
 
+import logging
 from pathlib import Path
 from typing import Dict, Optional
-import logging
 
 try:
     import streamlit as st
@@ -19,8 +19,8 @@ except ImportError:
 import yaml
 
 from src.ui.services import (
-    InferenceService,
     DataService,
+    InferenceService,
     LabelingService,
     WordcloudService,
 )
@@ -38,7 +38,7 @@ else:
 @st_cache_resource
 def load_config(config_path: Path) -> Dict:
     """Load configuration from YAML and flatten for UI services.
-    
+
     Cache is invalidated when config file is modified (by including mtime in cache key).
     """
     config_path = Path(config_path)
@@ -99,7 +99,6 @@ def load_config(config_path: Path) -> Dict:
     # reads n_items from checkpoint metadata, not from config.
     try:
         import duckdb
-        import pandas as pd
 
         parquet_pattern = str(
             Path(config["parquet_dir"]) / "business" / "**" / "*.parquet"
@@ -197,7 +196,7 @@ def load_inference_service(config: Dict) -> InferenceService:
                     break
 
         if not checkpoint_dir:
-            logger.error(f"No checkpoint subdirs found")
+            logger.error("No checkpoint subdirs found")
             logger.error(f"Searched: {[d.name for d in subdirs]}")
             for subdir in subdirs[:3]:  # Show contents of first 3 dirs
                 contents = list(subdir.iterdir())
@@ -249,10 +248,9 @@ def load_data_service(config: Dict):
 
     The USE_CLOUD_STORAGE env var can force local-only mode if set to "false".
     """
-    import os
 
     logger.info("🔄 Initializing Data Service...")
-    
+
     # Path to UNIVERSAL item2index mapping (all ~17k businesses)
     # This preserves user interaction history before filtering
     item2index_path = (
@@ -278,10 +276,10 @@ def load_data_service(config: Dict):
         item2index_path=item2index_path,
         local_photos_dir=local_photos_path,
     )
-    
+
     # Report which backend is being used
-    backend_info = getattr(service, 'backend_type', 'unknown')
-    if backend_info == 'cloudsql':
+    backend_info = getattr(service, "backend_type", "unknown")
+    if backend_info == "cloudsql":
         if HAS_STREAMLIT:
             st.success("☁️ Using Cloud Backend (Cloud SQL)")
         logger.info("✅ Data Service using Cloud SQL backend")
@@ -293,7 +291,7 @@ def load_data_service(config: Dict):
         logger.info(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
         if local_photos_path:
             logger.info(f"📷 Local photos enabled: {local_photos_path}")
-    
+
     return service
 
 

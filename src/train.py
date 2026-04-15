@@ -22,18 +22,16 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset
 
-from src.data.preprocessing import build_csr, apply_kcore_filtering
+from src.data.preprocessing import apply_kcore_filtering, build_csr
 from src.data.yelp_loader import load_businesses, load_reviews
-from src.models.collaborative_filtering import ELSA, NMSELoss, recall_at_k, ndcg_at_k
-from src.models.sparse_autoencoder import TopKSAE, topk_mask
+from src.models.collaborative_filtering import ELSA, NMSELoss
+from src.models.sparse_autoencoder import TopKSAE
 from src.utils import CheckpointManager, Config, load_config, setup_logger
-from torch.utils.data import Dataset, Subset
 
 logger = logging.getLogger(__name__)
 
@@ -465,7 +463,7 @@ def main() -> None:
         universal_user_map = {uid: idx for idx, uid in enumerate(all_users)}
         universal_business_map = {bid: idx for idx, bid in enumerate(all_businesses)}
 
-        logger.info(f"Universal mappings created:")
+        logger.info("Universal mappings created:")
         logger.info(f"  Total unique users: {len(universal_user_map)}")
         logger.info(f"  Total unique businesses: {len(universal_business_map)}")
 

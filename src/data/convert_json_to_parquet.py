@@ -30,7 +30,8 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Iterator, Optional, Dict, Any
+from typing import Dict, Iterator, Optional
+
 import pandas as pd
 
 logging.basicConfig(
@@ -108,9 +109,9 @@ def convert_jsonl_to_parquet(
                 )
             else:
                 # For incremental writes, use parquet writer or create separate part files
-                from pyarrow import parquet as pq
                 import pyarrow as pa
-                
+                from pyarrow import parquet as pq
+
                 table = pa.Table.from_pandas(df)
                 writer = pq.ParquetWriter(str(output_path), table.schema)
                 writer.write_table(table)

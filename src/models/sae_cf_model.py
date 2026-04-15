@@ -163,4 +163,3 @@ class ELSASAEModel(nn.Module):
     def sae_loss(self, z: torch.Tensor) -> torch.Tensor:
         """SAE cosine reconstruction + L1 loss for a batch of latent vectors."""
         return self.sae.loss(z)
-

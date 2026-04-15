@@ -1,11 +1,11 @@
 """Data service for loading and serving POI metadata."""
 
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 import json
 import logging
 import pickle
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
@@ -71,8 +71,6 @@ class DataService:
             local_photos_dir: Path to local photos directory
         """
         import os
-        from sqlalchemy import create_engine, text
-        from google.cloud.sql.connector import Connector
 
         self.duckdb_path = Path(duckdb_path)
         self.parquet_dir = Path(parquet_dir)
@@ -105,10 +103,13 @@ class DataService:
         self.conn = None
 
         # Check for Cloud SQL credentials
-        cloudsql_instance = os.getenv("CLOUDSQL_INSTANCE")
-        cloudsql_db = os.getenv("CLOUDSQL_DATABASE")
-        cloudsql_user = os.getenv("CLOUDSQL_USER")
-        cloudsql_password = os.getenv("CLOUDSQL_PASSWORD")
+        from .secrets_helper import get_cloudsql_config
+
+        config = get_cloudsql_config()
+        cloudsql_instance = config["instance"]
+        cloudsql_db = config["database"]
+        cloudsql_user = config["user"]
+        cloudsql_password = config["password"]
 
         if all([cloudsql_instance, cloudsql_db, cloudsql_user, cloudsql_password]):
             try:

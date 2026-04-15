@@ -12,7 +12,6 @@ import os
 import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -20,6 +19,14 @@ import torch
 from scipy.spatial.distance import cosine
 
 logger = logging.getLogger(__name__)
+
+# Try to import secrets helper for Streamlit integration
+try:
+    from src.ui.services.secrets_helper import get_google_api_key
+
+    HAS_SECRETS_HELPER = True
+except ImportError:
+    HAS_SECRETS_HELPER = False
 
 try:
     import google.generativeai as genai
@@ -214,12 +221,16 @@ class LLMBasedLabeler(NeuronLabeler):
 
         # Setup API
         if api_key is None:
-            api_key = os.getenv("GOOGLE_API_KEY")
+            api_key = (
+                get_google_api_key()
+                if HAS_SECRETS_HELPER
+                else os.getenv("GOOGLE_API_KEY")
+            )
 
         if not api_key:
             raise ValueError(
                 "Gemini API key not found. "
-                "Set GOOGLE_API_KEY env var or pass api_key parameter"
+                "Set GOOGLE_API_KEY env var, pass api_key parameter, or configure .streamlit/secrets.toml"
             )
 
         genai.configure(api_key=api_key)
@@ -486,7 +497,11 @@ class SuperfeatureGenerator:
             raise ImportError("google-generativeai not installed")
 
         if api_key is None:
-            api_key = os.getenv("GOOGLE_API_KEY")
+            api_key = (
+                get_google_api_key()
+                if HAS_SECRETS_HELPER
+                else os.getenv("GOOGLE_API_KEY")
+            )
 
         if not api_key:
             raise ValueError("Gemini API key not found")

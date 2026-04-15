@@ -59,4 +59,3 @@ class TestELSASAEModel:
     def test_sae_loss_nonnegative(self, model: ELSASAEModel) -> None:
         z = torch.randn(8, 16)
         assert model.sae_loss(z).item() >= 0
-

@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class CoactivationService:
             coactivation_path: Path to neuron_coactivation.json file
         """
         self.coactivation_data = {}
-        
+
         if coactivation_path:
             self.load_coactivation_data(coactivation_path)
 
@@ -28,9 +28,11 @@ class CoactivationService:
         try:
             coactivation_path = Path(coactivation_path)
             if coactivation_path.exists():
-                with open(coactivation_path, 'r', encoding='utf-8') as f:
+                with open(coactivation_path, "r", encoding="utf-8") as f:
                     self.coactivation_data = json.load(f)
-                logger.info(f"Loaded co-activation data for {len(self.coactivation_data)} neurons")
+                logger.info(
+                    f"Loaded co-activation data for {len(self.coactivation_data)} neurons"
+                )
             else:
                 logger.warning(f"Co-activation file not found: {coactivation_path}")
         except Exception as e:
@@ -48,7 +50,7 @@ class CoactivationService:
         """
         try:
             neuron_data = self.coactivation_data.get(str(neuron_id), {})
-            return neuron_data.get('highly_coactivated', [])
+            return neuron_data.get("highly_coactivated", [])
         except Exception as e:
             logger.error(f"Error getting highly co-activated neurons: {e}")
             return []
@@ -65,7 +67,7 @@ class CoactivationService:
         """
         try:
             neuron_data = self.coactivation_data.get(str(neuron_id), {})
-            return neuron_data.get('rarely_coactivated', [])
+            return neuron_data.get("rarely_coactivated", [])
         except Exception as e:
             logger.error(f"Error getting rarely co-activated neurons: {e}")
             return []

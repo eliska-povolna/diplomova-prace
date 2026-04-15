@@ -2,9 +2,9 @@
 
 import json
 import logging
-from pathlib import Path
-from typing import Dict, Optional, Any
 import os
+from pathlib import Path
+from typing import Dict, Optional
 
 try:
     from google.cloud import storage
@@ -49,7 +49,9 @@ class CloudStorageHelper:
             raise ImportError("  pip install google-cloud-storage")
 
         self.bucket_name = bucket_name
-        self.project_id = project_id or os.getenv("GOOGLE_CLOUD_PROJECT")
+        from .secrets_helper import get_secret, get_gcp_project
+
+        self.project_id = project_id or get_gcp_project()
 
         # Initialize credentials
         credentials = None
@@ -65,14 +67,19 @@ class CloudStorageHelper:
         if not credentials:
             local_key_paths = [
                 Path("streamlit-deploy-key.json"),  # Current dir
-                Path(__file__).parent.parent.parent / "streamlit-deploy-key.json",  # Project root
+                Path(__file__).parent.parent.parent
+                / "streamlit-deploy-key.json",  # Project root
             ]
             for key_path in local_key_paths:
                 if key_path.exists():
                     try:
-                        logger.info(f"Loading GCS credentials from local key: {key_path}")
-                        credentials = service_account.Credentials.from_service_account_file(
-                            str(key_path)
+                        logger.info(
+                            f"Loading GCS credentials from local key: {key_path}"
+                        )
+                        credentials = (
+                            service_account.Credentials.from_service_account_file(
+                                str(key_path)
+                            )
                         )
                         break
                     except Exception as e:
@@ -92,9 +99,11 @@ class CloudStorageHelper:
             except Exception as e:
                 logger.debug(f"Could not load Streamlit secrets: {e}")
 
-        # Try 4: Environment variable path
+        # Try 4: Environment variable path or secrets
         if not credentials:
-            env_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            from .secrets_helper import get_gcp_credentials_path
+
+            env_path = get_gcp_credentials_path()
             if env_path and os.path.exists(env_path):
                 logger.info(f"Loading GCS credentials from {env_path}")
                 credentials = service_account.Credentials.from_service_account_file(

@@ -5,10 +5,10 @@ Generates visual word frequency clouds from business categories
 that maximally activate each neuron.
 """
 
-from pathlib import Path
-from typing import Dict, Optional, List
 import json
 import logging
+from pathlib import Path
+from typing import Dict, List, Optional
 
 try:
     from wordcloud import WordCloud
@@ -280,6 +280,7 @@ class WordcloudService:
             PDF bytes or None if generation failed
         """
         import io
+
         from matplotlib.backends.backend_pdf import PdfPages
 
         fig = self.generate_wordcloud_fig(neuron_id, **kwargs)

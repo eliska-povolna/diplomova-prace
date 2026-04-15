@@ -72,4 +72,3 @@ class TestTopKSAE:
 
     def test_sparsity_k_property(self, sae: TopKSAE) -> None:
         assert sae.sparsity_k == 4
-

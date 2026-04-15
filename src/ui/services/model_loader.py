@@ -1,9 +1,10 @@
 """Model loader service for discovering and loading checkpoints."""
 
-from pathlib import Path
-from typing import Dict, Optional, Tuple
-import torch
 import logging
+from pathlib import Path
+from typing import Dict, Optional
+
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,7 @@ class ModelLoader:
         return latest
 
     @staticmethod
-    def load_models(
-        elsa_ckpt_path: Path, device: str = "cpu"
-    ):
+    def load_models(elsa_ckpt_path: Path, device: str = "cpu"):
         """
         Load ELSA model from checkpoint path.
 

@@ -1,9 +1,8 @@
 """Interpretability page — Feature browser with labels and wordclouds."""
 
-import streamlit as st
-import pandas as pd
-from pathlib import Path
 import logging
+
+import streamlit as st
 
 from src.ui.utils import info_section
 

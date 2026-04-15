@@ -1,14 +1,13 @@
 """Live demo page — Interactive steering (main interactive page)."""
 
-import logging
 import base64
-from typing import List, Dict
+import logging
 from io import BytesIO
+from typing import Dict, List
 
-import streamlit as st
-import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+import streamlit as st
 from PIL import Image, ImageDraw
 
 from src.ui.utils import info_section
@@ -135,7 +134,6 @@ def show():
         )
 
         if not user_already_encoded:
-
             try:
                 # Check if we've already encoded this user on a previous run
                 cached_csr_key = f"cached_csr_{selected_user}"
@@ -161,7 +159,7 @@ def show():
                             "❌ Inference service not properly initialized: n_items is None"
                         )
                         logger.error(
-                            f"Inference service n_items is None! This indicates model loading failed."
+                            "Inference service n_items is None! This indicates model loading failed."
                         )
                         return
 
@@ -170,8 +168,8 @@ def show():
                     )
 
                     # Create sparse CSR matrix from POI indices (1 row, n_items columns)
-                    from scipy.sparse import csr_matrix
                     import numpy as np
+                    from scipy.sparse import csr_matrix
 
                     # Validate POI indices are within bounds
                     max_poi_idx = max(poi_indices) if poi_indices else 0

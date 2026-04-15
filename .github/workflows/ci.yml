@@ -41,8 +41,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r src/requirements.txt
 
-      - name: Lint with Ruff
-        run: ruff check src/ tests/
+      - name: Format check with Black
+        run: black --check src/ tests/
 
       - name: Type-check with mypy
         run: mypy src/ --ignore-missing-imports --exclude src/yelp_initial_exploration

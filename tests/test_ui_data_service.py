@@ -73,7 +73,9 @@ def _write_local_photos(photo_root: Path) -> None:
         )
 
 
-def test_get_poi_details_uses_model_index_mapping_and_local_photos(tmp_path: Path) -> None:
+def test_get_poi_details_uses_model_index_mapping_and_local_photos(
+    tmp_path: Path,
+) -> None:
     parquet_root = tmp_path / "parquet"
     _write_business_parquet(parquet_root)
 
@@ -139,10 +141,30 @@ def test_photos_sorted_by_label_priority(tmp_path: Path) -> None:
 
     # Create photos with different labels (intentionally out of priority order)
     photos_data = [
-        {"photo_id": "photo_food", "business_id": "biz_row1", "label": "food", "caption": ""},
-        {"photo_id": "photo_outside", "business_id": "biz_row1", "label": "outside", "caption": "storefront"},
-        {"photo_id": "photo_menu", "business_id": "biz_row1", "label": "menu", "caption": ""},
-        {"photo_id": "photo_inside", "business_id": "biz_row1", "label": "inside", "caption": "interior"},
+        {
+            "photo_id": "photo_food",
+            "business_id": "biz_row1",
+            "label": "food",
+            "caption": "",
+        },
+        {
+            "photo_id": "photo_outside",
+            "business_id": "biz_row1",
+            "label": "outside",
+            "caption": "storefront",
+        },
+        {
+            "photo_id": "photo_menu",
+            "business_id": "biz_row1",
+            "label": "menu",
+            "caption": "",
+        },
+        {
+            "photo_id": "photo_inside",
+            "business_id": "biz_row1",
+            "label": "inside",
+            "caption": "interior",
+        },
     ]
 
     # Write photo files and JSON metadata
@@ -161,19 +183,27 @@ def test_photos_sorted_by_label_priority(tmp_path: Path) -> None:
     )
     try:
         poi = service.get_poi_details(0)
-        
+
         # Verify we have all 4 photos
         assert poi["photo_count"] == 4, f"Expected 4 photos, got {poi['photo_count']}"
-        
+
         # Verify they're sorted by priority: outside > inside > food > menu
         photos = poi["photos"]
-        assert "photo_outside.jpg" in photos[0], f"First photo should be 'outside', got {photos[0]}"
-        assert "photo_inside.jpg" in photos[1], f"Second photo should be 'inside', got {photos[1]}"
-        assert "photo_food.jpg" in photos[2], f"Third photo should be 'food', got {photos[2]}"
-        assert "photo_menu.jpg" in photos[3], f"Fourth photo should be 'menu', got {photos[3]}"
-        
+        assert (
+            "photo_outside.jpg" in photos[0]
+        ), f"First photo should be 'outside', got {photos[0]}"
+        assert (
+            "photo_inside.jpg" in photos[1]
+        ), f"Second photo should be 'inside', got {photos[1]}"
+        assert (
+            "photo_food.jpg" in photos[2]
+        ), f"Third photo should be 'food', got {photos[2]}"
+        assert (
+            "photo_menu.jpg" in photos[3]
+        ), f"Fourth photo should be 'menu', got {photos[3]}"
+
         # Verify primary photo is the highest priority
         assert "photo_outside.jpg" in poi["primary_photo"]
-        
+
     finally:
         service.close()

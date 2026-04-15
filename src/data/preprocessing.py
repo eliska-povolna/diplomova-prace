@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 # ── ID mapping ────────────────────────────────────────────────────────────
 
+
 def build_id_map(series: pd.Series) -> pd.Series:
     """Build a ``{raw_id → integer_index}`` mapping from a Series.
 
@@ -47,6 +48,7 @@ class DatasetMaps(NamedTuple):
 
 
 # ── CSR builder ───────────────────────────────────────────────────────────
+
 
 def build_csr(
     interactions: pd.DataFrame,
@@ -92,7 +94,10 @@ def build_csr(
 
     logger.info(
         "Built CSR: %d users × %d items, %d interactions (density=%.4f%%)",
-        n_users, n_items, mat.nnz, 100.0 * mat.nnz / (n_users * n_items),
+        n_users,
+        n_items,
+        mat.nnz,
+        100.0 * mat.nnz / (n_users * n_items),
     )
     return DatasetMaps(
         user_map=uid_map.to_dict(),
@@ -101,12 +106,14 @@ def build_csr(
     )
 
 
-def apply_kcore_filtering(csr: csr_matrix, k: int = 5, max_iterations: int = 10) -> csr_matrix:
+def apply_kcore_filtering(
+    csr: csr_matrix, k: int = 5, max_iterations: int = 10
+) -> csr_matrix:
     """Apply k-core filtering to a CSR matrix.
-    
+
     Removes users and items with fewer than k interactions iteratively
     until the matrix converges (no rows or columns can be removed).
-    
+
     Parameters
     ----------
     csr:
@@ -115,46 +122,54 @@ def apply_kcore_filtering(csr: csr_matrix, k: int = 5, max_iterations: int = 10)
         Minimum number of interactions required per user and per item.
     max_iterations:
         Maximum iterations to prevent infinite loops.
-    
+
     Returns
     -------
     csr_matrix
         Filtered CSR matrix with users and items having >= k interactions.
     """
     mat = csr.copy()
-    
+
     for iteration in range(max_iterations):
         old_nnz = mat.nnz
-        
+
         # Remove users (rows) with fewer than k interactions
         row_nnz = np.diff(mat.indptr)
         keep_rows = row_nnz >= k
         mat = mat[keep_rows]
-        
+
         # Remove items (columns) with fewer than k interactions
         col_nnz = np.diff(mat.tocsc().indptr)
         keep_cols = col_nnz >= k
         mat = mat[:, keep_cols]
-        
+
         # Convert to CSR for next iteration
         mat = mat.tocsr()
-        
+
         logger.info(
             "K-core (k=%d, iter=%d): %d interactions (removed %d)",
-            k, iteration + 1, mat.nnz, old_nnz - mat.nnz
+            k,
+            iteration + 1,
+            mat.nnz,
+            old_nnz - mat.nnz,
         )
-        
+
         # Check for convergence
         if mat.nnz == old_nnz:
             logger.info("K-core filtering converged after %d iterations", iteration + 1)
             break
-    
-    logger.info("Final k-core result: %d users × %d items, %d interactions",
-                mat.shape[0], mat.shape[1], mat.nnz)
+
+    logger.info(
+        "Final k-core result: %d users × %d items, %d interactions",
+        mat.shape[0],
+        mat.shape[1],
+        mat.nnz,
+    )
     return mat
 
 
 # ── Persistence ───────────────────────────────────────────────────────────
+
 
 def save_dataset(maps: DatasetMaps, out_dir: str | Path) -> None:
     """Persist CSR matrix and ID maps to ``out_dir``.
@@ -202,6 +217,7 @@ def load_dataset(out_dir: str | Path) -> DatasetMaps:
 
 # ── Train / validation split ──────────────────────────────────────────────
 
+
 def user_train_val_split(
     csr: csr_matrix,
     *,
@@ -231,4 +247,3 @@ def user_train_val_split(
         all_idx, test_size=val_ratio, random_state=seed
     )
     return train_idx, val_idx
-
