@@ -10,7 +10,15 @@ Multi-page app with 4 pages:
 
 import logging
 import sys
+import warnings
 from pathlib import Path
+
+# Suppress ZoeDepth library warning about __path__ deprecation
+warnings.filterwarnings(
+    "ignore",
+    message=".*Accessing `__path__` from.*zoedepth.*",
+    category=DeprecationWarning,
+)
 
 import streamlit as st
 
@@ -53,6 +61,7 @@ def _show_startup_diagnostics(config: dict) -> None:
 
     missing = []
     with st.expander("Startup diagnostics", expanded=False):
+        # Display path checks
         for label, path_str in checks:
             exists = bool(path_str and Path(path_str).exists())
             status = "OK" if exists else "MISSING"
@@ -60,11 +69,22 @@ def _show_startup_diagnostics(config: dict) -> None:
             if not exists:
                 missing.append(label)
 
+        # Display service status from session state
+        diag = st.session_state.get("_startup_diagnostics", {})
+        if diag.get("models_loaded"):
+            st.write("✅ **Models**: Loaded")
+        if diag.get("backend"):
+            st.write(f"☁️ **Backend**: {diag['backend']}")
+        if not diag.get("local_data_available", True):
+            st.write(
+                "ℹ️ **Local data**: Not available (using Cloud SQL, expected on Streamlit Cloud)"
+            )
+
     if missing:
-        st.info(
-            "ℹ️ Local data paths not available (expected on Streamlit Cloud). "
-            "Using Cloud SQL backend. To use local data, ensure paths exist in configs/default.yaml."
+        st.session_state._startup_diagnostics = st.session_state.get(
+            "_startup_diagnostics", {}
         )
+        st.session_state._startup_diagnostics["local_data_available"] = False
 
 
 # Initialize services (via @st.cache_resource)

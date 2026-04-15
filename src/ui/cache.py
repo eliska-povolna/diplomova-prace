@@ -98,7 +98,7 @@ def load_config(config_path: Path) -> Dict:
     # Compute n_items from database (apply same filters as training)
     # NOTE: This is informational only; the inference service reads n_items from checkpoint metadata
     config["n_items"] = None  # Will be read from checkpoint by inference service
-    
+
     try:
         from src.ui.services.secrets_helper import get_cloudsql_config
 
@@ -131,7 +131,9 @@ def load_config(config_path: Path) -> Dict:
                         )
                     else:
                         query = "SELECT COUNT(*) FROM review"
-                        logger.info("   Counting all items from Cloud SQL (no state filter)...")
+                        logger.info(
+                            "   Counting all items from Cloud SQL (no state filter)..."
+                        )
 
                     result = conn.execute(query).scalar()
                     config["n_items"] = result if result else None
@@ -157,7 +159,9 @@ def load_config(config_path: Path) -> Dict:
                         )
                     else:
                         query = "SELECT COUNT(*) FROM review"
-                        logger.info("   Counting all items from DuckDB (no state filter)...")
+                        logger.info(
+                            "   Counting all items from DuckDB (no state filter)..."
+                        )
 
                     result = conn.execute(query).fetchall()
                     config["n_items"] = result[0][0] if result else None
@@ -307,7 +311,9 @@ def load_inference_service(config: Dict) -> InferenceService:
 
     service = InferenceService(elsa_ckpt, sae_ckpt, config, labels=labels)
     if HAS_STREAMLIT:
-        st.success("✅ Models loaded")
+        if not hasattr(st.session_state, "_startup_diagnostics"):
+            st.session_state._startup_diagnostics = {}
+        st.session_state._startup_diagnostics["models_loaded"] = True
     logger.info("✅ Models loaded successfully")
     return service
 
@@ -417,13 +423,21 @@ def load_data_service(config: Dict):
     backend_info = getattr(service, "backend_type", "unknown")
     if backend_info == "cloudsql":
         if HAS_STREAMLIT:
-            st.success("☁️ Using Cloud Backend (Cloud SQL)")
+            if not hasattr(st.session_state, "_startup_diagnostics"):
+                st.session_state._startup_diagnostics = {}
+            st.session_state._startup_diagnostics["backend"] = "Cloud SQL"
         logger.info("✅ Data Service using Cloud SQL backend")
     else:
         if HAS_STREAMLIT:
-            st.success(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
+            if not hasattr(st.session_state, "_startup_diagnostics"):
+                st.session_state._startup_diagnostics = {}
+            st.session_state._startup_diagnostics[
+                "backend"
+            ] = f"DuckDB ({service.num_pois} POIs)"
             if local_photos_path:
-                st.info(f"📷 Local photos enabled: {local_photos_path}")
+                st.session_state._startup_diagnostics[
+                    "photos"
+                ] = f"Local ({local_photos_path})"
         logger.info(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
         if local_photos_path:
             logger.info(f"📷 Local photos enabled: {local_photos_path}")
@@ -470,6 +484,7 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
 
     Labels are lazy-loaded on first access (no startup delay).
     If no LLM provider is available (no API keys), uses basic pre-computed labels.
+    NeuronInterpreter is only imported if LLM providers are configured.
     """
     # Find latest timestamped output directory
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
@@ -508,27 +523,35 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
     # Fallback to default path
     if not labels_path:
         labels_path = Path("outputs") / "neuron_labels.json"
-        logger.warning(f"Using fallback labels path: {labels_path}")
+        logger.debug(f"Using fallback labels path: {labels_path}")
 
-    # Try to load NeuronInterpreter - let it auto-detect provider
+    # Check if LLM providers are configured before importing NeuronInterpreter
     interpreter = None
-    try:
-        from src.interpret.neuron_interpreter import NeuronInterpreter
+    from src.ui.services.secrets_helper import get_gemini_api_key
+    import os
 
-        # Auto-detect provider based on environment variables
-        # (github_models if GITHUB_TOKEN is set, gemini if GOOGLE_API_KEY is set)
+    has_gemini = bool(get_gemini_api_key())
+    has_github = bool(os.environ.get("GITHUB_TOKEN"))
+
+    if has_gemini or has_github:
+        # Only import NeuronInterpreter if we have API keys configured
         try:
-            interpreter = NeuronInterpreter()  # Auto-detect provider
-            logger.info(
-                f"✅ NeuronInterpreter initialized with provider: {interpreter.provider}"
-            )
-        except ValueError as e:
-            # No API keys available - use basic labels instead
-            logger.info(f"LLM provider not available ({e}), using basic labels")
+            from src.interpret.neuron_interpreter import NeuronInterpreter
+
+            try:
+                interpreter = NeuronInterpreter()  # Auto-detect provider
+                logger.info(f"✅ LLM provider available: {interpreter.provider}")
+            except ValueError as e:
+                logger.debug(f"LLM provider not available: {e}")
+                interpreter = None
+        except ImportError as e:
+            logger.debug(f"NeuronInterpreter not available: {e}")
             interpreter = None
-    except ImportError:
-        logger.warning("NeuronInterpreter not available, labels will be basic")
-        interpreter = None
+    else:
+        logger.debug(
+            "No LLM API keys configured (GITHUB_TOKEN, GOOGLE_API_KEY). "
+            "Using basic pre-computed labels."
+        )
 
     service = LabelingService(
         labels_json_path=labels_path,
