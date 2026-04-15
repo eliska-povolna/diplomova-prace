@@ -95,37 +95,85 @@ def load_config(config_path: Path) -> Dict:
         "outputs/neuron_labels.json"
     )
 
-    # Compute n_items from parquet data (apply same filters as training)
-    # NOTE: This is now only for informational purposes. The inference service
-    # reads n_items from checkpoint metadata, not from config.
+    # Compute n_items from database (apply same filters as training)
+    # NOTE: This is informational only; the inference service reads n_items from checkpoint metadata
+    config["n_items"] = None  # Will be read from checkpoint by inference service
+    
     try:
-        import duckdb
+        from .secrets_helper import get_cloudsql_config
 
-        parquet_pattern = str(
-            Path(config["parquet_dir"]) / "business" / "**" / "*.parquet"
-        )
-        conn = duckdb.connect(":memory:")
-
-        # Get state filter from config if available
+        cloudsql_cfg = get_cloudsql_config()
         state_filter = raw_config.get("data", {}).get("state_filter")
 
-        if state_filter:
-            # Apply state filter like training did
-            query = f"""
-                SELECT COUNT(*) 
-                FROM read_parquet('{parquet_pattern}')
-                WHERE state = '{state_filter}'
-            """
-            logger.info(f"   Counting items with state_filter='{state_filter}'...")
-        else:
-            query = f"SELECT COUNT(*) FROM read_parquet('{parquet_pattern}')"
-            logger.info("   Counting all items (no state filter)...")
+        # Try Cloud SQL first
+        if all(
+            [
+                cloudsql_cfg.get("instance"),
+                cloudsql_cfg.get("database"),
+                cloudsql_cfg.get("user"),
+                cloudsql_cfg.get("password"),
+            ]
+        ):
+            try:
+                from .cloud_sql_helper import CloudSQLHelper
 
-        result = conn.execute(query).fetchall()
-        config["n_items"] = result[0][0] if result else 50000  # Fallback estimate
-        logger.info(f"   Found {config['n_items']} items in dataset")
+                sql_helper = CloudSQLHelper(
+                    instance_connection_name=cloudsql_cfg["instance"],
+                    database=cloudsql_cfg["database"],
+                    user=cloudsql_cfg["user"],
+                    password=cloudsql_cfg["password"],
+                )
+                with sql_helper.engine.connect() as conn:
+                    if state_filter:
+                        query = f"SELECT COUNT(*) FROM review WHERE state = '{state_filter}'"
+                        logger.info(
+                            f"   Counting items from Cloud SQL with state_filter='{state_filter}'..."
+                        )
+                    else:
+                        query = "SELECT COUNT(*) FROM review"
+                        logger.info("   Counting all items from Cloud SQL (no state filter)...")
+
+                    result = conn.execute(query).scalar()
+                    config["n_items"] = result if result else None
+                    logger.info(
+                        f"   Found {config['n_items']} items in Cloud SQL dataset"
+                    )
+            except Exception as e:
+                logger.debug(f"Cloud SQL count failed: {e}, trying local DuckDB...")
+                config["n_items"] = None
+
+        # Fall back to local DuckDB if Cloud SQL unavailable
+        if config["n_items"] is None:
+            duckdb_path = Path(config["duckdb_path"])
+            if duckdb_path.exists():
+                import duckdb
+
+                conn = duckdb.connect(str(duckdb_path))
+                try:
+                    if state_filter:
+                        query = f"SELECT COUNT(*) FROM review WHERE state = '{state_filter}'"
+                        logger.info(
+                            f"   Counting items from DuckDB with state_filter='{state_filter}'..."
+                        )
+                    else:
+                        query = "SELECT COUNT(*) FROM review"
+                        logger.info("   Counting all items from DuckDB (no state filter)...")
+
+                    result = conn.execute(query).fetchall()
+                    config["n_items"] = result[0][0] if result else None
+                    logger.info(f"   Found {config['n_items']} items in DuckDB dataset")
+                except Exception as e:
+                    logger.debug(f"Local DuckDB count failed: {e}")
+                    config["n_items"] = None
+                finally:
+                    conn.close()
+            else:
+                logger.debug(
+                    f"DuckDB not found at {duckdb_path}, will use checkpoint metadata"
+                )
+
     except Exception as e:
-        logger.warning(f"Could not count items from parquet: {e}. Using placeholder.")
+        logger.debug(f"Could not count items from database: {e}")
         config["n_items"] = None  # Will be read from checkpoint by inference service
 
     # Include state_filter in config for DataService
@@ -202,9 +250,37 @@ def load_inference_service(config: Dict) -> InferenceService:
             for subdir in subdirs[:3]:  # Show contents of first 3 dirs
                 contents = list(subdir.iterdir())
                 logger.error(f"  {subdir.name}/: {[c.name for c in contents]}")
+
+            error_msg = (
+                "❌ Model Checkpoints Not Found\n\n"
+                f"Could not find `elsa_best.pt` or `sae_best.pt` in:\n"
+                f"`{ckpt_base}`\n\n"
+                "**On Streamlit Cloud:**\n"
+                "This error occurs when model checkpoint files aren't committed to Git.\n"
+                "Checkpoint files must be explicitly added to the repository.\n\n"
+                "**To fix:**\n"
+                "1. Ensure checkpoint files exist locally in `outputs/*/checkpoints/`\n"
+                "2. Add them to Git: `git add outputs/**/checkpoints/ --force`\n"
+                "3. Commit and push: `git push`\n"
+                "4. Redeploy on Streamlit Cloud\n\n"
+                "**Local development:**\n"
+                "If running locally, ensure the `outputs/` directory has trained model files."
+            )
+            if HAS_STREAMLIT:
+                st.error(error_msg)
             raise RuntimeError(f"No model checkpoints found in {ckpt_base}")
 
     if not checkpoint_dir:
+        error_msg = (
+            "❌ Model Checkpoint Directory Not Found\n\n"
+            f"The configured checkpoint directory does not exist:\n"
+            f"`{ckpt_base}`\n\n"
+            "**To fix:**\n"
+            f"1. Check that `configs/default.yaml` has correct `model_checkpoint_dir`\n"
+            f"2. Ensure trained model files are present in `outputs/*/checkpoints/`"
+        )
+        if HAS_STREAMLIT:
+            st.error(error_msg)
         raise RuntimeError(
             f"Checkpoint directory does not exist or has no valid checkpoints: {ckpt_base}"
         )
@@ -248,6 +324,8 @@ def load_data_service(config: Dict):
     - Otherwise -> Uses local DuckDB + Parquet files
 
     The USE_CLOUD_STORAGE env var can force local-only mode if set to "false".
+
+    Falls back gracefully if local data isn't available (for Streamlit Cloud).
     """
 
     logger.info("🔄 Initializing Data Service...")
@@ -269,14 +347,71 @@ def load_data_service(config: Dict):
     ]
     local_photos_path = next((p for p in photo_candidates if p.exists()), None)
 
-    # Initialize unified DataService (handles both Cloud SQL and local DuckDB)
-    service = DataService(
-        duckdb_path=Path(config["duckdb_path"]),
-        parquet_dir=Path(config["parquet_dir"]),
-        config=config,
-        item2index_path=item2index_path,
-        local_photos_dir=local_photos_path,
+    # Check if local data files exist before trying to initialize
+    duckdb_path = Path(config["duckdb_path"])
+    parquet_dir = Path(config["parquet_dir"])
+    data_available_locally = duckdb_path.exists() and parquet_dir.exists()
+
+    # Check for Cloud SQL credentials
+    from .secrets_helper import get_cloudsql_config
+
+    cloudsql_config = get_cloudsql_config()
+    cloudsql_available = all(
+        [
+            cloudsql_config.get("instance"),
+            cloudsql_config.get("database"),
+            cloudsql_config.get("user"),
+            cloudsql_config.get("password"),
+        ]
     )
+
+    if not data_available_locally and not cloudsql_available:
+        # Neither local data nor Cloud SQL available
+        error_msg = (
+            "❌ Data Backend Not Available\n\n"
+            "Neither local data files nor Cloud SQL credentials found.\n\n"
+            "**To fix on Streamlit Cloud:**\n"
+            "1. Go to your app settings → **Secrets**\n"
+            "2. Add Cloud SQL configuration:\n"
+            "   - `CLOUDSQL_INSTANCE`: your-project:region:instance\n"
+            "   - `CLOUDSQL_DATABASE`: postgres\n"
+            "   - `CLOUDSQL_USER`: postgres\n"
+            "   - `CLOUDSQL_PASSWORD`: your-password\n\n"
+            "**To fix locally:**\n"
+            "Ensure `configs/default.yaml` has correct paths to:\n"
+            f"- DuckDB: {duckdb_path}\n"
+            f"- Parquet: {parquet_dir}"
+        )
+        if HAS_STREAMLIT:
+            st.error(error_msg)
+        logger.error(error_msg)
+        raise RuntimeError(
+            "Data backend not available. Configure Cloud SQL or ensure local data exists."
+        )
+
+    # Initialize DataService (will try Cloud SQL first, then fallback to local)
+    try:
+        service = DataService(
+            duckdb_path=duckdb_path,
+            parquet_dir=parquet_dir,
+            config=config,
+            item2index_path=item2index_path,
+            local_photos_dir=local_photos_path,
+        )
+    except FileNotFoundError as e:
+        error_msg = (
+            f"❌ Local data files not found: {e}\n\n"
+            "Local data path is not accessible. This is expected on Streamlit Cloud.\n\n"
+            "**To use local data:**\n"
+            "Run locally with:\n"
+            "`streamlit run src/ui/main.py`\n\n"
+            "**To use Streamlit Cloud:**\n"
+            "Configure Cloud SQL credentials in Streamlit Cloud Secrets."
+        )
+        if HAS_STREAMLIT:
+            st.error(error_msg)
+        logger.error(error_msg)
+        raise RuntimeError(f"Data not available: {e}") from e
 
     # Report which backend is being used
     backend_info = getattr(service, "backend_type", "unknown")

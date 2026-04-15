@@ -3,6 +3,7 @@
 
 # Core ML & Data Stack (required for inference & data access)
 torch>=2.2.0
+torchvision>=0.17.0  # Required by transformers.models.zoedepth
 numpy>=1.26.0
 pandas>=2.2.0
 duckdb>=1.0.0

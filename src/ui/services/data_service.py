@@ -81,14 +81,23 @@ class DataService:
         self.engine = None  # For Cloud SQL
 
         # Load item2index mapping from training.
+        # This maps business_id -> model index for coordinate space alignment
+        # It's optional; without it, the app still works but may show indices differently
+        self.item2index = None
         if item2index_path and Path(item2index_path).exists():
-            with open(item2index_path, "rb") as f:
-                self.item2index = pickle.load(f)
-            logger.info(f"Loaded item2index mapping with {len(self.item2index)} items")
+            try:
+                with open(item2index_path, "rb") as f:
+                    self.item2index = pickle.load(f)
+                logger.info(
+                    f"✓ Loaded item2index mapping with {len(self.item2index)} items"
+                )
+            except Exception as e:
+                logger.debug(f"Could not load item2index from {item2index_path}: {e}")
         else:
-            self.item2index = None
-            logger.warning(
-                "item2index mapping not found; index alignment may be incorrect"
+            logger.debug(
+                "item2index mapping not found (optional); "
+                "app will function but without strict index alignment. "
+                "This is expected on Streamlit Cloud."
             )
 
         # Reverse lookup: model idx -> business_id.
@@ -540,9 +549,17 @@ class DataService:
 
             else:
                 # Query from DuckDB (parquet)
-                review_pattern = str(
-                    self.parquet_dir / "review" / "year=*" / "*.parquet"
-                )
+                # Check if parquet files exist before querying
+                review_path = self.parquet_dir / "review"
+                if not review_path.exists():
+                    logger.debug(
+                        f"Parquet directory not found at {review_path}. "
+                        "Expected on Streamlit Cloud without local data. "
+                        "Configure Cloud SQL to use the app."
+                    )
+                    return []
+
+                review_pattern = str(review_path / "year=*" / "*.parquet")
                 business_pattern = str(
                     self.parquet_dir / "business" / "state=*" / "*.parquet"
                 )
@@ -581,12 +598,14 @@ class DataService:
             ]
 
             logger.info(
-                f"Found {len(result)} test users with state_filter={self.state_filter}"
+                f"✓ Found {len(result)} test users (backend: {self.backend_type}, state_filter={self.state_filter})"
             )
             return result
 
         except Exception as e:
-            logger.error(f"Failed to load test users: {e}")
+            logger.debug(
+                f"get_test_users failed (expected if using Streamlit Cloud without local data): {e}"
+            )
             return []
 
     def get_user_interactions(self, user_id: str, min_stars: float = 4.0) -> List[int]:

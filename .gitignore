@@ -88,6 +88,11 @@ Yelp/
 data/preprocessed_yelp/
 data/processed_yelp_easystudy/*.duckdb
 
+# DO COMMIT: Training mappings (small, deterministic, required for inference)
+!data/processed_yelp_easystudy/item2index.pkl
+!data/processed_yelp_easystudy/user2index.pkl
+!data/processed_yelp_easystudy/business2index.pkl
+
 # BUT: DO COMMIT test_data/ with sample datasets for CI/testing
 !test_data/
 test_data/**/.gitkeep
