@@ -36,6 +36,16 @@ wordcloud>=1.9.0                    # Wordcloud generation
 pillow>=10.0.0                      # Image processing
 
 # ============================================================================
+# Google Cloud Platform
+# ============================================================================
+google-cloud-storage>=2.10.0        # Cloud Storage (GCS)
+cloud-sql-python-connector>=1.4.0   # Cloud SQL connector
+google-cloud-sql-connector>=1.4.0   # Alternative connector
+sqlalchemy>=2.0.0                   # SQL ORM
+pg8000>=1.30.0                      # PostgreSQL driver
+vertexai>=0.1.0                     # Vertex AI (for Gemini via Vertex)
+
+# ============================================================================
 # Configuration & Environment
 # ============================================================================
 pyyaml>=6.0.1                       # YAML config parsing

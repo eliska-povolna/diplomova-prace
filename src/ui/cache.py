@@ -37,7 +37,10 @@ else:
 
 @st_cache_resource
 def load_config(config_path: Path) -> Dict:
-    """Load configuration from YAML and flatten for UI services."""
+    """Load configuration from YAML and flatten for UI services.
+    
+    Cache is invalidated when config file is modified (by including mtime in cache key).
+    """
     config_path = Path(config_path)
     project_root = config_path.parent.parent
 
@@ -87,7 +90,9 @@ def load_config(config_path: Path) -> Dict:
         raw_config.get("output", {}).get("base_dir", "outputs"),
     )
     config["model_checkpoint_dir"] = _resolve_to_project_root(checkpoint_dir)
-    config["neuron_labels_path"] = _resolve_to_project_root("outputs/neuron_labels.json")
+    config["neuron_labels_path"] = _resolve_to_project_root(
+        "outputs/neuron_labels.json"
+    )
 
     # Compute n_items from parquet data (apply same filters as training)
     # NOTE: This is now only for informational purposes. The inference service
@@ -232,19 +237,31 @@ def load_inference_service(config: Dict) -> InferenceService:
 
 
 @st_cache_resource
-def load_data_service(config: Dict) -> DataService:
+def load_data_service(config: Dict):
     """
     Load POI data once per session.
 
-    DuckDB + Parquet files cached in memory.
-    Uses universal item2index mapping so users retain all their interactions.
-    Interactions are automatically filtered to model coordinate space when needed.
-    Loads local photos from yelp_photos folder if available.
+    Supports both cloud backend (Cloud SQL + Cloud Storage) and local backend.
+
+    The unified DataService automatically detects which backend to use:
+    - If Cloud SQL credentials (CLOUDSQL_INSTANCE, etc.) are present -> Uses Cloud SQL
+    - Otherwise -> Uses local DuckDB + Parquet files
+
+    The USE_CLOUD_STORAGE env var can force local-only mode if set to "false".
     """
+    import os
+
+    logger.info("🔄 Initializing Data Service...")
+    
     # Path to UNIVERSAL item2index mapping (all ~17k businesses)
     # This preserves user interaction history before filtering
-    item2index_path = Path(__file__).parent.parent.parent / "data" / "processed_yelp_easystudy" / "item2index.pkl"
-    
+    item2index_path = (
+        Path(__file__).parent.parent.parent
+        / "data"
+        / "processed_yelp_easystudy"
+        / "item2index.pkl"
+    )
+
     # Path to local photos folder (support common folder naming variants)
     project_root = Path(__file__).parent.parent.parent
     photo_candidates = [
@@ -252,7 +269,8 @@ def load_data_service(config: Dict) -> DataService:
         project_root / "Yelp-Photos",
     ]
     local_photos_path = next((p for p in photo_candidates if p.exists()), None)
-    
+
+    # Initialize unified DataService (handles both Cloud SQL and local DuckDB)
     service = DataService(
         duckdb_path=Path(config["duckdb_path"]),
         parquet_dir=Path(config["parquet_dir"]),
@@ -260,43 +278,53 @@ def load_data_service(config: Dict) -> DataService:
         item2index_path=item2index_path,
         local_photos_dir=local_photos_path,
     )
-    if HAS_STREAMLIT:
-        st.success(f"✅ Loaded {service.num_pois} POIs")
+    
+    # Report which backend is being used
+    backend_info = getattr(service, 'backend_type', 'unknown')
+    if backend_info == 'cloudsql':
+        if HAS_STREAMLIT:
+            st.success("☁️ Using Cloud Backend (Cloud SQL)")
+        logger.info("✅ Data Service using Cloud SQL backend")
+    else:
+        if HAS_STREAMLIT:
+            st.success(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
+            if local_photos_path:
+                st.info(f"📷 Local photos enabled: {local_photos_path}")
+        logger.info(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
         if local_photos_path:
-            st.info(f"📷 Local photos enabled: {local_photos_path}")
-    logger.info(f"✅ Loaded {service.num_pois} POIs")
-    if local_photos_path:
-        logger.info(f"📷 Local photos enabled: {local_photos_path}")
+            logger.info(f"📷 Local photos enabled: {local_photos_path}")
+    
     return service
 
 
 @st_cache_resource
 def get_precomputed_cache_dir() -> Optional[Path]:
     """Detect if precomputed UI cache exists and return its path.
-    
+
     Looks for precomputed_ui_cache/neuron_wordclouds/ in the latest outputs/*/ directories.
     Returns the neuron_wordclouds subdirectory or None if not found (app will compute on-demand).
     """
     project_root = Path(__file__).parent.parent.parent
     outputs_dir = project_root / "outputs"
-    
+
     if not outputs_dir.exists():
         return None
-    
+
     # Find all output directories, sorted by modification time
     import os
+
     output_dirs = sorted(
         [d for d in outputs_dir.iterdir() if d.is_dir()],
         key=lambda d: os.path.getmtime(d),
         reverse=True,
     )
-    
+
     for output_dir in output_dirs:
         cache_dir = output_dir / "precomputed_ui_cache" / "neuron_wordclouds"
         if cache_dir.exists():
             logger.info(f"✓ Found precomputed cache at {cache_dir}")
             return cache_dir
-    
+
     logger.info("No precomputed cache found (app will compute on-demand)")
     return None
 
@@ -312,7 +340,7 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
     # Find latest timestamped output directory
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
     output_dir = None
-    
+
     if latest_run_path.exists():
         try:
             with open(latest_run_path, "r") as f:
@@ -321,19 +349,20 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
             logger.debug(f"Found latest output dir: {output_dir}")
         except Exception as e:
             logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
-    
+
     # Fallback: find most recent timestamped directory
     if not output_dir or not output_dir.exists():
         outputs_base = Path("outputs")
         if outputs_base.exists():
             timestamped_dirs = [
-                d for d in outputs_base.iterdir() 
+                d
+                for d in outputs_base.iterdir()
                 if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
             ]
             if timestamped_dirs:
                 output_dir = sorted(timestamped_dirs)[-1]
                 logger.debug(f"Using most recent output dir: {output_dir}")
-    
+
     # Use labels from output dir if available
     labels_path = None
     if output_dir:
@@ -341,12 +370,12 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
         if candidate.exists():
             labels_path = candidate
             logger.info(f"✅ Using labels from: {labels_path}")
-    
+
     # Fallback to default path
     if not labels_path:
         labels_path = Path("outputs") / "neuron_labels.json"
         logger.warning(f"Using fallback labels path: {labels_path}")
-    
+
     # Try to load NeuronInterpreter - let it auto-detect provider
     interpreter = None
     try:
@@ -388,11 +417,11 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
     except ImportError:
         logger.error("WordcloudService not available")
         return None
-    
+
     # Find latest timestamped output directory
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
     output_dir = None
-    
+
     if latest_run_path.exists():
         try:
             with open(latest_run_path, "r") as f:
@@ -401,44 +430,45 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
             logger.debug(f"Found latest output dir from LATEST_RUN.txt: {output_dir}")
         except Exception as e:
             logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
-    
+
     # Fallback: find most recent timestamped directory
     if not output_dir or not output_dir.exists():
         outputs_base = Path("outputs")
         if outputs_base.exists():
             timestamped_dirs = [
-                d for d in outputs_base.iterdir() 
+                d
+                for d in outputs_base.iterdir()
                 if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
             ]
             if timestamped_dirs:
                 output_dir = sorted(timestamped_dirs)[-1]  # Most recent
                 logger.debug(f"Using most recent output dir: {output_dir}")
-    
+
     # Look for label and metadata files
     labels_path = None
     metadata_path = None
-    
+
     if output_dir:
         labels_path = output_dir / "neuron_labels.json"
         metadata_path = output_dir / "neuron_category_metadata.json"
-        
+
         if labels_path.exists():
             logger.info(f"Found labels at: {labels_path}")
         else:
             logger.warning(f"Labels not found at: {labels_path}")
             labels_path = None
-            
+
         if metadata_path.exists():
             logger.info(f"Found metadata at: {metadata_path}")
         else:
             logger.warning(f"Metadata not found at: {metadata_path}")
             metadata_path = None
-    
+
     service = WordcloudService(
         category_metadata_path=metadata_path if metadata_path else None,
         labels_path=labels_path,
     )
-    
+
     logger.info("✅ Wordcloud service initialized")
     return service
 
@@ -453,7 +483,7 @@ def load_coactivation_service(config: Dict) -> Optional["CoactivationService"]:
     # Find latest timestamped output directory
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
     output_dir = None
-    
+
     if latest_run_path.exists():
         try:
             with open(latest_run_path, "r") as f:
@@ -462,31 +492,32 @@ def load_coactivation_service(config: Dict) -> Optional["CoactivationService"]:
             logger.debug(f"Found latest output dir from LATEST_RUN.txt: {output_dir}")
         except Exception as e:
             logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
-    
+
     # Fallback: find most recent timestamped directory
     if not output_dir or not output_dir.exists():
         outputs_base = Path("outputs")
         if outputs_base.exists():
             timestamped_dirs = [
-                d for d in outputs_base.iterdir() 
+                d
+                for d in outputs_base.iterdir()
                 if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
             ]
             if timestamped_dirs:
                 output_dir = sorted(timestamped_dirs)[-1]  # Most recent
                 logger.debug(f"Using most recent output dir: {output_dir}")
-    
+
     # Look for coactivation file
     coactivation_path = None
-    
+
     if output_dir:
         coactivation_path = output_dir / "neuron_coactivation.json"
-        
+
         if coactivation_path.exists():
             logger.info(f"Found co-activation data at: {coactivation_path}")
         else:
             logger.debug(f"Co-activation file not found at: {coactivation_path}")
             coactivation_path = None
-    
+
     service = CoactivationService(coactivation_path=coactivation_path)
     logger.info("✅ Co-activation service initialized")
     return service

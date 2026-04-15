@@ -12,6 +12,29 @@ def show():
         st.error("Services not initialized")
         return
 
+    # Debug section at top to help diagnose caching issues
+    with st.expander("🔧 Debug Info", expanded=False):
+        debug_cols = st.columns([3, 1])
+        with debug_cols[0]:
+            st.write(f"**Model n_items**: {inference.n_items}")
+            st.write(f"**Data POIs**: {data.num_pois}")
+            item2index_size = getattr(data, 'item2index', None)
+            if item2index_size:
+                st.write(f"**item2index mapping size**: {len(item2index_size)}")
+            else:
+                st.write(f"**item2index**: Not loaded")
+            test_users = data.get_test_users(limit=50)
+            st.write(f"**Test users loaded**: {len(test_users)}")
+            if test_users:
+                st.write(f"  First user: {test_users[0]['id']}")
+            if not test_users:
+                st.warning("⚠️ No test users found! Check cache at data/ui_cache/")
+        with debug_cols[1]:
+            if st.button("🔄 Clear Cache", key="clear_cache_btn"):
+                # Clear service cache to force reload on next run
+                st.cache_resource.clear()
+                st.success("Cache cleared! Reload page in browser.")
+
     # Title
     st.title("🗺️ Interpretable POI Recommender")
     st.write(

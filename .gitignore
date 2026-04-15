@@ -164,6 +164,11 @@ ENV/
 env.bak/
 venv.bak/
 
+# Streamlit Secrets (credentials - NEVER COMMIT)
+.streamlit/secrets.toml
+neuronsae-credentials.json
+*.json.key
+
 # Spyder project settings
 .spyderproject
 .spyproject

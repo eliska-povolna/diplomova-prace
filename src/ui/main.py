@@ -11,8 +11,13 @@ Multi-page app with 4 pages:
 from pathlib import Path
 import sys
 import logging
+import os
 
+from dotenv import load_dotenv
 import streamlit as st
+
+# Load environment variables from .env file FIRST
+load_dotenv()
 
 # Add project root to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))

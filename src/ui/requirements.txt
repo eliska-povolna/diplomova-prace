@@ -16,6 +16,12 @@ pillow>=10.0.0
 pyyaml>=6.0
 python-dotenv>=1.0
 
+# Google Cloud integration
+google-cloud-storage>=2.10.0
+cloud-sql-python-connector>=1.4.0
+sqlalchemy>=2.0.0
+pg8000>=1.30.0
+
 # Note: numpy, pandas, torch, duckdb are already available 
 # as dependencies of the main project (src/models, src/data)
 # If you need to use the UI standalone, uncomment below:
