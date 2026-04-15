@@ -1,0 +1,68 @@
+# POI Recommender - Complete Project Dependencies
+# Consolidates all requirements from src/, src/ui/, and notebooks
+
+# ============================================================================
+# Core ML & Data Stack
+# ============================================================================
+torch>=2.2.0
+torchvision>=0.17.0
+numpy>=1.26.0
+scipy>=1.12.0
+pandas>=2.2.0
+scikit-learn>=1.4.0
+
+# ============================================================================
+# Data Pipeline (DuckDB + Parquet)
+# ============================================================================
+duckdb>=1.0.0
+pyarrow>=15.0.0
+nbformat>=5.10.0
+
+# ============================================================================
+# Neuron Interpretation & Embeddings
+# ============================================================================
+google-generativeai>=0.3.0          # LLM-based neuron labeling (free API)
+sentence-transformers>=2.3.0        # Neuron label embeddings
+
+# ============================================================================
+# Streamlit UI & Visualization
+# ============================================================================
+streamlit>=1.28.0                   # Web app framework
+plotly>=5.20.0                      # Interactive charts
+folium>=0.14.0                      # Interactive maps
+streamlit-folium>=0.14.0            # Streamlit-folium integration
+matplotlib>=3.8.0                   # Static visualizations
+seaborn>=0.13.0                     # Statistical visualization
+wordcloud>=1.9.0                    # Wordcloud generation
+pillow>=10.0.0                      # Image processing
+
+# ============================================================================
+# Google Cloud Platform
+# ============================================================================
+google-cloud-storage>=2.10.0        # Cloud Storage (GCS)
+cloud-sql-python-connector>=1.4.0   # Cloud SQL connector
+google-cloud-sql-connector>=1.4.0   # Alternative connector
+sqlalchemy>=2.0.0                   # SQL ORM
+pg8000>=1.30.0                      # PostgreSQL driver
+vertexai>=0.1.0                     # Vertex AI (for Gemini via Vertex)
+
+# ============================================================================
+# Configuration & Environment
+# ============================================================================
+pyyaml>=6.0.1                       # YAML config parsing
+python-dotenv>=1.0                  # .env file support
+
+# ============================================================================
+# Experiment Tracking
+# ============================================================================
+wandb>=0.16.0                       # Weights & Biases (optional)
+
+# ============================================================================
+# Development & Notebooks
+# ============================================================================
+jupyter>=1.0.0                      # Jupyter notebooks
+ipywidgets>=8.1.0                   # Interactive widgets
+pytest>=8.0.0                       # Testing framework
+pytest-cov>=4.1.0                   # Coverage reporting
+ruff>=0.3.0                         # Code linting
+mypy>=1.9.0                         # Type checking

@@ -60,4 +60,3 @@ class TestEvalMetrics:
         y_true = np.array([0, 0, 1, 0, 0])
         y_pred = np.array([2, 0, 1, 3, 4])
         assert ndcg_at_k(y_true, y_pred, k=1) == pytest.approx(1.0)
-

@@ -17,13 +17,12 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from src.data.preprocessing import build_csr
 from src.data.yelp_loader import load_reviews
-from src.models.collaborative_filtering import ELSA, recall_at_k, ndcg_at_k
-from src.models.sparse_autoencoder import TopKSAE
+from src.models.collaborative_filtering import ELSA, ndcg_at_k, recall_at_k
 from src.models.sae_cf_model import ELSASAEModel
+from src.models.sparse_autoencoder import TopKSAE
 from src.utils import CheckpointManager, setup_logger
 
 logger = logging.getLogger(__name__)
@@ -31,9 +30,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Evaluate SAE-CF POI recommender"
-    )
+    parser = argparse.ArgumentParser(description="Evaluate SAE-CF POI recommender")
     parser.add_argument(
         "--checkpoint",
         required=True,
@@ -198,7 +195,9 @@ def main() -> None:
         X_split = torch.tensor(X_split_csr.toarray(), dtype=torch.float32)
         gt_mask = X_split_csr.toarray().astype(bool)
 
-        logger.info(f"Evaluation set: {X_split.shape[0]} users × {X_split.shape[1]} items")
+        logger.info(
+            f"Evaluation set: {X_split.shape[0]} users × {X_split.shape[1]} items"
+        )
 
         # Load models
         logger.info("Loading models...")

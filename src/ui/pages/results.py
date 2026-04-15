@@ -76,7 +76,7 @@ def show_actual_results(results: dict):
         # Metrics table
         if "metrics" in results:
             metrics_df = pd.DataFrame(results["metrics"])
-            st.dataframe(metrics_df, width='stretch')
+            st.dataframe(metrics_df, width="stretch")
         else:
             st.info("Metrics data not available in results.")
 
@@ -159,7 +159,7 @@ def show_actual_results(results: dict):
                     "variable": "Metric",
                 },
             )
-            st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, use_container_width=True, key="ablation_sparsity_line")
 
             # Table
             st.dataframe(ablations_df, width="stretch")
@@ -308,7 +308,7 @@ def show_placeholder_results():
                 "Recall@20": "Recall@20",
             },
         )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True, key="quality_vs_size_scatter")
 
         st.markdown(
             """
@@ -375,11 +375,11 @@ def show_placeholder_results():
             xaxis=dict(title="Number of Active Features (k)"),
             yaxis=dict(
                 title="Recall@20",
-                titlefont=dict(color="#1f77b4"),
+                title_font=dict(color="#1f77b4"),
             ),
             yaxis2=dict(
                 title="Model Size (MB)",
-                titlefont=dict(color="#ff7f0e"),
+                title_font=dict(color="#ff7f0e"),
                 anchor="x",
                 overlaying="y",
                 side="right",
@@ -387,7 +387,9 @@ def show_placeholder_results():
             hovermode="x unified",
         )
 
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(
+            fig, use_container_width=True, key="sparsity_tradeoff_dual_axis"
+        )
 
         st.markdown(
             """
@@ -449,7 +451,7 @@ def show_placeholder_results():
             annotation_position="top right",
         )
 
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig, use_container_width=True, key="latency_histogram")
 
         st.markdown(
             """

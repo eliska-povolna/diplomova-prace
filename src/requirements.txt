@@ -26,8 +26,22 @@ matplotlib>=3.8.0
 seaborn>=0.13.0
 plotly>=5.20.0
 
+# Streamlit UI
+streamlit>=1.39.0
+folium>=0.15.1
+streamlit-folium>=0.20.0
+wordcloud>=1.9.3
+Pillow>=10.0.0
+requests>=2.31.0
+
+# Google Cloud integration (required for Streamlit Cloud deployment)
+google-cloud-storage>=2.10.0
+cloud-sql-python-connector>=1.4.0
+sqlalchemy>=2.0.0
+pg8000>=1.30.0
+
 # Code quality
 pytest>=8.0.0
 pytest-cov>=4.1.0
-ruff>=0.3.0
+black>=24.1.0
 mypy>=1.9.0

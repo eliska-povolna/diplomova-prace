@@ -137,7 +137,7 @@ class TopKSAE(nn.Module):
 
     def loss(self, x: torch.Tensor) -> torch.Tensor:
         """Compute combined MSE reconstruction + L1 sparsity loss.
-        
+
         CRITICAL FIX: Changed from cosine similarity to MSE in original space.
         Cosine loss in latent space doesn't reflect reconstruction quality in item space.
 
@@ -161,5 +161,3 @@ class TopKSAE(nn.Module):
     def sparsity_k(self) -> int:
         """Return the configured TopK sparsity level."""
         return self.k
-
-

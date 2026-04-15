@@ -12,6 +12,29 @@ def show():
         st.error("Services not initialized")
         return
 
+    # Debug section at top to help diagnose caching issues
+    with st.expander("🔧 Debug Info", expanded=False):
+        debug_cols = st.columns([3, 1])
+        with debug_cols[0]:
+            st.write(f"**Model n_items**: {inference.n_items}")
+            st.write(f"**Data POIs**: {data.num_pois}")
+            item2index_size = getattr(data, "item2index", None)
+            if item2index_size:
+                st.write(f"**item2index mapping size**: {len(item2index_size)}")
+            else:
+                st.write("**item2index**: Not loaded")
+            test_users = data.get_test_users(limit=50)
+            st.write(f"**Test users loaded**: {len(test_users)}")
+            if test_users:
+                st.write(f"  First user: {test_users[0]['id']}")
+            if not test_users:
+                st.warning("⚠️ No test users found! Check cache at data/ui_cache/")
+        with debug_cols[1]:
+            if st.button("🔄 Clear Cache", key="clear_cache_btn"):
+                # Clear service cache to force reload on next run
+                st.cache_resource.clear()
+                st.success("Cache cleared! Reload page in browser.")
+
     # Title
     st.title("🗺️ Interpretable POI Recommender")
     st.write(
@@ -41,7 +64,6 @@ def show():
         st.metric("📍 POIs", f"{data.num_pois:,}", delta=None, delta_color="off")
 
     with col3:
-        test_users = data.get_test_users(limit=1)
         st.metric(
             "👥 Test Users",
             len(data.get_test_users(limit=50)),
@@ -67,7 +89,9 @@ def show():
         """
         )
 
-    with st.expander("2️⃣ Sparse Autoencoder (SAE) — Feature Extraction", expanded=False):
+    with st.expander(
+        "2️⃣ Sparse Autoencoder (SAE) — Feature Extraction", expanded=False
+    ):
         st.markdown(
             f"""
         **Sparse Autoencoder** decomposes ELSA embeddings into **{getattr(inference.sae, 'k', 64)} interpretable features**:
@@ -116,16 +140,16 @@ def show():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("📊 View Evaluation Results", width='stretch'):
-            st.switch_page("src.ui.main:show_results")
+        if st.button("📊 View Evaluation Results", use_container_width=True):
+            st.switch_page("📊 Results")
 
     with col2:
-        if st.button("🎛️ Try Interactive Steering", width='stretch'):
-            st.switch_page("src.ui.main:show_live_demo")
+        if st.button("🎛️ Try Interactive Steering", use_container_width=True):
+            st.switch_page("🎛️ Live Demo")
 
     with col3:
-        if st.button("🔍 Browse Features", width='stretch'):
-            st.switch_page("src.ui.main:show_interpretability")
+        if st.button("🔍 Browse Features", use_container_width=True):
+            st.switch_page("🔍 Interpretability")
 
     # Footer
     st.divider()

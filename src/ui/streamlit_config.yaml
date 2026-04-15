@@ -29,7 +29,7 @@ data:
   db_path: "../../Yelp-JSON/yelp.duckdb"
   
   # Data filters (must match training)
-  state_filter: "CA"
+  state_filter: null  # null = use all data (all states)
   min_review_count: 20
   pos_threshold: 4.0
   

@@ -1,0 +1,22 @@
+[theme]
+primaryColor = "#FF6E40"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F5"
+textColor = "#262730"
+font = "sans serif"
+
+[client]
+toolbarMode = "viewer"
+showErrorDetails = false
+showSidebarNavigation = true
+
+[logger]
+level = "info"
+
+[server]
+headless = true
+port = 8501
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false

@@ -22,18 +22,16 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset
 
-from src.data.preprocessing import build_csr, apply_kcore_filtering
+from src.data.preprocessing import apply_kcore_filtering, build_csr
 from src.data.yelp_loader import load_businesses, load_reviews
-from src.models.collaborative_filtering import ELSA, NMSELoss, recall_at_k, ndcg_at_k
-from src.models.sparse_autoencoder import TopKSAE, topk_mask
+from src.models.collaborative_filtering import ELSA, NMSELoss
+from src.models.sparse_autoencoder import TopKSAE
 from src.utils import CheckpointManager, Config, load_config, setup_logger
-from torch.utils.data import Dataset, Subset
 
 logger = logging.getLogger(__name__)
 
@@ -447,13 +445,43 @@ def main() -> None:
             raise FileNotFoundError(f"Parquet directory not found: {parquet_dir}")
 
         # Load with all applicable filters from config
-        reviews = load_reviews(
+        # ⭐ FIRST: Create UNIVERSAL mappings from ALL data BEFORE any filtering
+        # This ensures we have complete mappings for all possible items
+        logger.info("Creating universal item/business mappings...")
+        all_reviews = load_reviews(
             parquet_dir,
             db_path=db_path,
             pos_threshold=config["data"]["pos_threshold"],
             year_min=config["data"].get("year_min"),
             year_max=config["data"].get("year_max"),
         )
+
+        # Build universal mappings from all data
+        all_users = all_reviews["user_id"].unique()
+        all_businesses = all_reviews["business_id"].unique()
+
+        universal_user_map = {uid: idx for idx, uid in enumerate(all_users)}
+        universal_business_map = {bid: idx for idx, bid in enumerate(all_businesses)}
+
+        logger.info("Universal mappings created:")
+        logger.info(f"  Total unique users: {len(universal_user_map)}")
+        logger.info(f"  Total unique businesses: {len(universal_business_map)}")
+
+        # Save universal mappings for downstream use (e.g., labeling notebook)
+        import pickle
+
+        mappings_dir = output_dir / "mappings"
+        mappings_dir.mkdir(parents=True, exist_ok=True)
+
+        with open(mappings_dir / "user2index_universal.pkl", "wb") as f:
+            pickle.dump(universal_user_map, f)
+        with open(mappings_dir / "business2index_universal.pkl", "wb") as f:
+            pickle.dump(universal_business_map, f)
+
+        logger.info(f"Universal mappings saved to {mappings_dir}")
+
+        # ⭐ NOW apply filtering on top of universal data
+        reviews = all_reviews.copy()
 
         # Filter by state (if specified)
         state_filter = config["data"].get("state_filter")
@@ -470,10 +498,10 @@ def main() -> None:
             )
             reviews = reviews[reviews["business_id"].isin(business_ids)]
 
-        logger.info(f"Loaded {len(reviews)} reviews")
+        logger.info(f"Loaded {len(reviews)} reviews (after state filtering)")
 
-        # Build CSR matrix
-        logger.info("Building CSR matrix...")
+        # Build CSR matrix FROM FILTERED DATA
+        logger.info("Building CSR matrix from filtered data...")
         dataset = build_csr(reviews)
         X_csr = dataset.csr
         logger.info(

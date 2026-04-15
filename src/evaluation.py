@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from scipy.sparse import csr_matrix
 
-from src.models.collaborative_filtering import ELSA, recall_at_k, ndcg_at_k
+from src.models.collaborative_filtering import ELSA, ndcg_at_k, recall_at_k
 from src.models.sparse_autoencoder import TopKSAE
 
 
@@ -115,7 +115,9 @@ def evaluate_user_rankings(
             # ELSA-only predictions (matching semestral_project exactly)
             # Rank by residual: reconstruction - input (not just reconstruction)
             recon_elsa = elsa_model(user_tensor)  # Full reconstruction
-            scores_elsa = (recon_elsa - user_tensor).squeeze().cpu().numpy()  # Residual!
+            scores_elsa = (
+                (recon_elsa - user_tensor).squeeze().cpu().numpy()
+            )  # Residual!
 
             # Mask already-seen items (don't rank them)
             scores_elsa[user_input > 0] = -np.inf

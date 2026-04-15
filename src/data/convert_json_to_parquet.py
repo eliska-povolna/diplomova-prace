@@ -30,7 +30,8 @@ import argparse
 import json
 import logging
 from pathlib import Path
-from typing import Iterator, Optional, Dict, Any
+from typing import Dict, Iterator, Optional
+
 import pandas as pd
 
 logging.basicConfig(
@@ -98,13 +99,24 @@ def convert_jsonl_to_parquet(
                         except (ValueError, TypeError):
                             logger.debug(f"Could not cast {col} to {dt}, skipping")
 
-            df.to_parquet(
-                output_path,
-                engine="pyarrow",
-                compression="zstd",
-                index=False,
-                append=output_path.exists(),
-            )
+            # Write each chunk to a separate part file to avoid append issues
+            if not output_path.exists():
+                df.to_parquet(
+                    output_path,
+                    engine="pyarrow",
+                    compression="zstd",
+                    index=False,
+                )
+            else:
+                # For incremental writes, append to existing file
+                import pyarrow as pa
+                from pyarrow import parquet as pq
+
+                # Read existing file and concatenate with new data
+                existing_table = pq.read_table(str(output_path))
+                new_table = pa.Table.from_pandas(df)
+                combined_table = pa.concat_tables([existing_table, new_table])
+                pq.write_table(combined_table, str(output_path), compression="zstd")
             total_rows += len(rows)
             rows = []
             logger.info(f"  ... wrote {total_rows} rows so far")
@@ -114,7 +126,7 @@ def convert_jsonl_to_parquet(
             logger.info(f"Reached max_rows={max_rows}, stopping")
             break
 
-    # Write remaining rows
+    # Write remaining rows using same PyArrow strategy
     if rows:
         df = pd.DataFrame(rows)
         if dtype_overrides:
@@ -125,13 +137,16 @@ def convert_jsonl_to_parquet(
                     except (ValueError, TypeError):
                         logger.debug(f"Could not cast {col} to {dt}, skipping")
 
-        df.to_parquet(
-            output_path,
-            engine="pyarrow",
-            compression="zstd",
-            index=False,
-            append=output_path.exists(),
-        )
+        import pyarrow as pa
+        from pyarrow import parquet as pq
+
+        new_table = pa.Table.from_pandas(df)
+        if output_path.exists():
+            existing_table = pq.read_table(str(output_path))
+            combined_table = pa.concat_tables([existing_table, new_table])
+            pq.write_table(combined_table, str(output_path), compression="zstd")
+        else:
+            pq.write_table(new_table, str(output_path), compression="zstd")
         total_rows += len(rows)
 
     logger.info(f"✓ Converted {total_rows} rows → {output_path}")

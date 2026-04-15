@@ -12,20 +12,18 @@ pip install -r requirements.txt
 
 #### 2. Configure the App
 
-Edit `src/ui/streamlit_config.yaml`:
+Edit `configs/default.yaml`:
 
 ```yaml
-# Model paths
-model_checkpoint_dir: outputs/20260326_093131/checkpoints
-duckdb_path: ../../Yelp-JSON/yelp.duckdb
-parquet_dir: ../../Yelp-JSON/yelp_parquet
+model:
+  checkpoint_dir: outputs/20260326_093131/checkpoints
 
-# Steering
-steering_alpha: 0.3
-
-# LLM (for neuron labeling)
-llm_provider: gemini
-neuron_labels_path: outputs/neuron_labels.json
+data:
+  duckdb_path: ../../Yelp-JSON/yelp.duckdb
+  parquet_dir: ../../Yelp-JSON/yelp_parquet
+  
+ui:
+  steering_alpha: 0.3
 ```
 
 #### 3. Download Yelp Dataset (if not already present)

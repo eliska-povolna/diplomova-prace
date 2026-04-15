@@ -1,4 +1,27 @@
-# Copilot Instructions for Diplomov-pr-ce
+# Copilot Instructions for Development
+
+## Commit Style
+- **Batch changes**: Group related changes into fewer, larger commits rather than committing frequently
+- **Brief messages**: Use concise 1-line commit messages during early development (e.g., "Add precomputation to training workflow")
+- **Avoid narration**: Don't describe every small fix - focus on what changed at a high level
+- **No detailed breakdowns**: Skip bullet-point commit message details unless truly necessary
+- **During early development**: Commit once per feature/major task, not per file - batch all related changes together
+
+## Development Approach
+- During early phases: Prioritize speed and iteration over granular documentation
+- Combine multiple related file changes in single commits
+- Only create detailed documentation when requested or at milestone completions
+- Keep the workflow focused on implementation, not documentation
+
+## File Management
+- Don't create separate documentation files for each change
+- Avoid creating intermediate reference notebooks (integrate into main workflows instead)
+- Update existing markdown files (like IMPLEMENTATION_PLAN.md) rather than creating new ones
+
+## General Principles
+- Think in terms of features/features, not individual lines of code
+- Group logically related changes together
+- Balance visibility with developer focus
 
 ## File Organization
 

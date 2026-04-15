@@ -7,11 +7,10 @@ in the sparse autoencoder, and vice versa.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
-from scipy.sparse import csr_matrix
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +92,7 @@ def get_max_activating_items(
 
         # Get top activations
         top_indices = np.argsort(-activations)[:num_examples]
-        top_items = [
-            (index2item[idx], activations[idx]) for idx in top_indices
-        ]
+        top_items = [(index2item[idx], activations[idx]) for idx in top_indices]
 
         max_activating[neuron_idx] = top_items
 

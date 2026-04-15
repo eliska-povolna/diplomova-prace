@@ -1,9 +1,9 @@
 """Labeling service for neuron interpretation."""
 
-from pathlib import Path
-from typing import Dict, List, Optional
 import json
 import logging
+from pathlib import Path
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -16,8 +16,11 @@ class LabelingService:
     """
 
     def __init__(
-        self, labels_json_path: Path, interpreter=None, config: Optional[Dict] = None,
-        data_service=None
+        self,
+        labels_json_path: Path,
+        interpreter=None,
+        config: Optional[Dict] = None,
+        data_service=None,
     ):
         """
         Initialize labeling service.
@@ -44,10 +47,20 @@ class LabelingService:
         if self.labels_json_path.exists():
             try:
                 with open(self.labels_json_path, "r") as f:
-                    self.labels_cache = json.load(f)
-                logger.info(f"Loaded {len(self.labels_cache)} cached labels")
+                    data = json.load(f)
+                    # Extract neuron_labels if structure is {metadata: ..., neuron_labels: {...}}
+                    if isinstance(data, dict) and "neuron_labels" in data:
+                        self.labels_cache = data["neuron_labels"]
+                    else:
+                        # Fallback if structure is different
+                        self.labels_cache = data
+                logger.info(
+                    f"✅ Loaded {len(self.labels_cache)} cached neuron labels from {self.labels_json_path.name}"
+                )
             except json.JSONDecodeError as e:
                 logger.warning(f"Failed to load labels.json: {e}")
+        else:
+            logger.warning(f"Labels file not found: {self.labels_json_path}")
 
     def get_label(self, neuron_idx: int) -> str:
         """
@@ -110,7 +123,7 @@ class LabelingService:
         """
         Get POIs that maximally activate this neuron.
 
-        Note: This is a placeholder that returns empty list. 
+        Note: This is a placeholder that returns empty list.
         In a future implementation, this could be connected to activation data
         computed during training or stored in a separate index.
 
@@ -127,7 +140,9 @@ class LabelingService:
         # 1. Look up pre-computed activations for this neuron
         # 2. Query data_service for POI details
         # 3. Return ranked POI list
-        logger.debug(f"POI retrieval for neuron {neuron_idx} not yet implemented (placeholder)")
+        logger.debug(
+            f"POI retrieval for neuron {neuron_idx} not yet implemented (placeholder)"
+        )
         return []
 
     def _save_label(self, neuron_idx: int, label: str):

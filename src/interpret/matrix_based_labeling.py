@@ -8,12 +8,12 @@ Implements the methodology from semestral_project:
 4. Normalize for final labels
 """
 
-import torch
-import numpy as np
 from collections import defaultdict
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
-from scipy.stats import entropy
-from typing import Dict, List, Tuple, Any
 
 
 def extract_tags_and_items(
@@ -368,7 +368,7 @@ def matrix_based_neuron_labeling(
     label_neuron_tfidf, tag_names_sorted = apply_tfidf_on_neurons(
         tag_neuron_matrix, tag_names
     )
-    print(f"   ✓ TF-IDF scoring complete")
+    print("   ✓ TF-IDF scoring complete")
 
     # Step 5: Generate neuron labels
     print("\n5. Generating neuron labels...")

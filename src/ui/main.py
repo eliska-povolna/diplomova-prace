@@ -8,9 +8,17 @@ Multi-page app with 4 pages:
 4. 🔍 Interpretability - Feature browser
 """
 
-from pathlib import Path
-import sys
 import logging
+import sys
+import warnings
+from pathlib import Path
+
+# Suppress ZoeDepth library warning about __path__ deprecation
+warnings.filterwarnings(
+    "ignore",
+    message=".*Accessing `__path__` from.*zoedepth.*",
+    category=DeprecationWarning,
+)
 
 import streamlit as st
 
@@ -53,6 +61,7 @@ def _show_startup_diagnostics(config: dict) -> None:
 
     missing = []
     with st.expander("Startup diagnostics", expanded=False):
+        # Display path checks
         for label, path_str in checks:
             exists = bool(path_str and Path(path_str).exists())
             status = "OK" if exists else "MISSING"
@@ -60,21 +69,34 @@ def _show_startup_diagnostics(config: dict) -> None:
             if not exists:
                 missing.append(label)
 
+        # Display service status from session state
+        diag = st.session_state.get("_startup_diagnostics", {})
+        if diag.get("models_loaded"):
+            st.write("✅ **Models**: Loaded")
+        if diag.get("backend"):
+            st.write(f"☁️ **Backend**: {diag['backend']}")
+        if not diag.get("local_data_available", True):
+            st.write(
+                "ℹ️ **Local data**: Not available (using Cloud SQL, expected on Streamlit Cloud)"
+            )
+
     if missing:
-        st.warning(
-            "Some required paths are missing: "
-            + ", ".join(missing)
-            + ". Check configs/default.yaml path values."
+        st.session_state._startup_diagnostics = st.session_state.get(
+            "_startup_diagnostics", {}
         )
+        st.session_state._startup_diagnostics["local_data_available"] = False
+
 
 # Initialize services (via @st.cache_resource)
 try:
     from cache import (
-        load_config,
-        load_inference_service,
-        load_data_service,
-        load_labeling_service,
         init_session_state,
+        load_coactivation_service,
+        load_config,
+        load_data_service,
+        load_inference_service,
+        load_labeling_service,
+        load_wordcloud_service,
     )
 
     # Initialize session state first
@@ -93,10 +115,18 @@ try:
     with st.spinner("Initializing labeling service..."):
         labels = load_labeling_service(config)
 
+    with st.spinner("Initializing wordcloud service..."):
+        wordcloud = load_wordcloud_service(config)
+
+    with st.spinner("Initializing co-activation service..."):
+        coactivation = load_coactivation_service(config)
+
     # Store in session for access from pages
     st.session_state.inference = inference
     st.session_state.data = data
     st.session_state.labels = labels
+    st.session_state.wordcloud = wordcloud
+    st.session_state.coactivation = coactivation
 
     logger.info("✅ All services initialized")
 
@@ -106,7 +136,7 @@ except Exception as e:
     st.stop()
 
 # Define multi-page app
-from src.ui.pages import home, results, live_demo, interpretability
+from src.ui.pages import home, interpretability, live_demo, results
 
 
 # Create function aliases with unique names for Streamlit navigation

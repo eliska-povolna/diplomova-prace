@@ -41,9 +41,7 @@ class ELSA(nn.Module):
     def __init__(self, n_items: int, latent_dim: int = LATENT_DIM) -> None:
         super().__init__()
         self.latent_dim = latent_dim
-        self.A = nn.Parameter(
-            nn.init.xavier_uniform_(torch.empty(n_items, latent_dim))
-        )
+        self.A = nn.Parameter(nn.init.xavier_uniform_(torch.empty(n_items, latent_dim)))
 
     @property
     def _A_norm(self) -> torch.Tensor:
@@ -136,6 +134,7 @@ class NMSELoss(nn.Module):
 
 # ── Evaluation helpers ────────────────────────────────────────────────────
 
+
 def recall_at_k(y_true: np.ndarray, y_pred_argsorted: np.ndarray, k: int) -> float:
     """Recall@k for a single user."""
     hits = y_true[y_pred_argsorted[:k]].sum()
@@ -153,4 +152,3 @@ def ndcg_at_k(y_true: np.ndarray, y_pred_argsorted: np.ndarray, k: int) -> float
     ideal = np.sort(y_true)[::-1][:k]
     idcg = (ideal / np.log2(np.arange(2, k + 2))).sum()
     return float(dcg / idcg) if idcg > 0 else 0.0
-

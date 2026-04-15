@@ -1,12 +1,11 @@
 """Inference service for steering and recommendation generation."""
 
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 import logging
+from pathlib import Path
+from typing import Dict, List, Optional
 
-import torch
-import torch.nn.functional as F
 import numpy as np
+import torch
 
 from src.models.collaborative_filtering import ELSA
 from src.models.sparse_autoencoder import TopKSAE
@@ -324,10 +323,10 @@ class InferenceService:
         result = []
         for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
             # Get label from LabelingService (or fallback to Feature N)
-            label = "Feature {idx}"
-            if hasattr(self, 'labels') and self.labels:
+            label = f"Feature {idx}"
+            if hasattr(self, "labels") and self.labels:
                 label = self.labels.get_label(idx)
-            
+
             result.append(
                 {
                     "neuron_idx": idx,
