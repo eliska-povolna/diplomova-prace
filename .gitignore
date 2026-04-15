@@ -92,11 +92,22 @@ data/processed_yelp_easystudy/*.duckdb
 !test_data/
 test_data/**/.gitkeep
 
-# Binary data files
-outputs/
+# Ignore most output files (training artifacts, plots, metrics)
+# EXCEPT: commit the latest model checkpoint for Streamlit Cloud
+outputs/*
+outputs/**/*
+!outputs/20260409_132816
+!outputs/20260409_132816/**
+!outputs/LATEST_RUN.txt
+!outputs/neuron_category_metadata.json
+
+# JSON files (except those in outputs/)
 *.json
+!outputs/**/*.json
+
 *.jsonl
 *.png
+!outputs/**/*.png
 *.npz
 *.duckdb
 notebooks/*.duckdb
