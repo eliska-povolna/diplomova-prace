@@ -39,7 +39,8 @@ else:
 def load_config(config_path: Path) -> Dict:
     """Load configuration from YAML and flatten for UI services.
 
-    Cache is invalidated when config file is modified (by including mtime in cache key).
+    Note: Cache is based on function signature only (not file mtime).
+    To invalidate on config changes, restart the Streamlit app.
     """
     config_path = Path(config_path)
     project_root = config_path.parent.parent

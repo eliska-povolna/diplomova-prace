@@ -45,8 +45,10 @@ class CloudStorageHelper:
             project_id: Google Cloud Project ID
         """
         if not HAS_GCS:
-            raise ImportError("google-cloud-storage not installed. Install with:")
-            raise ImportError("  pip install google-cloud-storage")
+            raise ImportError(
+                "google-cloud-storage not installed. Install with: "
+                "pip install google-cloud-storage"
+            )
 
         self.bucket_name = bucket_name
         from .secrets_helper import get_secret, get_gcp_project

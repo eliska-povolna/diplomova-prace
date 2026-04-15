@@ -1,4 +1,8 @@
-"""Backend services for Streamlit UI (no Streamlit dependencies)."""
+"""Backend services for Streamlit UI.
+
+Services include Cloud SQL/Storage access and model inference.
+Secrets access requires Streamlit runtime for .streamlit/secrets.toml.
+"""
 
 from .cloud_sql_helper import CloudSQLHelper
 from .cloud_storage_helper import CloudStorageHelper

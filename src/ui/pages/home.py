@@ -144,11 +144,11 @@ def show():
             st.switch_page("📊 Results")
 
     with col2:
-        if st.button("🎛️ Try Interactive Steering", width="stretch"):
+        if st.button("🎛️ Try Interactive Steering", use_container_width=True):
             st.switch_page("🎛️ Live Demo")
 
     with col3:
-        if st.button("🔍 Browse Features", width="stretch"):
+        if st.button("🔍 Browse Features", use_container_width=True):
             st.switch_page("🔍 Interpretability")
 
     # Footer

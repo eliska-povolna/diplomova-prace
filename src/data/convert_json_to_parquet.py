@@ -126,7 +126,7 @@ def convert_jsonl_to_parquet(
             logger.info(f"Reached max_rows={max_rows}, stopping")
             break
 
-    # Write remaining rows
+    # Write remaining rows using same PyArrow strategy
     if rows:
         df = pd.DataFrame(rows)
         if dtype_overrides:
@@ -137,13 +137,16 @@ def convert_jsonl_to_parquet(
                     except (ValueError, TypeError):
                         logger.debug(f"Could not cast {col} to {dt}, skipping")
 
-        df.to_parquet(
-            output_path,
-            engine="pyarrow",
-            compression="zstd",
-            index=False,
-            append=output_path.exists(),
-        )
+        import pyarrow as pa
+        from pyarrow import parquet as pq
+
+        new_table = pa.Table.from_pandas(df)
+        if output_path.exists():
+            existing_table = pq.read_table(str(output_path))
+            combined_table = pa.concat_tables([existing_table, new_table])
+            pq.write_table(combined_table, str(output_path), compression="zstd")
+        else:
+            pq.write_table(new_table, str(output_path), compression="zstd")
         total_rows += len(rows)
 
     logger.info(f"✓ Converted {total_rows} rows → {output_path}")

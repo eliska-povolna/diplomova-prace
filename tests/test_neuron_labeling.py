@@ -2,11 +2,7 @@
 """
 Quick test of neuron labeling module with mock data
 """
-import sys
-
-sys.path.insert(0, "src")
-
-from interpret.neuron_labeling import TagBasedLabeler
+from src.interpret.neuron_labeling import TagBasedLabeler
 
 
 def test_neuron_labeling_creates_labels():

@@ -1,13 +1,13 @@
 """Results page — Evaluation metrics and ablations."""
 
+from pathlib import Path
 import json
 import logging
-from pathlib import Path
 
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ def show_actual_results(results: dict):
         # Metrics table
         if "metrics" in results:
             metrics_df = pd.DataFrame(results["metrics"])
-            st.dataframe(metrics_df, use_container_width=True)
+            st.dataframe(metrics_df, width="stretch")
         else:
             st.info("Metrics data not available in results.")
 
@@ -159,10 +159,10 @@ def show_actual_results(results: dict):
                     "variable": "Metric",
                 },
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, use_container_width=True, key="ablation_sparsity_line")
 
             # Table
-            st.dataframe(ablations_df, use_container_width=True)
+            st.dataframe(ablations_df, width="stretch")
         else:
             st.info(
                 """
@@ -195,7 +195,7 @@ def show_actual_results(results: dict):
             st.metric("Inference Count", f"{latency.get('count', 0)} requests")
 
             st.markdown(
-                """
+                f"""
             **Latency Interpretation:**
             - Mean: Average inference time (typical user experience)
             - P95: 95th percentile (worst 5% of requests)
@@ -250,7 +250,7 @@ def show_placeholder_results():
         }
 
         metrics_df = pd.DataFrame(metrics_data)
-        st.dataframe(metrics_df, use_container_width=True)
+        st.dataframe(metrics_df, width="stretch")
 
         # Metric explanations in expandable sections
         with st.expander("📖 Metric Explanations", expanded=False):
@@ -308,7 +308,7 @@ def show_placeholder_results():
                 "Recall@20": "Recall@20",
             },
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True, key="quality_vs_size_scatter")
 
         st.markdown(
             """
@@ -345,7 +345,7 @@ def show_placeholder_results():
         }
 
         ablation_df = pd.DataFrame(ablation_data)
-        st.dataframe(ablation_df, use_container_width=True)
+        st.dataframe(ablation_df, width="stretch")
 
         # Dual-axis plot
         fig = go.Figure()

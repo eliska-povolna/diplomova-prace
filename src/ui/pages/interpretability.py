@@ -38,8 +38,15 @@ def show():
     col1, col2 = st.columns([2, 1])
 
     with col1:
-        # Get maximum neuron count
-        max_neuron = 63  # Default for SAE k=32 or similar
+        # Get maximum neuron count from loaded model
+        max_neuron = (
+            st.session_state.inference.sae.k - 1
+            if (
+                hasattr(st.session_state, "inference")
+                and hasattr(st.session_state.inference, "sae")
+            )
+            else 63
+        )
 
         neuron_idx = st.slider(
             "Select Feature",
