@@ -61,10 +61,9 @@ def _show_startup_diagnostics(config: dict) -> None:
                 missing.append(label)
 
     if missing:
-        st.warning(
-            "Some required paths are missing: "
-            + ", ".join(missing)
-            + ". Check configs/default.yaml path values."
+        st.info(
+            "ℹ️ Local data paths not available (expected on Streamlit Cloud). "
+            "Using Cloud SQL backend. To use local data, ensure paths exist in configs/default.yaml."
         )
 
 

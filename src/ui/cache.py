@@ -100,7 +100,7 @@ def load_config(config_path: Path) -> Dict:
     config["n_items"] = None  # Will be read from checkpoint by inference service
     
     try:
-        from .secrets_helper import get_cloudsql_config
+        from src.ui.services.secrets_helper import get_cloudsql_config
 
         cloudsql_cfg = get_cloudsql_config()
         state_filter = raw_config.get("data", {}).get("state_filter")
@@ -115,7 +115,7 @@ def load_config(config_path: Path) -> Dict:
             ]
         ):
             try:
-                from .cloud_sql_helper import CloudSQLHelper
+                from src.ui.services.cloud_sql_helper import CloudSQLHelper
 
                 sql_helper = CloudSQLHelper(
                     instance_connection_name=cloudsql_cfg["instance"],
@@ -353,7 +353,7 @@ def load_data_service(config: Dict):
     data_available_locally = duckdb_path.exists() and parquet_dir.exists()
 
     # Check for Cloud SQL credentials
-    from .secrets_helper import get_cloudsql_config
+    from src.ui.services.secrets_helper import get_cloudsql_config
 
     cloudsql_config = get_cloudsql_config()
     cloudsql_available = all(
