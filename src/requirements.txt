@@ -37,5 +37,8 @@ requests>=2.31.0
 # Code quality
 pytest>=8.0.0
 pytest-cov>=4.1.0
-ruff>=0.3.0
+black>=24.1.0
 mypy>=1.9.0
+
+# Ensure ML dependencies are available
+scikit-learn>=1.4.0

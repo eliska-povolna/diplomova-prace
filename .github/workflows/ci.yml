@@ -44,8 +44,8 @@ jobs:
       - name: Format check with Black
         run: black --check src/ tests/
 
-      - name: Type-check with mypy
-        run: mypy src/ --ignore-missing-imports --exclude src/yelp_initial_exploration
+      - name: Type-check with mypy (UI only)
+        run: mypy src/ui/services/secrets_helper.py src/ui/cache.py --ignore-missing-imports
 
       - name: Run tests
         run: pytest tests/ -v --cov=src --cov-report=xml

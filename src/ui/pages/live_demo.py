@@ -1,9 +1,11 @@
 """Live demo page — Interactive steering (main interactive page)."""
 
+from __future__ import annotations
+
 import base64
 import logging
 from io import BytesIO
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 import plotly.graph_objects as go
@@ -570,8 +572,8 @@ def _crop_image_to_aspect_ratio(
     return None
 
 
-def _crop_image_to_square(image_path: str, size: int = 280) -> bytes:
-    """Crop image to 1:1 square and return as bytes."""
+def _crop_image_to_square(image_path: str, size: int = 280) -> Optional[bytes]:
+    """Crop image to 1:1 square and return as bytes, or None on error."""
     try:
         from PIL import Image
 
@@ -668,14 +670,19 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
             if poi.get("primary_photo"):
                 try:
                     photo_path = poi["primary_photo"]
-                    # Crop to square and convert to base64
-                    img_bytes = _crop_image_to_square(photo_path, size=280)
-                    if img_bytes:
-                        b64_image = _image_to_base64(img_bytes)
-                        st.markdown(
-                            f'<div class="poi-card-photo-container"><img src="data:image/jpeg;base64,{b64_image}" alt="photo"/></div>',
-                            unsafe_allow_html=True,
-                        )
+                    # Handle both local paths and remote URLs
+                    if photo_path.startswith(("http://", "https://")):
+                        # For remote URLs, use Streamlit's built-in image handling
+                        st.image(photo_path, width=280, caption=poi.get("name", "POI"))
+                    else:
+                        # For local paths, crop to square and convert to base64
+                        img_bytes = _crop_image_to_square(photo_path, size=280)
+                        if img_bytes:
+                            b64_image = _image_to_base64(img_bytes)
+                            st.markdown(
+                                f'<div class="poi-card-photo-container"><img src="data:image/jpeg;base64,{b64_image}" alt="photo"/></div>',
+                                unsafe_allow_html=True,
+                            )
                         photo_loaded = True
                 except Exception as e:
                     logger.debug(

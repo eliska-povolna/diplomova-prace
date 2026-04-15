@@ -8,7 +8,7 @@ that maximally activate each neuron.
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from wordcloud import WordCloud
@@ -115,7 +115,7 @@ class WordcloudService:
 
     def get_top_activating_categories(
         self, neuron_id: int, top_k: int = 10
-    ) -> List[Dict[str, any]]:
+    ) -> List[Dict[str, Any]]:
         """
         Get top categories by average activation strength.
 
@@ -176,7 +176,7 @@ class WordcloudService:
         height: int = 300,
         background_color: str = "white",
         colormap: str = "viridis",
-    ) -> Optional:
+    ) -> Optional[WordCloud]:
         """
         Generate wordcloud for a specific neuron.
 

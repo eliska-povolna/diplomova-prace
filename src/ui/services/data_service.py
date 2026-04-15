@@ -183,18 +183,20 @@ class DataService:
                     return result.iloc[0].to_dict()
 
             else:
-                # Query from DuckDB (local)
+                # Query from DuckDB (local) - using parameterized query to prevent SQL injection
                 parquet_pattern = str(
                     self.parquet_dir / "business" / "state=*" / "*.parquet"
                 )
                 parquet_pattern = parquet_pattern.replace("\\", "/")
 
-                where_clause = f"WHERE business_id = '{business_id}'"
+                query = f"SELECT * FROM read_parquet('{parquet_pattern}') WHERE business_id = ? LIMIT 1"
                 if self.state_filter:
-                    where_clause += f" AND state = '{self.state_filter}'"
-
-                query = f"SELECT * FROM read_parquet('{parquet_pattern}') {where_clause} LIMIT 1"
-                result = self.conn.execute(query).df()
+                    query = f"SELECT * FROM read_parquet('{parquet_pattern}') WHERE business_id = ? AND state = ? LIMIT 1"
+                    result = self.conn.execute(
+                        query, [business_id, self.state_filter]
+                    ).df()
+                else:
+                    result = self.conn.execute(query, [business_id]).df()
 
                 if len(result) == 0:
                     return None
@@ -628,10 +630,12 @@ class DataService:
                 review_pattern = review_pattern.replace("\\", "/")
                 business_pattern = business_pattern.replace("\\", "/")
 
-                # Build WHERE clause to match the same data filtering as POI loading
-                where_clause = f"WHERE reviews.user_id = '{user_id}' AND reviews.stars >= {min_stars}"
+                # Build WHERE clause using parameterized queries to prevent SQL injection
+                where_clause = "WHERE reviews.user_id = ? AND reviews.stars >= ?"
+                params = [user_id, min_stars]
                 if self.state_filter:
-                    where_clause += f" AND business.state = '{self.state_filter}'"
+                    where_clause += " AND business.state = ?"
+                    params.append(self.state_filter)
 
                 query = f"""
                     SELECT DISTINCT business.business_id
@@ -640,7 +644,7 @@ class DataService:
                     ON reviews.business_id = business.business_id
                     {where_clause}
                 """
-                business_ids = self.conn.execute(query).df()
+                business_ids = self.conn.execute(query, params).df()
 
             logger.debug(
                 f"Query for user {user_id}: found {len(business_ids)} businesses with stars >= {min_stars}"

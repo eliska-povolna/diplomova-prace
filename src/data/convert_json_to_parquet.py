@@ -108,13 +108,15 @@ def convert_jsonl_to_parquet(
                     index=False,
                 )
             else:
-                # For incremental writes, use parquet writer or create separate part files
+                # For incremental writes, append to existing file
                 import pyarrow as pa
                 from pyarrow import parquet as pq
 
-                table = pa.Table.from_pandas(df)
-                writer = pq.ParquetWriter(str(output_path), table.schema)
-                writer.write_table(table)
+                # Read existing file and concatenate with new data
+                existing_table = pq.read_table(str(output_path))
+                new_table = pa.Table.from_pandas(df)
+                combined_table = pa.concat_tables([existing_table, new_table])
+                pq.write_table(combined_table, str(output_path), compression="zstd")
             total_rows += len(rows)
             rows = []
             logger.info(f"  ... wrote {total_rows} rows so far")
