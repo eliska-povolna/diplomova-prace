@@ -66,7 +66,7 @@ class CloudSQLHelper:
 
             from google.oauth2 import service_account
 
-            from services.secrets_helper import get_gcp_credentials_path
+            from .secrets_helper import get_gcp_credentials_path
 
             credentials = None
 

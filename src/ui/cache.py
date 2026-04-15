@@ -411,7 +411,7 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
     Provides wordcloud generation from neuron category data.
     """
     try:
-        from services import WordcloudService
+        from src.ui.services import WordcloudService
     except ImportError:
         logger.error("WordcloudService not available")
         return None

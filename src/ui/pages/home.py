@@ -140,7 +140,7 @@ def show():
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        if st.button("📊 View Evaluation Results", width="stretch"):
+        if st.button("📊 View Evaluation Results", use_container_width=True):
             st.switch_page("📊 Results")
 
     with col2:

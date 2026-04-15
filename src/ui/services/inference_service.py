@@ -323,7 +323,7 @@ class InferenceService:
         result = []
         for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
             # Get label from LabelingService (or fallback to Feature N)
-            label = "Feature {idx}"
+            label = f"Feature {idx}"
             if hasattr(self, "labels") and self.labels:
                 label = self.labels.get_label(idx)
 
