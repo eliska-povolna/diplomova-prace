@@ -78,6 +78,9 @@ class InferenceService:
         # Item score cache for current user
         self._item_cache = None  # Tuple of (scores, user_id)
 
+        # Baseline recommendations for position delta calculation
+        self.baseline_recommendations = {}  # {user_id: {item_id: baseline_rank}}
+
         # Latency tracking for performance monitoring
         self.latency_ms = []  # List of inference times in milliseconds
 
@@ -527,9 +530,197 @@ class InferenceService:
         # TODO: Query from DataService
         return []
 
+    def get_baseline_recommendations(
+        self, user_id: str, top_k: int = 20
+    ) -> Dict[int, int]:
+        """
+        Get baseline recommendations WITHOUT steering (cached for position delta calculation).
+
+        Returns:
+            {item_id: baseline_rank} where rank is 0-based position (0 = top)
+        """
+        if user_id not in self.user_latents:
+            raise ValueError(
+                f"User {user_id} not encoded yet. Call encode_user() first."
+            )
+
+        # Return cached baseline if exists
+        if user_id in self.baseline_recommendations:
+            return self.baseline_recommendations[user_id]
+
+        logger.debug(f"Computing baseline recommendations for {user_id}")
+
+        user_z = self.user_latents[user_id].to(self.device)
+
+        with torch.no_grad():
+            # Score items WITHOUT any steering
+            scores = user_z @ self.elsa._A_norm.T  # (n_items,)
+            top_scores, top_indices = torch.topk(scores, k=min(top_k, scores.shape[0]))
+
+        # Create rank mapping: {item_id: rank}
+        baseline = {
+            int(item_id.item()): rank for rank, item_id in enumerate(top_indices)
+        }
+
+        self.baseline_recommendations[user_id] = baseline
+        logger.debug(f"Baseline computed: {len(baseline)} items")
+
+        return baseline
+
+    def get_recommendations_with_delta(
+        self,
+        user_id: str,
+        steering_config: Optional[Dict] = None,
+        top_k: int = 20,
+    ) -> List[Dict]:
+        """
+        Get recommendations with position deltas after steering.
+
+        Returns list of dicts with fields:
+            - item_id: int
+            - rank_after: int (current rank after steering)
+            - rank_before: int (baseline rank before steering)
+            - position_delta: int (rank_after - rank_before)
+                             (negative = moved up = improved)
+            - arrow: str ('↑' green, '↓' red, '→' no change)
+            - arrow_value: int (abs(position_delta))
+            - arrow_color: str ('green', 'red', 'gray')
+            - show_delta: bool (True if steering applied)
+            - score: float
+
+        Args:
+            user_id: Yelp user ID
+            steering_config: Optional steering dict with keys:
+                - type: 'neuron' or 'concept'
+                - neuron_values: {neuron_idx: strength} for neuron steering
+                - concept_vector: tensor for concept steering
+                - alpha: interpolation strength (default 0.3)
+            top_k: Number of recommendations to return
+
+        Returns:
+            List of recommendation dicts with position deltas
+        """
+        if user_id not in self.user_latents:
+            raise ValueError(
+                f"User {user_id} not encoded yet. Call encode_user() first."
+            )
+
+        # Get or create baseline
+        if user_id not in self.baseline_recommendations:
+            self.get_baseline_recommendations(user_id, top_k)
+
+        baseline = self.baseline_recommendations[user_id]
+
+        # Apply steering and get scores
+        user_z = self.user_latents[user_id].to(self.device)
+
+        if steering_config:
+            z_final = self._apply_steering(user_z, steering_config)
+            show_delta = True
+        else:
+            z_final = user_z
+            show_delta = False
+
+        with torch.no_grad():
+            scores = z_final @ self.elsa._A_norm.T
+            top_scores, top_indices = torch.topk(scores, k=min(top_k, scores.shape[0]))
+
+        # Build recommendations with deltas
+        recommendations = []
+
+        for rank_after, (score, item_id) in enumerate(zip(top_scores, top_indices)):
+            item_id = int(item_id.item())
+            score = float(score.item())
+
+            # Get baseline rank (if not in baseline, assign penalty)
+            rank_before = baseline.get(item_id, top_k + 10)
+            position_delta = rank_after - rank_before
+
+            # Determine arrow and color
+            if position_delta < 0:
+                arrow = "↑"
+                arrow_color = "green"
+            elif position_delta > 0:
+                arrow = "↓"
+                arrow_color = "red"
+            else:
+                arrow = "→"
+                arrow_color = "gray"
+
+            recommendations.append(
+                {
+                    "item_id": item_id,
+                    "rank_after": rank_after,
+                    "rank_before": rank_before,
+                    "position_delta": position_delta,
+                    "arrow": arrow,
+                    "arrow_value": abs(position_delta),
+                    "arrow_color": arrow_color,
+                    "show_delta": show_delta,
+                    "score": score,
+                }
+            )
+
+        logger.debug(
+            f"Generated {len(recommendations)} recommendations with deltas for {user_id}"
+        )
+        return recommendations
+
+    def _apply_steering(
+        self, user_z: torch.Tensor, steering_config: Dict
+    ) -> torch.Tensor:
+        """
+        Apply steering transformation to user latent.
+
+        Args:
+            user_z: User latent vector (latent_dim,)
+            steering_config: Dict with keys:
+                - type: 'neuron' or 'concept'
+                - neuron_values: {neuron_idx: strength} for neuron steering
+                - concept_vector: tensor for concept steering
+                - alpha: interpolation strength (default 0.3)
+
+        Returns:
+            Steered latent vector z_final
+        """
+        steering_type = steering_config.get("type", "neuron")
+        alpha = steering_config.get("alpha", self.alpha)
+
+        with torch.no_grad():
+            if steering_type == "neuron":
+                # Neuron-level steering: z' = (1-α)·z + α·Σ(strength_i * e_i)
+                neuron_values = steering_config.get("neuron_values", {})
+
+                z_steered = (1 - alpha) * user_z.clone()
+
+                for neuron_idx, strength in neuron_values.items():
+                    e_n = torch.zeros_like(user_z)
+                    e_n[neuron_idx] = 1.0
+                    z_steered = z_steered + alpha * strength * e_n
+
+                z_final = z_steered
+
+            elif steering_type == "concept":
+                # Concept-level steering: z' = α·z + γ·m_C
+                concept_vector = steering_config.get("concept_vector")
+                gamma = steering_config.get("gamma", 0.5)
+
+                if concept_vector is None:
+                    logger.warning("Concept vector not provided, falling back to baseline")
+                    z_final = user_z
+                else:
+                    z_final = alpha * user_z + gamma * concept_vector.to(self.device)
+
+            else:
+                logger.warning(f"Unknown steering type: {steering_type}, using baseline")
+                z_final = user_z
+
+        return z_final
+
     def clear_cache(self):
         """Clear all cached data (for memory efficiency or user reset)."""
         self.user_latents.clear()
         self.user_sliders.clear()
         self._item_cache = None
+        self.baseline_recommendations.clear()
         logger.debug("Cache cleared")
