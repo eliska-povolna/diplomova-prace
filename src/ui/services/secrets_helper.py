@@ -84,3 +84,13 @@ def get_cloudsql_config() -> dict[str, Optional[str]]:
         "password": get_secret("CLOUDSQL_PASSWORD"),
         "credentials_path": get_gcp_credentials_path(),
     }
+
+
+def get_cloud_storage_bucket() -> Optional[str]:
+    """
+    Get Google Cloud Storage bucket name from secrets.
+
+    Returns:
+        Bucket name (e.g., 'neuronsae-photos') or None if not configured
+    """
+    return get_secret("CLOUD_STORAGE_BUCKET")

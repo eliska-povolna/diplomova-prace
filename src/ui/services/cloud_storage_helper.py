@@ -221,3 +221,51 @@ class CloudStorageHelper:
         except Exception as e:
             logger.warning(f"Error checking existence of {gcs_path}: {e}")
             return False
+
+    def get_photo_url(self, gcs_path: str, expiration_hours: int = 24) -> Optional[str]:
+        """
+        Get a signed URL for a photo in GCS (valid for specified hours).
+
+        Args:
+            gcs_path: GCS path to photo (e.g., 'photos/photo_id.jpg')
+            expiration_hours: URL expiration time in hours (default 24)
+
+        Returns:
+            Signed URL string or None if photo doesn't exist
+        """
+        try:
+            blob = self.bucket.blob(gcs_path)
+            if not blob.exists():
+                return None
+
+            from datetime import timedelta
+
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(hours=expiration_hours),
+                method="GET",
+            )
+            logger.debug(f"Generated signed URL for {gcs_path}")
+            return url
+        except Exception as e:
+            logger.error(f"Failed to generate signed URL for {gcs_path}: {e}")
+            return None
+
+    def download_photo_bytes(self, gcs_path: str) -> Optional[bytes]:
+        """
+        Download photo bytes from GCS (useful for Streamlit st.image()).
+
+        Args:
+            gcs_path: GCS path to photo
+
+        Returns:
+            Photo bytes or None if failed
+        """
+        try:
+            blob = self.bucket.blob(gcs_path)
+            photo_bytes = blob.download_as_bytes()
+            logger.debug(f"Downloaded photo bytes from {gcs_path}")
+            return photo_bytes
+        except Exception as e:
+            logger.error(f"Failed to download photo from {gcs_path}: {e}")
+            return None

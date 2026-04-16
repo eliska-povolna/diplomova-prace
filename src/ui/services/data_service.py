@@ -158,6 +158,28 @@ class DataService:
         self.business_to_row_idx = {}  # Will build from queries
         self.local_photo_index = self._build_local_photo_index()
 
+        # Initialize Cloud Storage helper for photo fallback (on Streamlit Cloud)
+        self.cloud_storage_helper = None
+        try:
+            from .secrets_helper import get_cloud_storage_bucket
+
+            bucket_name = get_cloud_storage_bucket()
+            if bucket_name:
+                try:
+                    from .cloud_storage_helper import CloudStorageHelper
+
+                    self.cloud_storage_helper = CloudStorageHelper(bucket_name)
+                    logger.info(
+                        f"✓ Cloud Storage helper initialized (bucket: {bucket_name})"
+                    )
+                except Exception as e:
+                    logger.debug(
+                        f"Could not initialize Cloud Storage helper: {e} "
+                        "(photos from Cloud Storage will not be available)"
+                    )
+        except Exception as e:
+            logger.debug(f"Cloud Storage config not available: {e}")
+
         # Cache business IDs from item2index for quick validation
         self._valid_business_ids = (
             set(self.item2index.keys()) if self.item2index else None
@@ -310,6 +332,79 @@ class DataService:
 
         return photo_index
 
+    def _load_cloud_photo_index(self) -> Dict[str, List[PhotoMetadata]]:
+        """
+        Load photo metadata from Cloud Storage (photos.json).
+
+        Expected format: JSONL file with photo records
+        (same format as local photos.json)
+
+        Returns empty dict if Cloud Storage not available or file not found.
+        """
+        if not self.cloud_storage_helper:
+            return {}
+
+        photo_index: Dict[str, List[PhotoMetadata]] = {}
+
+        try:
+            logger.info("Loading photo metadata from Cloud Storage...")
+            photos_json_bytes = self.cloud_storage_helper.download_json("photos.json")
+
+            # Parse JSONL
+            if isinstance(photos_json_bytes, bytes):
+                content = photos_json_bytes.decode("utf-8")
+            else:
+                # If it's already a dict (from download_json), convert back
+                logger.debug("Got photos data from Cloud Storage")
+                return {}
+
+            loaded_count = 0
+            for line in content.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+
+                try:
+                    photo_record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                business_id = str(photo_record.get("business_id", ""))
+                photo_id = str(photo_record.get("photo_id", ""))
+
+                if not business_id or not photo_id:
+                    continue
+
+                label = str(photo_record.get("label", "other"))
+                caption = str(photo_record.get("caption", ""))
+
+                photo_meta = PhotoMetadata(
+                    photo_id=photo_id,
+                    business_id=business_id,
+                    path=f"gs://{self.cloud_storage_helper.bucket_name}/photos/{photo_id}.jpg",
+                    label=label,
+                    caption=caption,
+                )
+
+                photo_index.setdefault(business_id, []).append(photo_meta)
+                loaded_count += 1
+
+            logger.info(
+                f"Loaded {loaded_count} photos for {len(photo_index)} businesses from Cloud Storage"
+            )
+
+            # Sort by label priority
+            for business_id in photo_index:
+                photo_index[business_id].sort(
+                    key=lambda p: PhotoMetadata.label_priority(p.label), reverse=True
+                )
+
+        except Exception as e:
+            logger.debug(f"Could not load photo index from Cloud Storage: {e}")
+            return {}
+
+        return photo_index
+
     def _resolve_business_and_row(
         self, poi_idx: int
     ) -> Tuple[Optional[str], Optional[Dict]]:
@@ -336,23 +431,56 @@ class DataService:
         return None, None
 
     def _get_local_photos_for_business(self, business_id: str) -> List[str]:
-        """Return local photo paths for a business if available, sorted by label priority."""
+        """
+        Return photo URLs/paths for a business.
+
+        Strategy:
+        1. First try local indexed photos (photos.json)
+        2. Then try legacy local files
+        3. Finally try Cloud Storage (lazy-load index on first use)
+
+        Returns list of paths/URLs (mix of local file paths and GCS signed URLs).
+        """
         if not business_id:
             return []
 
+        # Try 1: Local indexed photos (photos.json)
         indexed_photos = self.local_photo_index.get(business_id, [])
         if indexed_photos:
-            # Extract paths from sorted PhotoMetadata objects
             return [photo.path for photo in indexed_photos]
 
-        # Backward-compatible fallback for legacy <business_id>.<ext> naming.
-        if not self.local_photos_dir:
-            return []
+        # Try 2: Legacy local files
+        if self.local_photos_dir:
+            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                legacy_path = self.local_photos_dir / f"{business_id}{ext}"
+                if legacy_path.exists():
+                    return [str(legacy_path)]
 
-        for ext in (".jpg", ".jpeg", ".png", ".webp"):
-            legacy_path = self.local_photos_dir / f"{business_id}{ext}"
-            if legacy_path.exists():
-                return [str(legacy_path)]
+        # Try 3: Cloud Storage fallback (lazy load index on first use)
+        if self.cloud_storage_helper:
+            if not hasattr(self, "_cloud_photo_index"):
+                self._cloud_photo_index = self._load_cloud_photo_index()
+
+            indexed_photos = self._cloud_photo_index.get(business_id, [])
+            if indexed_photos:
+                # Get signed URLs for photos
+                photo_urls = []
+                for photo in indexed_photos:
+                    try:
+                        # Extract GCS path (photo_id.jpg) from PhotoMetadata
+                        gcs_path = f"photos/{photo.photo_id}.jpg"
+                        url = self.cloud_storage_helper.get_photo_url(gcs_path)
+                        if url:
+                            photo_urls.append(url)
+                    except Exception as e:
+                        logger.debug(
+                            f"Failed to generate URL for {photo.photo_id}: {e}"
+                        )
+                if photo_urls:
+                    logger.debug(
+                        f"Found {len(photo_urls)} photos in Cloud Storage for {business_id}"
+                    )
+                    return photo_urls
 
         return []
 
