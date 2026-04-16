@@ -625,6 +625,9 @@ class InferenceService:
             scores = z_final @ self.elsa._A_norm.T
             top_scores, top_indices = torch.topk(scores, k=min(top_k, scores.shape[0]))
 
+            # Get SAE activations for attribution
+            h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze(0)
+
         # Build recommendations with deltas
         recommendations = []
 
@@ -647,6 +650,9 @@ class InferenceService:
                 arrow = "→"
                 arrow_color = "gray"
 
+            # Get contributing neurons/features for this item
+            contributing_neurons = self._get_attribution(h_final, item_id)
+
             recommendations.append(
                 {
                     "item_id": item_id,
@@ -658,6 +664,7 @@ class InferenceService:
                     "arrow_color": arrow_color,
                     "show_delta": show_delta,
                     "score": score,
+                    "contributing_neurons": contributing_neurons,
                 }
             )
 
@@ -670,46 +677,57 @@ class InferenceService:
         self, user_z: torch.Tensor, steering_config: Dict
     ) -> torch.Tensor:
         """
-        Apply steering transformation to user latent.
+        Apply steering transformation to user latent using SAE features.
+
+        This follows the original steer_and_recommend logic:
+        1. Encode user_z to SAE features: h_u = sae.encode(user_z)
+        2. Apply steering to features: h_steered[neuron_idx] = value
+        3. Decode back to ELSA space: z_steered = sae.decode(h_steered)
+        4. Interpolate: z_final = (1-α)·user_z + α·z_steered
 
         Args:
-            user_z: User latent vector (latent_dim,)
+            user_z: User latent vector (latent_dim,) - already on device
             steering_config: Dict with keys:
-                - type: 'neuron' or 'concept'
-                - neuron_values: {neuron_idx: strength} for neuron steering
-                - concept_vector: tensor for concept steering
+                - type: 'neuron' (concept steering not yet supported)
+                - neuron_values: {neuron_idx: strength} where:
+                    - neuron_idx: SAE feature index (0 to sae_hidden_dim-1)
+                    - strength: slider value in [-1, 2]
                 - alpha: interpolation strength (default 0.3)
 
         Returns:
-            Steered latent vector z_final
+            Steered latent vector z_final (on device)
         """
         steering_type = steering_config.get("type", "neuron")
         alpha = steering_config.get("alpha", self.alpha)
 
         with torch.no_grad():
             if steering_type == "neuron":
-                # Neuron-level steering: z' = (1-α)·z + α·Σ(strength_i * e_i)
+                # Get steering overrides for SAE features
                 neuron_values = steering_config.get("neuron_values", {})
 
-                z_steered = (1 - alpha) * user_z.clone()
+                # Step 1: Encode user latent to SAE features
+                h_user = self.sae.encode(user_z.unsqueeze(0))  # (1, sae_hidden_dim)
+                h_steered = h_user.clone()
 
-                for neuron_idx, strength in neuron_values.items():
-                    e_n = torch.zeros_like(user_z)
-                    e_n[neuron_idx] = 1.0
-                    z_steered = z_steered + alpha * strength * e_n
+                # Step 2: Apply steering overrides to SAE features
+                for neuron_idx, slider_value in neuron_values.items():
+                    if 0 <= neuron_idx < h_steered.shape[1]:
+                        # Clamp slider to valid range
+                        h_steered[0, neuron_idx] = torch.clamp(
+                            torch.tensor(slider_value, device=self.device),
+                            min=-1.0,
+                            max=2.0,
+                        )
+                    else:
+                        logger.warning(
+                            f"Neuron index {neuron_idx} out of bounds (SAE hidden dim: {h_steered.shape[1]})"
+                        )
 
-                z_final = z_steered
+                # Step 3: Decode steered features back to ELSA latent space
+                z_steered = self.sae.decode(h_steered).squeeze(0)  # (latent_dim,)
 
-            elif steering_type == "concept":
-                # Concept-level steering: z' = α·z + γ·m_C
-                concept_vector = steering_config.get("concept_vector")
-                gamma = steering_config.get("gamma", 0.5)
-
-                if concept_vector is None:
-                    logger.warning("Concept vector not provided, falling back to baseline")
-                    z_final = user_z
-                else:
-                    z_final = alpha * user_z + gamma * concept_vector.to(self.device)
+                # Step 4: Interpolate between original and steered
+                z_final = (1.0 - alpha) * user_z + alpha * z_steered
 
             else:
                 logger.warning(f"Unknown steering type: {steering_type}, using baseline")

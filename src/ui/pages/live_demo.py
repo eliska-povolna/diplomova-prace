@@ -106,7 +106,19 @@ def show():
         # Output parameters
         st.subheader("Output Parameters")
 
-        recs_per_row = st.slider("Cards per row", 1, 10, 5)
+        # Responsive card layout: user sets card width, system calculates how many fit
+        card_width_px = st.slider("Card width (px)", min_value=180, max_value=420, value=300, step=10)
+        
+        # Calculate photo dimensions based on card width (maintain 380:220 aspect ratio)
+        # 380:220 = 1.727, so height ≈ width / 1.727
+        photo_height_px = int(card_width_px * 0.58)
+        
+        # Calculate cards per row based on available width
+        # Streamlit default width is ~900-1100px, use 900 as safe estimate
+        available_width = 900
+        recs_per_row = max(1, available_width // card_width_px)
+        st.caption(f"📐 Cards per row: {recs_per_row} | Photo: {card_width_px}×{photo_height_px}px")
+        
         num_features = st.slider("Features to display", 5, 64, 10)
         num_recommendations = st.slider("Recommendations", 5, 50, 20)
 
@@ -399,8 +411,10 @@ def show():
 
             recommendations = st.session_state.current_recommendations
 
-            # Display POI cards
-            cols = st.columns(recs_per_row)
+            # Display POI cards with responsive layout
+            # Calculate cards per row based on user's card width preference
+            responsive_cards_per_row = max(1, available_width // card_width_px)
+            cols = st.columns(responsive_cards_per_row)
             displayed_count = 0
 
             for idx, reco in enumerate(recommendations):
@@ -412,9 +426,9 @@ def show():
                     logger.debug(f"Skipping invalid POI at index {poi_idx}")
                     continue
 
-                with cols[displayed_count % recs_per_row]:
+                with cols[displayed_count % responsive_cards_per_row]:
                     try:
-                        draw_poi_card(poi_details, reco, show_scores)
+                        draw_poi_card(poi_details, reco, show_scores, card_width_px, photo_height_px)
                         displayed_count += 1
                     except Exception as e:
                         logger.exception(
@@ -471,10 +485,14 @@ def show():
 
 
 def plot_feature_activations(activations: List[Dict]):
-    """Plot horizontal bar chart of top feature activations."""
+    """Plot horizontal bar chart of top feature activations (largest first at top)."""
 
     labels = [a["label"] for a in activations]
     values = [a["activation"] for a in activations]
+
+    # Reverse order so largest value appears first (at top of horizontal bar chart)
+    labels = labels[::-1]
+    values = values[::-1]
 
     fig = go.Figure()
 
@@ -510,7 +528,8 @@ def build_folium_map(recommendations: List[Dict], data_service) -> folium.Map | 
 
     try:
         # Get POI details for all recommendations
-        pois = [data_service.get_poi_details(r["poi_idx"]) for r in recommendations]
+        # Support both new format (item_id) and old format (poi_idx)
+        pois = [data_service.get_poi_details(r.get("item_id") or r.get("poi_idx")) for r in recommendations]
         pois = [p for p in pois if p and p.get("lat") and p.get("lon")]
 
         if not pois:
@@ -616,6 +635,37 @@ def _crop_image_to_square(image_path: str, size: int = 280) -> Optional[bytes]:
         return None
 
 
+def _crop_image_to_landscape(image_path: str, width: int = 380, height: int = 220) -> Optional[bytes]:
+    """Crop image to landscape aspect ratio and return as bytes, or None on error."""
+    try:
+        from PIL import Image
+
+        img = Image.open(image_path)
+        target_ratio = width / height  # 380/220 ≈ 1.727
+
+        # Calculate the crop dimensions
+        if img.width / img.height > target_ratio:
+            # Image is too wide, crop from sides
+            new_width = int(img.height * target_ratio)
+            left = (img.width - new_width) // 2
+            img = img.crop((left, 0, left + new_width, img.height))
+        else:
+            # Image is too tall, crop from top/bottom
+            new_height = int(img.width / target_ratio)
+            top = (img.height - new_height) // 2
+            img = img.crop((0, top, img.width, top + new_height))
+
+        # Resize to target dimensions
+        img = img.resize((width, height), Image.Resampling.LANCZOS)
+        # Convert to bytes
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG")
+        return buffer.getvalue()
+    except Exception as e:
+        logger.debug(f"Failed to crop image to landscape: {e}")
+        return None
+
+
 def _image_to_base64(image_bytes: bytes) -> str:
     """Convert image bytes to base64 string for HTML embedding."""
     import base64
@@ -627,14 +677,14 @@ def _image_to_base64(image_bytes: bytes) -> str:
         return ""
 
 
-def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
+def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False, card_width_px: int = 300, photo_height_px: int = 174):
     """
-    Draw a single POI recommendation card with photo - fixed pixel-based sizing.
+    Draw a single POI recommendation card with photo - responsive sizing.
 
     Card layout:
-    - Photo: 280x280 px (CROPPED with object-fit: cover)
+    - Photo: card_width × photo_height px (responsive, maintains aspect ratio)
     - Content: Flexible height with scrolling if needed
-    - Total card: 750px fixed height for consistent grid alignment
+    - Total card: proportional height based on photo dimensions
 
     Skips invalid POIs silently (already filtered upstream).
     """
@@ -644,41 +694,44 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
         return
 
     try:
-        # Inject CSS once per page for card sizing
+        # Fixed card height for consistent grid layout (prevents overlapping)
+        card_height_px = 650
+        
+        # Inject CSS once per page for card sizing (dynamic based on dimensions)
         st.markdown(
-            """
+            f"""
         <style>
-        /* POI Card fixed sizing - creates uniform grid */
-        .poi-card-wrapper {
-            height: 750px;
+        /* POI Card responsive sizing - creates uniform grid */
+        .poi-card-wrapper {{
+            height: {card_height_px}px;
             display: flex;
             flex-direction: column;
             border: 1px solid #d0d0d0;
             border-radius: 8px;
             overflow: hidden;
-        }
-        .poi-card-photo-container {
+        }}
+        .poi-card-photo-container {{
             width: 100%;
-            height: 280px;
+            height: {photo_height_px}px;
             flex-shrink: 0;
             display: flex;
             align-items: center;
             justify-content: center;
             background-color: #e8e8e8;
             overflow: hidden;
-        }
-        .poi-card-photo-container img {
-            width: 280px;
-            height: 280px;
+        }}
+        .poi-card-photo-container img {{
+            width: 100%;
+            height: {photo_height_px}px;
             object-fit: cover;
             display: block;
-        }
-        .poi-card-content {
+        }}
+        .poi-card-content {{
             flex: 1;
             overflow-y: auto;
             padding: 12px 16px;
             min-height: 0;
-        }
+        }}
         </style>
         """,
             unsafe_allow_html=True,
@@ -712,7 +765,7 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
                     rank = recommendation.get("rank_after", 0)
                     st.markdown(f'<span style="color:blue; font-size:18px;">#{rank + 1}</span>', unsafe_allow_html=True)
 
-            # PHOTO SECTION - Exactly 280x280 px with 1:1 cropping
+            # PHOTO SECTION - Responsive landscape
             photo_loaded = False
             if poi.get("primary_photo"):
                 try:
@@ -720,10 +773,10 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
                     # Handle both local paths and remote URLs
                     if photo_path.startswith(("http://", "https://")):
                         # For remote URLs, use Streamlit's built-in image handling
-                        st.image(photo_path, width=280, caption=poi.get("name", "POI"))
+                        st.image(photo_path, width=None, caption=None)
                     else:
-                        # For local paths, crop to square and convert to base64
-                        img_bytes = _crop_image_to_square(photo_path, size=280)
+                        # For local paths, crop to landscape and convert to base64
+                        img_bytes = _crop_image_to_landscape(photo_path, width=card_width_px, height=photo_height_px)
                         if img_bytes:
                             b64_image = _image_to_base64(img_bytes)
                             st.markdown(
@@ -737,9 +790,9 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
                     )
 
             if not photo_loaded:
-                # Show placeholder
+                # Show placeholder with dynamic dimensions
                 try:
-                    placeholder = _create_placeholder_image(280, 280)
+                    placeholder = _create_placeholder_image(card_width_px, photo_height_px)
                     buffer = BytesIO()
                     placeholder.save(buffer, format="PNG")
                     b64_placeholder = base64.b64encode(buffer.getvalue()).decode(
@@ -748,6 +801,7 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False):
                     st.markdown(
                         f'<div class="poi-card-photo-container"><img src="data:image/png;base64,{b64_placeholder}" alt="placeholder"/></div>',
                         unsafe_allow_html=True,
+
                     )
                 except Exception as e:
                     logger.debug(f"Failed to create placeholder: {e}")
