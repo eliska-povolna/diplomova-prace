@@ -188,13 +188,19 @@ def show():
                     user_interactions_csr = st.session_state[cached_csr_key]
                 else:
                     # STEP 1: Try to load precomputed matrix (cloud or local pickle)
-                    user_interactions_csr = data.get_precomputed_user_matrix(selected_user)
+                    user_interactions_csr = data.get_precomputed_user_matrix(
+                        selected_user
+                    )
 
                     if user_interactions_csr is not None:
-                        logger.info(f"✅ Loaded precomputed CSR matrix for user {selected_user}")
+                        logger.info(
+                            f"✅ Loaded precomputed CSR matrix for user {selected_user}"
+                        )
                     else:
                         # STEP 2: Fallback - build matrix from interaction history
-                        logger.debug(f"Building CSR matrix from interactions for user {selected_user}")
+                        logger.debug(
+                            f"Building CSR matrix from interactions for user {selected_user}"
+                        )
 
                         # Encode user from interaction history
                         poi_indices = data.get_user_interactions(selected_user)
@@ -480,9 +486,9 @@ def show():
 
                 # Cap to exactly num_recommendations
                 filtered_and_capped = valid_recommendations[:num_recommendations]
-                st.session_state["filtered_recommendations_to_display"] = (
-                    filtered_and_capped
-                )
+                st.session_state[
+                    "filtered_recommendations_to_display"
+                ] = filtered_and_capped
                 logger.info(
                     f"Pre-filter: {len(recommendations_with_delta)} loaded → {len(valid_recommendations)} valid → {len(filtered_and_capped)} capped to display"
                 )
@@ -518,9 +524,9 @@ def show():
                         valid_recommendations.append(reco)
 
                 filtered_and_capped = valid_recommendations[:num_recommendations]
-                st.session_state["filtered_recommendations_to_display"] = (
-                    filtered_and_capped
-                )
+                st.session_state[
+                    "filtered_recommendations_to_display"
+                ] = filtered_and_capped
                 logger.info(
                     f"Late-filter (on rerun): {len(all_recommendations)} loaded → {len(valid_recommendations)} valid → {len(filtered_and_capped)} capped"
                 )
@@ -568,12 +574,12 @@ def show():
                                 ]
 
                                 # Cache BOTH for reference
-                                st.session_state[history_cache_key] = (
-                                    past_visits_indices
-                                )
-                                st.session_state[history_pois_cache_key] = (
-                                    past_visits_pois
-                                )
+                                st.session_state[
+                                    history_cache_key
+                                ] = past_visits_indices
+                                st.session_state[
+                                    history_pois_cache_key
+                                ] = past_visits_pois
                                 past_visits_for_map = past_visits_pois
 
                                 logger.info(
@@ -597,7 +603,12 @@ def show():
                             "Map object returned None - recommendations may lack coordinates"
                         )
                     else:
-                        st_folium(map_obj, width=None, height=500, key=f"folium_{selected_user}_{show_history}")
+                        st_folium(
+                            map_obj,
+                            width=None,
+                            height=500,
+                            key=f"folium_{selected_user}_{show_history}",
+                        )
                 except Exception as e:
                     st.error(f"❌ Map rendering failed: {e}")
                     logger.exception(f"Folium map error: {e}")
@@ -774,7 +785,7 @@ def plot_feature_activations(
         yaxis=dict(autorange="reversed"),  # Ensure all labels are visible
     )
 
-    st.plotly_chart(fig, use_container_width="stretch")
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def build_folium_map(

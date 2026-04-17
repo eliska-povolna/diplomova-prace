@@ -343,30 +343,32 @@ class InferenceService:
 
         return result
 
-    def get_steered_neuron_activation(self, user_id: str, neuron_idx: int, slider_value: float) -> float:
+    def get_steered_neuron_activation(
+        self, user_id: str, neuron_idx: int, slider_value: float
+    ) -> float:
         """
         Compute the actual activation value for a single neuron after steering is applied.
-        
+
         Shows what the real activation will be after the steering interpolation.
-        
+
         Args:
             user_id: User ID (must be encoded)
             neuron_idx: Index of neuron being steered
             slider_value: The slider value (-1 to +2)
-        
+
         Returns:
             Float: The computed activation after steering + alpha interpolation
         """
         if user_id not in self.user_latents:
             raise ValueError(f"User {user_id} not encoded yet")
-        
+
         user_z = self.user_latents[user_id].to(self.device)
-        
+
         with torch.no_grad():
             # Step 1: Get baseline sparse features
             h_user = self.sae.encode(user_z.unsqueeze(0))  # (1, hidden_dim)
             h_steered = h_user.clone()
-            
+
             # Step 2: Apply steering to this neuron
             if 0 <= neuron_idx < h_steered.shape[1]:
                 h_steered[0, neuron_idx] = torch.clamp(
@@ -374,33 +376,35 @@ class InferenceService:
                     min=-1.0,
                     max=2.0,
                 )
-            
+
             # Step 3: Decode steered features
             z_steered = self.sae.decode(h_steered).squeeze(0)
-            
+
             # Step 4: Interpolate with original
             z_final = (1.0 - self.alpha) * user_z + self.alpha * z_steered
-            
+
             # Step 5: Re-encode to get final activation
             h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze()
-            
+
             # Get the activation for this specific neuron
             if 0 <= neuron_idx < h_final.shape[0]:
                 return float(h_final[neuron_idx].abs().item())
-        
+
         return 0.0
-    
-    def get_steered_activations(self, user_id: str, steering_overrides: Dict[int, float], k: int = 10) -> List[Dict]:
+
+    def get_steered_activations(
+        self, user_id: str, steering_overrides: Dict[int, float], k: int = 10
+    ) -> List[Dict]:
         """
         Compute top-k activations AFTER applying steering.
-        
+
         This shows what the actual feature activations will be after the user's steering is applied.
-        
+
         Args:
             user_id: User ID (must be encoded)
             steering_overrides: Dict mapping neuron_idx -> slider value
             k: Number of top features to return
-        
+
         Returns:
             List of dicts with keys:
                 - neuron_idx: int
@@ -409,19 +413,19 @@ class InferenceService:
         """
         if user_id not in self.user_latents:
             raise ValueError(f"User {user_id} not encoded yet")
-        
+
         steering_overrides = steering_overrides or {}
         if not steering_overrides:
             # No steering, just return baseline
             return self.get_top_activations(self.user_latents[user_id], k=k)
-        
+
         user_z = self.user_latents[user_id].to(self.device)
-        
+
         with torch.no_grad():
             # Step 1: Get baseline sparse features
             h_user = self.sae.encode(user_z.unsqueeze(0))  # (1, hidden_dim)
             h_steered = h_user.clone()
-            
+
             # Step 2: Apply steering overrides
             for neuron_idx, slider_value in steering_overrides.items():
                 if 0 <= neuron_idx < h_steered.shape[1]:
@@ -430,31 +434,33 @@ class InferenceService:
                         min=-1.0,
                         max=2.0,
                     )
-            
+
             # Step 3: Decode steered features back to latent
             z_steered = self.sae.decode(h_steered).squeeze(0)
-            
+
             # Step 4: Interpolate with original latent using alpha
             z_final = (1.0 - self.alpha) * user_z + self.alpha * z_steered
-            
+
             # Step 5: Re-encode final latent to get NEW activations
             h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze()
-        
+
         # Get top-k by absolute activation of final features
         topk_vals, topk_idx = torch.topk(h_final.abs(), k=min(k, h_final.shape[0]))
-        
+
         result = []
         for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
             label = f"Feature {idx}"
             if hasattr(self, "labels") and self.labels:
                 label = self.labels.get_label(idx)
-            
-            result.append({
-                "neuron_idx": idx,
-                "activation": float(val),
-                "label": label,
-            })
-        
+
+            result.append(
+                {
+                    "neuron_idx": idx,
+                    "activation": float(val),
+                    "label": label,
+                }
+            )
+
         return result
 
     def get_user_steering(self, user_id: str) -> Dict[int, float]:
@@ -488,9 +494,7 @@ class InferenceService:
 
         # Return as dict: {neuron_idx: activation_value}
         # Use absolute values to represent magnitude (as per UI convention)
-        steering_dict = {
-            i: float(h[i].abs().item()) for i in range(h.shape[0])
-        }
+        steering_dict = {i: float(h[i].abs().item()) for i in range(h.shape[0])}
 
         return steering_dict
 
@@ -666,19 +670,21 @@ class InferenceService:
         for idx, val in zip(topk_idx, topk_vals):
             neuron_idx = int(idx.item())
             activation_val = float(val.item())
-            
+
             # Get label from LabelingService if available
             if self.labels:
                 label = self.labels.get_label(neuron_idx)
             else:
                 label = f"Feature {neuron_idx}"
-            
-            result.append({
-                "idx": neuron_idx,
-                "label": label,
-                "activation": activation_val,
-            })
-        
+
+            result.append(
+                {
+                    "idx": neuron_idx,
+                    "label": label,
+                    "activation": activation_val,
+                }
+            )
+
         return result
 
     def get_user_history(self, user_id: str) -> List[int]:
@@ -694,18 +700,23 @@ class InferenceService:
         if not self.data_service:
             logger.warning("DataService not available for user history")
             return []
-        
+
         try:
-            # Ensure item2index is loaded by triggering a dummy POI lookup if needed
-            if not self.data_service.item2index:
-                logger.warning("item2index not yet loaded, attempting to initialize...")
-                # Try to load at least one POI to build the mapping
-                self.data_service.get_poi_details(0)
-            
+            # Check if item2index is loaded (required for mapping interactions)
+            item2index = getattr(self.data_service, "item2index", None)
+            if not item2index:
+                logger.warning(
+                    "Cannot retrieve user history because DataService.item2index is not loaded "
+                    "(expected item mapping such as item2index.pkl)."
+                )
+                return []
+
             # Get POI indices the user has interacted with (all ratings >= 1 star)
             # Using min_stars=1.0 to get all interactions, not just highly-rated ones
             history = self.data_service.get_user_interactions(user_id, min_stars=1.0)
-            logger.debug(f"Retrieved {len(history)} past interactions for user {user_id}")
+            logger.debug(
+                f"Retrieved {len(history)} past interactions for user {user_id}"
+            )
             return history
         except Exception as e:
             logger.error(f"Failed to get user history for {user_id}: {e}")
@@ -725,9 +736,10 @@ class InferenceService:
                 f"User {user_id} not encoded yet. Call encode_user() first."
             )
 
-        # Return cached baseline if exists
-        if user_id in self.baseline_recommendations:
-            return self.baseline_recommendations[user_id]
+        # Return cached baseline if exists (keyed by both user and top_k for accuracy)
+        cache_key = (user_id, top_k)
+        if cache_key in self.baseline_recommendations:
+            return self.baseline_recommendations[cache_key]
 
         logger.debug(f"Computing baseline recommendations for {user_id}")
 
@@ -743,7 +755,8 @@ class InferenceService:
             int(item_id.item()): rank for rank, item_id in enumerate(top_indices)
         }
 
-        self.baseline_recommendations[user_id] = baseline
+        cache_key = (user_id, top_k)
+        self.baseline_recommendations[cache_key] = baseline
         logger.debug(f"Baseline computed: {len(baseline)} items")
 
         return baseline
@@ -787,10 +800,11 @@ class InferenceService:
             )
 
         # Get or create baseline
-        if user_id not in self.baseline_recommendations:
+        cache_key = (user_id, top_k)
+        if cache_key not in self.baseline_recommendations:
             self.get_baseline_recommendations(user_id, top_k)
 
-        baseline = self.baseline_recommendations[user_id]
+        baseline = self.baseline_recommendations[cache_key]
 
         # Apply steering and get scores
         user_z = self.user_latents[user_id].to(self.device)
@@ -911,7 +925,9 @@ class InferenceService:
                 z_final = (1.0 - alpha) * user_z + alpha * z_steered
 
             else:
-                logger.warning(f"Unknown steering type: {steering_type}, using baseline")
+                logger.warning(
+                    f"Unknown steering type: {steering_type}, using baseline"
+                )
                 z_final = user_z
 
         return z_final

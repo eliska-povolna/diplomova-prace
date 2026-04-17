@@ -198,11 +198,20 @@ class CloudStorageHelper:
         """
         Download and unpickle binary object from GCS.
 
+        ⚠️ SECURITY WARNING: Unpickling untrusted data can execute arbitrary code.
+        Only use this method with pickles from trusted sources (e.g., your own precomputed files).
+
+        For untrusted data, use safe alternatives like JSON or Parquet instead.
+        If pickles must be used, ensure:
+        - Bucket has restricted IAM permissions (only your app can write)
+        - Object versioning is enabled to prevent tampering
+        - Files are checksummed/signed before use
+
         Args:
             gcs_path: GCS path to pickle file
 
         Returns:
-            Unpickled Python object
+            Unpickled Python object (or None on error)
         """
         try:
             blob = self.bucket.blob(gcs_path)

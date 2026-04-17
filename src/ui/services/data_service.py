@@ -300,7 +300,9 @@ class DataService:
         import pickle
         from pathlib import Path
 
-        pickle_path = Path(__file__).parent.parent.parent / "data" / "photo_index.pkl"
+        pickle_path = (
+            Path(__file__).parent.parent.parent.parent / "data" / "photo_index.pkl"
+        )
 
         if not pickle_path.exists():
             logger.debug(f"Precomputed photo index not found at {pickle_path}")
@@ -587,7 +589,7 @@ class DataService:
 
         # Try 1: Cloud Storage first (primary source)
         if self.cloud_storage_helper:
-            if not hasattr(self, "_cloud_photo_index"):
+            if self._cloud_photo_index is None:
                 self._cloud_photo_index = self._load_cloud_photo_index()
 
             # Defensive: ensure _cloud_photo_index is not None
@@ -965,8 +967,10 @@ class DataService:
             else:
                 logger.error(
                     f"❌ item2index mapping is empty/None - cannot map user interactions. "
-                    f"This means get_poi_details was never called to build the mapping. "
-                    f"Database returned {len(business_ids)} businesses, but mapping is unavailable."
+                    f"item2index should be loaded from the configured item2index mapping "
+                    f"(for example, item2index.pkl) during DataService initialization. "
+                    f"Database returned {len(business_ids)} businesses, but index alignment is unavailable. "
+                    f"Ensure the item2index mapping is present and configured for this environment."
                 )
 
             if poi_indices:
@@ -1099,12 +1103,13 @@ class DataService:
         # Try cloud first
         cloud_path = "metadata/user_csr_matrices.pkl"
         try:
-            matrices = self.read_pickle(cloud_path)
-            if matrices:
-                logger.info(
-                    f"✅ Loaded precomputed user matrices from cloud ({len(matrices)} users)"
-                )
-                return matrices
+            if getattr(self, "cloud_storage_helper", None):
+                matrices = self.cloud_storage_helper.read_pickle(cloud_path)
+                if matrices:
+                    logger.info(
+                        f"✅ Loaded precomputed user matrices from cloud ({len(matrices)} users)"
+                    )
+                    return matrices
         except Exception as e:
             logger.debug(f"Could not load from cloud: {e}")
 

@@ -308,11 +308,13 @@ def load_inference_service(config: Dict) -> InferenceService:
 
     # Load labels service
     labels = load_labeling_service(config)
-    
+
     # Load data service to pass to inference service
     data_service = load_data_service(config)
 
-    service = InferenceService(elsa_ckpt, sae_ckpt, config, labels=labels, data_service=data_service)
+    service = InferenceService(
+        elsa_ckpt, sae_ckpt, config, labels=labels, data_service=data_service
+    )
     if HAS_STREAMLIT:
         if not hasattr(st.session_state, "_startup_diagnostics"):
             st.session_state._startup_diagnostics = {}

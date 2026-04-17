@@ -1,7 +1,11 @@
 """UI utilities package."""
 
 import streamlit as st
-from .formatting import format_feature_id, format_features_list, format_feature_explanation
+from .formatting import (
+    format_feature_id,
+    format_features_list,
+    format_feature_explanation,
+)
 
 
 def info_section(title, info_text):
@@ -26,4 +30,9 @@ def info_section(title, info_text):
         st.info(info_text)
 
 
-__all__ = ["info_section", "format_feature_id", "format_features_list", "format_feature_explanation"]
+__all__ = [
+    "info_section",
+    "format_feature_id",
+    "format_features_list",
+    "format_feature_explanation",
+]

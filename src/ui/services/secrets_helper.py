@@ -89,7 +89,7 @@ def get_cloudsql_config() -> dict[str, Optional[str]]:
         Dict with keys: instance, database, user, password, credentials_path
     """
     logger.info("🔍 Reading Cloud SQL configuration from secrets...")
-    
+
     config = {
         "instance": get_secret("CLOUDSQL_INSTANCE"),
         "database": get_secret("CLOUDSQL_DATABASE", "postgres"),
@@ -97,21 +97,21 @@ def get_cloudsql_config() -> dict[str, Optional[str]]:
         "password": get_secret("CLOUDSQL_PASSWORD"),
         "credentials_path": get_gcp_credentials_path(),
     }
-    
+
     logger.info(f"Cloud SQL config result:")
     logger.info(f"  instance: {config['instance']}")
     logger.info(f"  database: {config['database']}")
     logger.info(f"  user: {config['user']}")
     logger.info(f"  password: {'SET' if config['password'] else 'NOT SET'}")
     logger.info(f"  credentials_path: {config['credentials_path']}")
-    
+
     return config
 
 
 def get_cloud_storage_bucket() -> Optional[str]:
     """
     Get Google Cloud Storage bucket name from secrets.
-    
+
     Checks both CLOUD_STORAGE_BUCKET and GCS_BUCKET_NAME for compatibility.
 
     Returns:
