@@ -5,10 +5,13 @@ Provides utilities to safely retrieve secrets from Streamlit's secrets managemen
 Works with both .streamlit/secrets.toml (local dev) and Streamlit Cloud secrets.
 """
 
+import logging
 import os
 from typing import Any, Optional
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -30,14 +33,22 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     try:
         # Try Streamlit secrets first (works in both local + Cloud)
         if key in st.secrets:
+            logger.debug(f"✓ Found {key} in Streamlit secrets")
             return st.secrets[key]
-    except Exception:
-        pass
+        else:
+            logger.debug(f"✗ {key} not in Streamlit secrets")
+    except Exception as e:
+        logger.debug(f"✗ Could not access st.secrets: {e}")
 
     # Fall back to environment variables (for CI/CD or manual env setup)
-    if env_val := os.getenv(key):
+    env_val = os.getenv(key)
+    if env_val:
+        logger.debug(f"✓ Found {key} in environment variables")
         return env_val
+    else:
+        logger.debug(f"✗ {key} not in environment variables")
 
+    logger.debug(f"✗ {key} not found anywhere, using default: {default}")
     return default
 
 
@@ -77,20 +88,37 @@ def get_cloudsql_config() -> dict[str, Optional[str]]:
     Returns:
         Dict with keys: instance, database, user, password, credentials_path
     """
-    return {
+    logger.info("🔍 Reading Cloud SQL configuration from secrets...")
+    
+    config = {
         "instance": get_secret("CLOUDSQL_INSTANCE"),
         "database": get_secret("CLOUDSQL_DATABASE", "postgres"),
         "user": get_secret("CLOUDSQL_USER", "postgres"),
         "password": get_secret("CLOUDSQL_PASSWORD"),
         "credentials_path": get_gcp_credentials_path(),
     }
+    
+    logger.info(f"Cloud SQL config result:")
+    logger.info(f"  instance: {config['instance']}")
+    logger.info(f"  database: {config['database']}")
+    logger.info(f"  user: {config['user']}")
+    logger.info(f"  password: {'SET' if config['password'] else 'NOT SET'}")
+    logger.info(f"  credentials_path: {config['credentials_path']}")
+    
+    return config
 
 
 def get_cloud_storage_bucket() -> Optional[str]:
     """
     Get Google Cloud Storage bucket name from secrets.
+    
+    Checks both CLOUD_STORAGE_BUCKET and GCS_BUCKET_NAME for compatibility.
 
     Returns:
-        Bucket name (e.g., 'neuronsae-photos') or None if not configured
+        Bucket name (e.g., 'diplomova-prace') or None if not configured
     """
-    return get_secret("CLOUD_STORAGE_BUCKET")
+    # Try both naming conventions
+    bucket = get_secret("CLOUD_STORAGE_BUCKET")
+    if not bucket:
+        bucket = get_secret("GCS_BUCKET_NAME")
+    return bucket

@@ -30,6 +30,7 @@ class InferenceService:
         sae_checkpoint_path: Path,
         config: Optional[Dict] = None,
         labels: Optional[object] = None,
+        data_service: Optional[object] = None,
     ):
         """
         Initialize inference service and load models.
@@ -44,6 +45,7 @@ class InferenceService:
                 - steering_alpha: interpolation strength (default 0.3)
                 - device: 'cpu' or 'cuda' (default 'cpu')
             labels: LabelingService instance for neuron labels (optional)
+            data_service: DataService instance for accessing user interaction data (optional)
 
             Note: n_items is read from the ELSA checkpoint metadata, NOT from config.
                   The checkpoint metadata is the definitive source of truth.
@@ -52,6 +54,7 @@ class InferenceService:
         self.device = self.config.get("device", "cpu")
         self.alpha = self.config.get("steering_alpha", 0.3)
         self.labels = labels
+        self.data_service = data_service
 
         # Model hyperparameters
         # n_items is NOT read from config - it will be loaded from checkpoint metadata
@@ -340,6 +343,157 @@ class InferenceService:
 
         return result
 
+    def get_steered_neuron_activation(self, user_id: str, neuron_idx: int, slider_value: float) -> float:
+        """
+        Compute the actual activation value for a single neuron after steering is applied.
+        
+        Shows what the real activation will be after the steering interpolation.
+        
+        Args:
+            user_id: User ID (must be encoded)
+            neuron_idx: Index of neuron being steered
+            slider_value: The slider value (-1 to +2)
+        
+        Returns:
+            Float: The computed activation after steering + alpha interpolation
+        """
+        if user_id not in self.user_latents:
+            raise ValueError(f"User {user_id} not encoded yet")
+        
+        user_z = self.user_latents[user_id].to(self.device)
+        
+        with torch.no_grad():
+            # Step 1: Get baseline sparse features
+            h_user = self.sae.encode(user_z.unsqueeze(0))  # (1, hidden_dim)
+            h_steered = h_user.clone()
+            
+            # Step 2: Apply steering to this neuron
+            if 0 <= neuron_idx < h_steered.shape[1]:
+                h_steered[0, neuron_idx] = torch.clamp(
+                    torch.tensor(slider_value, device=self.device),
+                    min=-1.0,
+                    max=2.0,
+                )
+            
+            # Step 3: Decode steered features
+            z_steered = self.sae.decode(h_steered).squeeze(0)
+            
+            # Step 4: Interpolate with original
+            z_final = (1.0 - self.alpha) * user_z + self.alpha * z_steered
+            
+            # Step 5: Re-encode to get final activation
+            h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze()
+            
+            # Get the activation for this specific neuron
+            if 0 <= neuron_idx < h_final.shape[0]:
+                return float(h_final[neuron_idx].abs().item())
+        
+        return 0.0
+    
+    def get_steered_activations(self, user_id: str, steering_overrides: Dict[int, float], k: int = 10) -> List[Dict]:
+        """
+        Compute top-k activations AFTER applying steering.
+        
+        This shows what the actual feature activations will be after the user's steering is applied.
+        
+        Args:
+            user_id: User ID (must be encoded)
+            steering_overrides: Dict mapping neuron_idx -> slider value
+            k: Number of top features to return
+        
+        Returns:
+            List of dicts with keys:
+                - neuron_idx: int
+                - activation: float (after steering + alpha interpolation)
+                - label: str
+        """
+        if user_id not in self.user_latents:
+            raise ValueError(f"User {user_id} not encoded yet")
+        
+        steering_overrides = steering_overrides or {}
+        if not steering_overrides:
+            # No steering, just return baseline
+            return self.get_top_activations(self.user_latents[user_id], k=k)
+        
+        user_z = self.user_latents[user_id].to(self.device)
+        
+        with torch.no_grad():
+            # Step 1: Get baseline sparse features
+            h_user = self.sae.encode(user_z.unsqueeze(0))  # (1, hidden_dim)
+            h_steered = h_user.clone()
+            
+            # Step 2: Apply steering overrides
+            for neuron_idx, slider_value in steering_overrides.items():
+                if 0 <= neuron_idx < h_steered.shape[1]:
+                    h_steered[0, neuron_idx] = torch.clamp(
+                        torch.tensor(slider_value, device=self.device),
+                        min=-1.0,
+                        max=2.0,
+                    )
+            
+            # Step 3: Decode steered features back to latent
+            z_steered = self.sae.decode(h_steered).squeeze(0)
+            
+            # Step 4: Interpolate with original latent using alpha
+            z_final = (1.0 - self.alpha) * user_z + self.alpha * z_steered
+            
+            # Step 5: Re-encode final latent to get NEW activations
+            h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze()
+        
+        # Get top-k by absolute activation of final features
+        topk_vals, topk_idx = torch.topk(h_final.abs(), k=min(k, h_final.shape[0]))
+        
+        result = []
+        for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
+            label = f"Feature {idx}"
+            if hasattr(self, "labels") and self.labels:
+                label = self.labels.get_label(idx)
+            
+            result.append({
+                "neuron_idx": idx,
+                "activation": float(val),
+                "label": label,
+            })
+        
+        return result
+
+    def get_user_steering(self, user_id: str) -> Dict[int, float]:
+        """
+        Get current SAE activation values for all neurons for a user.
+
+        Returns a dict mapping neuron_idx to current activation strength.
+        These values can be used as slider defaults in the steering UI.
+
+        Args:
+            user_id: User ID (must be encoded first via encode_user)
+
+        Returns:
+            Dict[int, float]: {neuron_idx: activation_value, ...}
+                Neuron indices from 0 to sae_hidden_dim-1.
+                Activation values are the raw sparse activations from SAE encoder.
+
+        Raises:
+            ValueError: If user hasn't been encoded yet
+        """
+        if user_id not in self.user_latents:
+            raise ValueError(
+                f"User {user_id} not encoded yet. Call encode_user() first."
+            )
+
+        user_z = self.user_latents[user_id]
+
+        # Get all SAE activations
+        with torch.no_grad():
+            h = self.sae.encode(user_z.unsqueeze(0)).squeeze()
+
+        # Return as dict: {neuron_idx: activation_value}
+        # Use absolute values to represent magnitude (as per UI convention)
+        steering_dict = {
+            i: float(h[i].abs().item()) for i in range(h.shape[0])
+        }
+
+        return steering_dict
+
     def steer_and_recommend(
         self,
         user_id: str,
@@ -495,7 +649,7 @@ class InferenceService:
             top_k: Number of top neurons to return
 
         Returns:
-            List of dicts with neuron_idx and contribution score
+            List of dicts with neuron_idx, label, and activation value
         """
         # If h_sparse is latent (not sparse), encode it first
         if h_sparse.shape[0] != self.sae.hidden_dim:
@@ -508,16 +662,26 @@ class InferenceService:
             h_sparse.abs(), k=min(top_k, h_sparse.shape[0])
         )
 
-        return [
-            {
-                "idx": int(idx.item()),
-                "label": f"Feature {idx.item()}",
-                "contribution": float(val.item()),
-            }
-            for idx, val in zip(topk_idx, topk_vals)
-        ]
+        result = []
+        for idx, val in zip(topk_idx, topk_vals):
+            neuron_idx = int(idx.item())
+            activation_val = float(val.item())
+            
+            # Get label from LabelingService if available
+            if self.labels:
+                label = self.labels.get_label(neuron_idx)
+            else:
+                label = f"Feature {neuron_idx}"
+            
+            result.append({
+                "idx": neuron_idx,
+                "label": label,
+                "activation": activation_val,
+            })
+        
+        return result
 
-    def get_user_history(self, user_id: str) -> List[Dict]:
+    def get_user_history(self, user_id: str) -> List[int]:
         """
         Get user's past interactions for reference display.
 
@@ -525,10 +689,27 @@ class InferenceService:
             user_id: Yelp user ID
 
         Returns:
-            List of dicts with past interactions (requires DataService)
+            List of POI indices for past interactions (min_stars=1.0 filter applied to include all ratings)
         """
-        # TODO: Query from DataService
-        return []
+        if not self.data_service:
+            logger.warning("DataService not available for user history")
+            return []
+        
+        try:
+            # Ensure item2index is loaded by triggering a dummy POI lookup if needed
+            if not self.data_service.item2index:
+                logger.warning("item2index not yet loaded, attempting to initialize...")
+                # Try to load at least one POI to build the mapping
+                self.data_service.get_poi_details(0)
+            
+            # Get POI indices the user has interacted with (all ratings >= 1 star)
+            # Using min_stars=1.0 to get all interactions, not just highly-rated ones
+            history = self.data_service.get_user_interactions(user_id, min_stars=1.0)
+            logger.debug(f"Retrieved {len(history)} past interactions for user {user_id}")
+            return history
+        except Exception as e:
+            logger.error(f"Failed to get user history for {user_id}: {e}")
+            return []
 
     def get_baseline_recommendations(
         self, user_id: str, top_k: int = 20

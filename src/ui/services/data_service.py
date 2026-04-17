@@ -120,9 +120,17 @@ class DataService:
         cloudsql_user = config["user"]
         cloudsql_password = config["password"]
 
+        logger.debug(f"Cloud SQL config check:")
+        logger.debug(f"  instance: {cloudsql_instance}")
+        logger.debug(f"  database: {cloudsql_db}")
+        logger.debug(f"  user: {cloudsql_user}")
+        logger.debug(f"  password: {'*' * len(cloudsql_password) if cloudsql_password else 'NOT SET'}")
+        logger.debug(f"  credentials_path: {config.get('credentials_path')}")
+
         if all([cloudsql_instance, cloudsql_db, cloudsql_user, cloudsql_password]):
             try:
-                logger.info("Cloud SQL credentials found, attempting connection...")
+                logger.info(f"🔗 Cloud SQL credentials found: instance={cloudsql_instance}")
+                logger.info("Attempting Cloud SQL connection...")
                 from .cloud_sql_helper import CloudSQLHelper
 
                 # Use CloudSQLHelper for connection management (no code duplication)
@@ -134,18 +142,28 @@ class DataService:
                 )
                 self.engine = sql_helper.engine
                 self.backend_type = "cloudsql"
-                logger.info("✓ Using Cloud SQL as backend")
+                logger.info("✅ Using Cloud SQL as backend")
 
             except Exception as e:
-                logger.warning(
-                    f"Cloud SQL connection failed ({e}), falling back to DuckDB..."
+                logger.error(
+                    f"❌ Cloud SQL connection FAILED: {type(e).__name__}: {e}"
                 )
+                logger.error("Falling back to local DuckDB...")
                 self.engine = None
                 self.conn = duckdb.connect(str(self.duckdb_path))
                 self.backend_type = "duckdb"
         else:
             # Use local DuckDB
-            logger.info("No Cloud SQL config, using local DuckDB")
+            missing = []
+            if not cloudsql_instance:
+                missing.append("CLOUDSQL_INSTANCE")
+            if not cloudsql_db:
+                missing.append("CLOUDSQL_DATABASE")
+            if not cloudsql_user:
+                missing.append("CLOUDSQL_USER")
+            if not cloudsql_password:
+                missing.append("CLOUDSQL_PASSWORD")
+            logger.warning(f"⚠️ Missing Cloud SQL config ({', '.join(missing)}), using local DuckDB")
             self.conn = duckdb.connect(str(self.duckdb_path))
             self.backend_type = "duckdb"
 
@@ -156,9 +174,8 @@ class DataService:
         # DO NOT load all POIs into memory - use lazy loading instead
         self.pois_df = None  # Load on-demand only
         self.business_to_row_idx = {}  # Will build from queries
-        self.local_photo_index = self._build_local_photo_index()
 
-        # Initialize Cloud Storage helper for photo fallback (on Streamlit Cloud)
+        # Initialize Cloud Storage helper for primary photo source
         self.cloud_storage_helper = None
         try:
             from .secrets_helper import get_cloud_storage_bucket
@@ -179,6 +196,30 @@ class DataService:
                     )
         except Exception as e:
             logger.debug(f"Cloud Storage config not available: {e}")
+
+        # Load photo index (try cloud precomputed → local pickle → build from scratch)
+        self._cloud_photo_index = None
+        self.local_photo_index = {}
+        
+        if self.cloud_storage_helper:
+            logger.info("📷 Checking for precomputed photo index in Cloud Storage...")
+            self._cloud_photo_index = self._load_precomputed_cloud_photo_index()
+            if self._cloud_photo_index:
+                logger.info(f"✅ Loaded precomputed photo index from Cloud Storage ({len(self._cloud_photo_index)} businesses)")
+            else:
+                logger.debug("No precomputed photo index in Cloud Storage")
+                # Try local pickle fallback
+                logger.debug("Checking for local pickle precompute...")
+                self.local_photo_index = self._load_precomputed_local_photo_index()
+                if not self.local_photo_index:
+                    logger.debug("No local pickle, building from photos.json...")
+                    self.local_photo_index = self._build_local_photo_index()
+        else:
+            logger.info("Cloud Storage not available, checking local precomputed index...")
+            self.local_photo_index = self._load_precomputed_local_photo_index()
+            if not self.local_photo_index:
+                logger.debug("No local precompute, building from photos.json...")
+                self.local_photo_index = self._build_local_photo_index()
 
         # Cache business IDs from item2index for quick validation
         self._valid_business_ids = (
@@ -240,6 +281,88 @@ class DataService:
     def _build_business_index(self) -> Dict[str, int]:
         """DEPRECATED: No longer needed with lazy loading."""
         return {}
+
+    def _load_precomputed_local_photo_index(self) -> Dict[str, List[PhotoMetadata]]:
+        """
+        Load precomputed photo index from local pickle file.
+        
+        Expected location: data/photo_index.pkl (generated by scripts/precompute_photo_index.py)
+        Returns empty dict if file not found.
+        """
+        import pickle
+        from pathlib import Path
+        
+        pickle_path = Path(__file__).parent.parent.parent / "data" / "photo_index.pkl"
+        
+        if not pickle_path.exists():
+            logger.debug(f"Precomputed photo index not found at {pickle_path}")
+            return {}
+        
+        try:
+            logger.info(f"Loading precomputed photo index from {pickle_path}...")
+            with open(pickle_path, "rb") as f:
+                photo_index = pickle.load(f)
+            
+            total_photos = sum(len(photos) for photos in photo_index.values())
+            logger.info(f"✅ Loaded precomputed photo index ({total_photos} photos for {len(photo_index)} businesses)")
+            return photo_index
+        
+        except Exception as e:
+            logger.warning(f"Failed to load precomputed photo index: {e}")
+            return {}
+
+    def _load_precomputed_cloud_photo_index(self) -> Dict[str, List[PhotoMetadata]]:
+        """
+        Load precomputed photo index from Cloud Storage.
+        
+        Tries in order:
+        1. metadata/photo_index.pkl (binary, fastest)
+        2. metadata/photo_index.json (JSON, portable but larger)
+        
+        Returns empty dict if not found or error occurs.
+        """
+        if not self.cloud_storage_helper:
+            return {}
+        
+        # Try 1: Load pickle (fast, direct unpickling)
+        try:
+            logger.debug("Checking Cloud Storage for precomputed photo_index.pkl...")
+            photo_index = self.cloud_storage_helper.read_pickle("metadata/photo_index.pkl")
+            if photo_index:
+                total_photos = sum(len(photos) for photos in photo_index.values())
+                logger.info(f"✅ Loaded precomputed photo index from cloud pickle ({total_photos} photos for {len(photo_index)} businesses)")
+                return photo_index
+        except Exception as e:
+            logger.debug(f"Could not load pickle from cloud: {e}")
+        
+        # Try 2: Load JSON (fallback to JSON version if pickle not available)
+        try:
+            logger.debug("Checking Cloud Storage for precomputed photo_index.json...")
+            photos_data = self.cloud_storage_helper.read_json("metadata/photo_index.json")
+            if not photos_data:
+                return {}
+            
+            # Reconstruct PhotoMetadata objects from JSON
+            photo_index: Dict[str, List[PhotoMetadata]] = {}
+            for business_id, photos_list in photos_data.items():
+                photo_index[business_id] = [
+                    PhotoMetadata(
+                        photo_id=p["photo_id"],
+                        business_id=p["business_id"],
+                        path=f"gs://{self.cloud_storage_helper.bucket_name}/photos/{p['photo_id']}.jpg",
+                        label=p["label"],
+                        caption=p["caption"],
+                    )
+                    for p in photos_list
+                ]
+            
+            total_photos = sum(len(photos) for photos in photo_index.values())
+            logger.info(f"✅ Loaded precomputed photo index from cloud JSON ({total_photos} photos for {len(photo_index)} businesses)")
+            return photo_index
+        
+        except Exception as e:
+            logger.debug(f"Could not load JSON from cloud: {e}")
+            return {}
 
     def _build_local_photo_index(self) -> Dict[str, List[PhotoMetadata]]:
         """
@@ -434,32 +557,24 @@ class DataService:
         """
         Return photo URLs/paths for a business.
 
-        Strategy:
-        1. First try local indexed photos (photos.json)
-        2. Then try legacy local files
-        3. Finally try Cloud Storage (lazy-load index on first use)
+        Strategy (Cloud-first):
+        1. First try Cloud Storage (primary - data already there)
+        2. Then try local indexed photos (local fallback)
+        3. Then try legacy local files (legacy fallback)
 
-        Returns list of paths/URLs (mix of local file paths and GCS signed URLs).
+        Returns list of URLs (GCS signed URLs or local file paths).
         """
         if not business_id:
             return []
 
-        # Try 1: Local indexed photos (photos.json)
-        indexed_photos = self.local_photo_index.get(business_id, [])
-        if indexed_photos:
-            return [photo.path for photo in indexed_photos]
-
-        # Try 2: Legacy local files
-        if self.local_photos_dir:
-            for ext in (".jpg", ".jpeg", ".png", ".webp"):
-                legacy_path = self.local_photos_dir / f"{business_id}{ext}"
-                if legacy_path.exists():
-                    return [str(legacy_path)]
-
-        # Try 3: Cloud Storage fallback (lazy load index on first use)
+        # Try 1: Cloud Storage first (primary source)
         if self.cloud_storage_helper:
             if not hasattr(self, "_cloud_photo_index"):
                 self._cloud_photo_index = self._load_cloud_photo_index()
+            
+            # Defensive: ensure _cloud_photo_index is not None
+            if self._cloud_photo_index is None:
+                self._cloud_photo_index = {}
 
             indexed_photos = self._cloud_photo_index.get(business_id, [])
             if indexed_photos:
@@ -478,9 +593,27 @@ class DataService:
                         )
                 if photo_urls:
                     logger.debug(
-                        f"Found {len(photo_urls)} photos in Cloud Storage for {business_id}"
+                        f"Using {len(photo_urls)} cloud photos for business {business_id}"
                     )
                     return photo_urls
+
+        # Try 2: Local indexed photos (fallback)
+        indexed_photos = self.local_photo_index.get(business_id, [])
+        if indexed_photos:
+            logger.debug(
+                f"Cloud unavailable, using {len(indexed_photos)} local indexed photos for business {business_id}"
+            )
+            return [photo.path for photo in indexed_photos]
+
+        # Try 3: Legacy local files (legacy fallback)
+        if self.local_photos_dir:
+            for ext in (".jpg", ".jpeg", ".png", ".webp"):
+                legacy_path = self.local_photos_dir / f"{business_id}{ext}"
+                if legacy_path.exists():
+                    logger.debug(
+                        f"Using legacy local photo for business {business_id}"
+                    )
+                    return [str(legacy_path)]
 
         return []
 
@@ -810,9 +943,12 @@ class DataService:
                     logger.debug(
                         f"User {user_id}: {unmapped} businesses not in item2index mapping (total mapping size: {len(self.item2index)})"
                     )
+                logger.debug(f"✅ Successfully mapped {len(poi_indices)} interactions for user {user_id}")
             else:
-                logger.warning(
-                    "item2index is None, cannot map user interactions to model indices"
+                logger.error(
+                    f"❌ item2index mapping is empty/None - cannot map user interactions. "
+                    f"This means get_poi_details was never called to build the mapping. "
+                    f"Database returned {len(business_ids)} businesses, but mapping is unavailable."
                 )
 
             if poi_indices:

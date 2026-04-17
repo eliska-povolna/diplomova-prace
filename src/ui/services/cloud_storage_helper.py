@@ -3,8 +3,9 @@
 import json
 import logging
 import os
+import pickle
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 try:
     from google.cloud import storage
@@ -192,6 +193,26 @@ class CloudStorageHelper:
     def read_json(self, gcs_path: str) -> Dict:
         """Read JSON from GCS without saving locally."""
         return self.download_json(gcs_path)
+
+    def read_pickle(self, gcs_path: str) -> Any:
+        """
+        Download and unpickle binary object from GCS.
+
+        Args:
+            gcs_path: GCS path to pickle file
+
+        Returns:
+            Unpickled Python object
+        """
+        try:
+            blob = self.bucket.blob(gcs_path)
+            content = blob.download_as_bytes()
+            data = pickle.loads(content)
+            logger.info(f"✅ Downloaded pickle from {gcs_path}")
+            return data
+        except Exception as e:
+            logger.error(f"Failed to download pickle from {gcs_path}: {e}")
+            return None
 
     def list_files(self, prefix: str = "") -> list:
         """List all files in GCS bucket with optional prefix."""
