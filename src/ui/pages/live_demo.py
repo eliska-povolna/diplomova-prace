@@ -45,27 +45,6 @@ def show():
     See how each neuron influences the model's predictions.
     """
     )
-
-    # Debug section (collapsible)
-    with st.expander("🐛 Debug Info", expanded=False):
-        debug_cols = st.columns(3)
-        with debug_cols[0]:
-            st.write(f"**Inference loaded:** {inference is not None}")
-            st.write(f"**n_items:** {inference.n_items if inference else 'N/A'}")
-        with debug_cols[1]:
-            st.write(
-                f"**Current user ID:** {st.session_state.get('current_user_id', 'None')}"
-            )
-            st.write(
-                f"**Has recommendations:** {bool(st.session_state.get('current_recommendations'))}"
-            )
-        with debug_cols[2]:
-            st.write(
-                f"**Encoded users:** {list(inference.user_latents.keys()) if inference else 'N/A'}"
-            )
-            cached_count = len(st.session_state.get("cached_test_users", []))
-            st.write(f"**Cached test users:** {cached_count}")
-
     # =====================================================================
     # SIDEBAR: Controls
     # =====================================================================
@@ -78,15 +57,15 @@ def show():
 
         # User selection - with caching to avoid empty user list bugs
         st.subheader("Select User")
-        
+
         # Load test users with caching
         test_users = None
-        
+
         # Try to get from session state first (fast)
         if "cached_test_users" in st.session_state:
             test_users = st.session_state["cached_test_users"]
             logger.debug(f"✅ Using cached test users: {len(test_users)} users")
-        
+
         # If not in cache, try to load
         if not test_users:
             try:
@@ -94,10 +73,12 @@ def show():
                 if test_users:
                     # Cache for future renders
                     st.session_state["cached_test_users"] = test_users
-                    logger.info(f"✅ Loaded {len(test_users)} test users from data service")
+                    logger.info(
+                        f"✅ Loaded {len(test_users)} test users from data service"
+                    )
             except Exception as e:
                 logger.error(f"❌ Failed to load test users: {e}", exc_info=True)
-        
+
         if not test_users:
             st.error("❌ No test users available - check database connection")
             return
@@ -119,25 +100,29 @@ def show():
         st.subheader("Display Options")
 
         show_latent = st.checkbox("Show activations", value=True)
-        
+
         # Checkbox with callback to load past visits when toggled ON
         def _on_history_checkbox_change():
             """When user checks 'Show past visits', load them into session state."""
             is_checked = st.session_state.get("show_history_checkbox", False)
             if is_checked:
-                history_cache_key = f"past_visits_{st.session_state.get('selected_user', '')}"
+                history_cache_key = (
+                    f"past_visits_{st.session_state.get('selected_user', '')}"
+                )
                 if history_cache_key not in st.session_state:
                     # Trigger loading in background - next rerun will see it in session state
-                    logger.info(f"Past visits checkbox enabled - will load on next render")
+                    logger.info(
+                        f"Past visits checkbox enabled - will load on next render"
+                    )
             else:
                 # Checkbox was unchecked - no need to do anything
                 logger.info(f"Past visits checkbox disabled")
-        
+
         show_history = st.checkbox(
-            "Show past visits", 
-            value=False, 
+            "Show past visits",
+            value=False,
             key="show_history_checkbox",
-            on_change=_on_history_checkbox_change
+            on_change=_on_history_checkbox_change,
         )
         show_scores = st.checkbox("Show scores", value=True)
 
@@ -147,18 +132,22 @@ def show():
         st.subheader("Output Parameters")
 
         # Responsive card layout: user sets card width, system calculates how many fit
-        card_width_px = st.slider("Card width (px)", min_value=180, max_value=420, value=300, step=10)
-        
+        card_width_px = st.slider(
+            "Card width (px)", min_value=180, max_value=420, value=300, step=10
+        )
+
         # Calculate photo dimensions based on card width (maintain aspect ratio)
         # Photo height: 220px for default 300px card width
         photo_height_px = int(card_width_px * 0.733)
-        
+
         # Calculate cards per row based on available width
         # Streamlit default width is ~900-1100px, use 900 as safe estimate
         available_width = 900
         recs_per_row = max(1, available_width // card_width_px)
-        st.caption(f"📐 Cards per row: {recs_per_row} | Photo: {card_width_px}×{photo_height_px}px")
-        
+        st.caption(
+            f"📐 Cards per row: {recs_per_row} | Photo: {card_width_px}×{photo_height_px}px"
+        )
+
         num_features = st.slider("Features to display", 5, 64, 9)
         num_recommendations = st.slider("Recommendations", 5, 50, 20)
 
@@ -172,7 +161,7 @@ def show():
                 st.session_state.current_recommendations = []
                 st.session_state.baseline_recommendations = None
                 st.rerun()
-        
+
         with reset_cols[1]:
             if st.button("🔄 Reload Users", use_container_width=True):
                 st.session_state.pop("cached_test_users", None)
@@ -198,72 +187,81 @@ def show():
                     logger.debug(f"Using cached CSR matrix for user {selected_user}")
                     user_interactions_csr = st.session_state[cached_csr_key]
                 else:
-                    # Encode user from interaction history
-                    poi_indices = data.get_user_interactions(selected_user)
-                    logger.debug(
-                        f"Retrieved {len(poi_indices)} POI indices for user {selected_user}"
-                    )
+                    # STEP 1: Try to load precomputed matrix (cloud or local pickle)
+                    user_interactions_csr = data.get_precomputed_user_matrix(selected_user)
 
-                    if not poi_indices:
-                        st.warning(
-                            f"No interaction history found for user {selected_user}"
-                        )
-                        return
+                    if user_interactions_csr is not None:
+                        logger.info(f"✅ Loaded precomputed CSR matrix for user {selected_user}")
+                    else:
+                        # STEP 2: Fallback - build matrix from interaction history
+                        logger.debug(f"Building CSR matrix from interactions for user {selected_user}")
 
-                    # Validate inference service is properly initialized
-                    if inference.n_items is None:
-                        st.error(
-                            "❌ Inference service not properly initialized: n_items is None"
-                        )
-                        logger.error(
-                            "Inference service n_items is None! This indicates model loading failed."
-                        )
-                        return
-
-                    logger.debug(
-                        f"Creating CSR matrix with shape (1, {inference.n_items})"
-                    )
-
-                    # Create sparse CSR matrix from POI indices (1 row, n_items columns)
-                    import numpy as np
-                    from scipy.sparse import csr_matrix
-
-                    # Validate POI indices are within bounds
-                    max_poi_idx = max(poi_indices) if poi_indices else 0
-                    if max_poi_idx >= inference.n_items:
-                        st.error(
-                            f"❌ POI index {max_poi_idx} exceeds n_items={inference.n_items}"
-                        )
-                        logger.error(
-                            f"POI index out of bounds: {max_poi_idx} >= {inference.n_items}"
-                        )
-                        return
-
-                    row = np.zeros(len(poi_indices), dtype=int)  # All row 0
-                    col = np.array(poi_indices, dtype=int)  # POI indices as columns
-                    data_vals = np.ones(len(poi_indices), dtype=np.float32)
-
-                    logger.debug(
-                        f"CSR matrix data: row={row[:5]}..., col={col[:5]}..., data_vals={data_vals[:5]}..."
-                    )
-
-                    user_interactions_csr = csr_matrix(
-                        (data_vals, (row, col)), shape=(1, inference.n_items)
-                    )
-                    logger.debug(
-                        f"Created CSR matrix: shape={user_interactions_csr.shape}, nnz={user_interactions_csr.nnz}"
-                    )
-
-                    # Validate CSR matrix was created
-                    if user_interactions_csr is None:
-                        raise RuntimeError(
-                            f"Failed to create CSR matrix for user {selected_user}"
+                        # Encode user from interaction history
+                        poi_indices = data.get_user_interactions(selected_user)
+                        logger.debug(
+                            f"Retrieved {len(poi_indices)} POI indices for user {selected_user}"
                         )
 
-                    if not hasattr(user_interactions_csr, "toarray"):
-                        raise TypeError(
-                            f"CSR matrix missing toarray method. Type: {type(user_interactions_csr)}"
+                        if not poi_indices:
+                            st.warning(
+                                f"No interaction history found for user {selected_user}"
+                            )
+                            return
+
+                        # Validate inference service is properly initialized
+                        if inference.n_items is None:
+                            st.error(
+                                "❌ Inference service not properly initialized: n_items is None"
+                            )
+                            logger.error(
+                                "Inference service n_items is None! This indicates model loading failed."
+                            )
+                            return
+
+                        logger.debug(
+                            f"Creating CSR matrix with shape (1, {inference.n_items})"
                         )
+
+                        # Create sparse CSR matrix from POI indices (1 row, n_items columns)
+                        import numpy as np
+                        from scipy.sparse import csr_matrix
+
+                        # Validate POI indices are within bounds
+                        max_poi_idx = max(poi_indices) if poi_indices else 0
+                        if max_poi_idx >= inference.n_items:
+                            st.error(
+                                f"❌ POI index {max_poi_idx} exceeds n_items={inference.n_items}"
+                            )
+                            logger.error(
+                                f"POI index out of bounds: {max_poi_idx} >= {inference.n_items}"
+                            )
+                            return
+
+                        row = np.zeros(len(poi_indices), dtype=int)  # All row 0
+                        col = np.array(poi_indices, dtype=int)  # POI indices as columns
+                        data_vals = np.ones(len(poi_indices), dtype=np.float32)
+
+                        logger.debug(
+                            f"CSR matrix data: row={row[:5]}..., col={col[:5]}..., data_vals={data_vals[:5]}..."
+                        )
+
+                        user_interactions_csr = csr_matrix(
+                            (data_vals, (row, col)), shape=(1, inference.n_items)
+                        )
+                        logger.debug(
+                            f"Created CSR matrix: shape={user_interactions_csr.shape}, nnz={user_interactions_csr.nnz}"
+                        )
+
+                        # Validate CSR matrix was created
+                        if user_interactions_csr is None:
+                            raise RuntimeError(
+                                f"Failed to create CSR matrix for user {selected_user}"
+                            )
+
+                        if not hasattr(user_interactions_csr, "toarray"):
+                            raise TypeError(
+                                f"CSR matrix missing toarray method. Type: {type(user_interactions_csr)}"
+                            )
 
                     # Cache it for future reruns
                     st.session_state[cached_csr_key] = user_interactions_csr
@@ -346,7 +344,7 @@ def show():
                 current_activations = {}
 
             # Show sliders for top features (no cap - display all requested)
-            top_features = activations[: num_features]
+            top_features = activations[:num_features]
 
             # Create 3-column layout for sliders
             cols_per_row = 3
@@ -382,14 +380,22 @@ def show():
                             # Display current activation and after-steering on same line
                             if steering_value != 0.0:
                                 try:
-                                    steered_activation = inference.get_steered_neuron_activation(
-                                        selected_user, neuron_idx, steering_value
+                                    steered_activation = (
+                                        inference.get_steered_neuron_activation(
+                                            selected_user, neuron_idx, steering_value
+                                        )
                                     )
-                                    st.caption(f"📊 Current: {current_val:.2f} → After steering: {steered_activation:.2f}")
+                                    st.caption(
+                                        f"📊 Current: {current_val:.2f} → After steering: {steered_activation:.2f}"
+                                    )
                                     steering_updates[neuron_idx] = steering_value
                                 except Exception as e:
-                                    logger.debug(f"Could not compute steered activation: {e}")
-                                    st.caption(f"📊 Current: {current_val:.2f} → Steered to: {steering_value:.2f}")
+                                    logger.debug(
+                                        f"Could not compute steered activation: {e}"
+                                    )
+                                    st.caption(
+                                        f"📊 Current: {current_val:.2f} → Steered to: {steering_value:.2f}"
+                                    )
                                     steering_updates[neuron_idx] = steering_value
                             else:
                                 st.caption(f"📊 Current: {current_val:.2f}")
@@ -403,14 +409,21 @@ def show():
                     # Get original activations for comparison
                     original_activations = inference.get_user_steering(selected_user)
                     original_features = [
-                        {**feat, "activation": original_activations.get(feat["neuron_idx"], 0.0)}
+                        {
+                            **feat,
+                            "activation": original_activations.get(
+                                feat["neuron_idx"], 0.0
+                            ),
+                        }
                         for feat in top_features[:num_features]
                     ]
                     steered_activations = inference.get_steered_activations(
                         selected_user, steering_updates, k=num_features
                     )
                     if steered_activations:
-                        plot_feature_activations(steered_activations, original_activations=original_features)
+                        plot_feature_activations(
+                            steered_activations, original_activations=original_features
+                        )
                 except Exception as e:
                     logger.debug(f"Could not compute steered activations chart: {e}")
 
@@ -419,7 +432,9 @@ def show():
                 # Get baseline recommendations if not already computed
                 if selected_user not in inference.baseline_recommendations:
                     logger.debug(f"Computing baseline for {selected_user}")
-                    inference.get_baseline_recommendations(selected_user, num_recommendations)
+                    inference.get_baseline_recommendations(
+                        selected_user, num_recommendations
+                    )
 
                 # Prepare steering config
                 steering_config = None
@@ -436,13 +451,41 @@ def show():
                 # Request significantly more to ensure we get num_recommendations after filtering
                 buffer_factor = 2.0  # Request 2x to account for 10-15% failure rate
                 recommendations_with_delta = inference.get_recommendations_with_delta(
-                    selected_user, steering_config=steering_config, top_k=int(num_recommendations * buffer_factor)
+                    selected_user,
+                    steering_config=steering_config,
+                    top_k=int(num_recommendations * buffer_factor),
                 )
-                
-                logger.info(f"Requested {int(num_recommendations * buffer_factor)} recommendations with {buffer_factor}x buffer, got {len(recommendations_with_delta)} items")
+
+                logger.info(
+                    f"Requested {int(num_recommendations * buffer_factor)} recommendations with {buffer_factor}x buffer, got {len(recommendations_with_delta)} items"
+                )
 
                 st.session_state.current_recommendations = recommendations_with_delta
                 st.session_state.steering_modified = len(steering_updates) > 0
+
+                # ===================================================================
+                # PRE-FILTER: Validate and cap recommendations early (for map + POI cards)
+                # ===================================================================
+                # Filter to only valid POIs first
+                valid_recommendations = []
+                for reco in recommendations_with_delta:
+                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
+                    poi_details = data.get_poi_details(poi_idx)
+                    if poi_details:
+                        valid_recommendations.append(reco)
+                    else:
+                        logger.debug(
+                            f"Pre-filter: Filtered out invalid POI at index {poi_idx}"
+                        )
+
+                # Cap to exactly num_recommendations
+                filtered_and_capped = valid_recommendations[:num_recommendations]
+                st.session_state["filtered_recommendations_to_display"] = (
+                    filtered_and_capped
+                )
+                logger.info(
+                    f"Pre-filter: {len(recommendations_with_delta)} loaded → {len(valid_recommendations)} valid → {len(filtered_and_capped)} capped to display"
+                )
 
             except Exception as e:
                 st.error(f"Failed to generate recommendations: {e}")
@@ -463,49 +506,98 @@ def show():
                 "Each marker represents a place based on your interests.",
             )
 
+            # PRE-FILTER: Ensure recommendations are filtered and capped
+            # (This runs every time to handle cached recommendations from previous runs)
+            if not st.session_state.get("filtered_recommendations_to_display"):
+                all_recommendations = st.session_state.current_recommendations
+                valid_recommendations = []
+                for reco in all_recommendations:
+                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
+                    poi_details = data.get_poi_details(poi_idx)
+                    if poi_details:
+                        valid_recommendations.append(reco)
+
+                filtered_and_capped = valid_recommendations[:num_recommendations]
+                st.session_state["filtered_recommendations_to_display"] = (
+                    filtered_and_capped
+                )
+                logger.info(
+                    f"Late-filter (on rerun): {len(all_recommendations)} loaded → {len(valid_recommendations)} valid → {len(filtered_and_capped)} capped"
+                )
+
             if HAS_FOLIUM:
                 try:
                     # STEP 1: Check if we need to load past visits
                     past_visits_for_map = None
                     history_cache_key = f"past_visits_{selected_user}"
                     history_pois_cache_key = f"past_visits_pois_{selected_user}"
-                    
+
                     if show_history:
                         # Check if we have past visits POI details cached (not just indices)
                         if history_pois_cache_key in st.session_state:
                             # Use cached POI details - no database lookups needed!
-                            past_visits_for_map = st.session_state.get(history_pois_cache_key)
-                            logger.debug(f"✅ Using cached POI details for {len(past_visits_for_map)} past visits (instant, no DB lookups)")
+                            past_visits_for_map = st.session_state.get(
+                                history_pois_cache_key
+                            )
+                            logger.debug(
+                                f"✅ Using cached POI details for {len(past_visits_for_map)} past visits (instant, no DB lookups)"
+                            )
                         else:
                             # Load them now (first time checkbox is enabled)
-                            logger.info(f"Past visits checkbox is ON but not cached - loading now...")
+                            logger.info(
+                                f"Past visits checkbox is ON but not cached - loading now..."
+                            )
                             try:
-                                past_visits_indices = inference.get_user_history(selected_user)
-                                logger.info(f"  → Fetching POI details for {len(past_visits_indices)} past visits...")
-                                
+                                past_visits_indices = inference.get_user_history(
+                                    selected_user
+                                )
+                                logger.info(
+                                    f"  → Fetching POI details for {len(past_visits_indices)} past visits..."
+                                )
+
                                 # IMPORTANT: Cache the POI details, not just indices
                                 # This way the map renders instantly next time (no DB lookups)
-                                past_visits_pois = [data.get_poi_details(idx) for idx in past_visits_indices]
-                                past_visits_pois = [p for p in past_visits_pois if p and p.get("lat") and p.get("lon")]
-                                
+                                past_visits_pois = [
+                                    data.get_poi_details(idx)
+                                    for idx in past_visits_indices
+                                ]
+                                past_visits_pois = [
+                                    p
+                                    for p in past_visits_pois
+                                    if p and p.get("lat") and p.get("lon")
+                                ]
+
                                 # Cache BOTH for reference
-                                st.session_state[history_cache_key] = past_visits_indices
-                                st.session_state[history_pois_cache_key] = past_visits_pois
+                                st.session_state[history_cache_key] = (
+                                    past_visits_indices
+                                )
+                                st.session_state[history_pois_cache_key] = (
+                                    past_visits_pois
+                                )
                                 past_visits_for_map = past_visits_pois
-                                
-                                logger.info(f"✅ Loaded and cached {len(past_visits_pois)}/{len(past_visits_indices)} valid past visits (POI details cached for instant map rendering)")
+
+                                logger.info(
+                                    f"✅ Loaded and cached {len(past_visits_pois)}/{len(past_visits_indices)} valid past visits (POI details cached for instant map rendering)"
+                                )
                             except Exception as e:
                                 logger.warning(f"Could not load past visits: {e}")
-                    
+
                     # STEP 2: Build the map (with or without past visits)
+                    # Use the same capped and filtered recommendations that POI cards will use
                     map_obj = build_folium_map(
-                        st.session_state.current_recommendations, data, past_visits=past_visits_for_map
+                        st.session_state.get("filtered_recommendations_to_display", []),
+                        data,
+                        past_visits=past_visits_for_map,
                     )
                     if map_obj is None:
-                        st.warning("⚠️ Could not load map. Check that recommendations have valid locations in the database.")
-                        logger.warning("Map object returned None - recommendations may lack coordinates")
+                        st.warning(
+                            "⚠️ Could not load map. Check that recommendations have valid locations in the database."
+                        )
+                        logger.warning(
+                            "Map object returned None - recommendations may lack coordinates"
+                        )
                     else:
-                        st_folium(map_obj, width=None, height=500)
+                        st_folium(map_obj, width=None, height=500, key=f"folium_{selected_user}_{show_history}")
                 except Exception as e:
                     st.error(f"❌ Map rendering failed: {e}")
                     logger.exception(f"Folium map error: {e}")
@@ -517,37 +609,32 @@ def show():
         # ===================================================================
         # Section 4: POI Cards (Recommendations)
 
-        if st.session_state.get("current_recommendations"):
+        if st.session_state.get("filtered_recommendations_to_display"):
             st.subheader("🏆 Recommended for You")
 
-            all_recommendations = st.session_state.current_recommendations
-
-            # FIRST: Filter to only valid POIs
-            # This ensures we show exactly num_recommendations (not more if some are invalid)
-            valid_recommendations = []
-            for reco in all_recommendations:
-                poi_idx = reco.get("item_id") or reco.get("poi_idx")
-                poi_details = data.get_poi_details(poi_idx)
-                
-                if poi_details:
-                    valid_recommendations.append((reco, poi_details))
-                else:
-                    logger.debug(f"Filtered out invalid POI at index {poi_idx}")
-            
-            logger.info(f"Filtered recommendations: {len(all_recommendations)} loaded → {len(valid_recommendations)} valid → showing top {num_recommendations}")
-            
-            # SECOND: Take only the requested number
-            recommendations_to_display = valid_recommendations[:num_recommendations]
+            # Use pre-filtered and capped recommendations (filtered before map rendering)
+            recommendations_to_display = st.session_state.get(
+                "filtered_recommendations_to_display", []
+            )
 
             # Display POI cards with responsive layout
             # Calculate cards per row based on user's card width preference
             responsive_cards_per_row = max(1, available_width // card_width_px)
             cols = st.columns(responsive_cards_per_row)
 
-            for display_idx, (reco, poi_details) in enumerate(recommendations_to_display):
+            for display_idx, reco in enumerate(recommendations_to_display):
+                poi_idx = reco.get("item_id") or reco.get("poi_idx")
+                poi_details = data.get_poi_details(poi_idx)
+
                 with cols[display_idx % responsive_cards_per_row]:
                     try:
-                        draw_poi_card(poi_details, reco, show_scores, card_width_px, photo_height_px)
+                        draw_poi_card(
+                            poi_details,
+                            reco,
+                            show_scores,
+                            card_width_px,
+                            photo_height_px,
+                        )
                     except Exception as e:
                         logger.exception(
                             f"POI card error for {poi_details.get('name', 'Unknown')}: {e}"
@@ -561,29 +648,45 @@ def show():
 
         if show_history:
             st.subheader("📜 Your Past Visits")
-            
+
             # Use cached data (loaded earlier)
             history_cache_key = f"past_visits_{selected_user}"
             history_indices = st.session_state.get(history_cache_key, [])
-            
+
             if history_indices:
                 try:
-                    history_pois = [data.get_poi_details(idx) for idx in history_indices]
+                    history_pois = [
+                        data.get_poi_details(idx) for idx in history_indices
+                    ]
                     history_pois = [p for p in history_pois if p]
-                    logger.debug(f"Loaded {len(history_pois)} valid POI details from {len(history_indices)} indices")
+                    logger.debug(
+                        f"Loaded {len(history_pois)} valid POI details from {len(history_indices)} indices"
+                    )
 
                     if history_pois:
-                        with st.expander(f"Show {len(history_pois)} past visits", expanded=False):
-                            hist_cols = st.columns(max(1, available_width // card_width_px))
+                        with st.expander(
+                            f"Show {len(history_pois)} past visits", expanded=False
+                        ):
+                            hist_cols = st.columns(
+                                max(1, available_width // card_width_px)
+                            )
                             displayed_count = 0
 
                             for poi in history_pois:
                                 try:
                                     with hist_cols[displayed_count % len(hist_cols)]:
-                                        draw_poi_card(poi, {}, show_scores=False, card_width_px=card_width_px, photo_height_px=photo_height_px)
+                                        draw_poi_card(
+                                            poi,
+                                            {},
+                                            show_scores=False,
+                                            card_width_px=card_width_px,
+                                            photo_height_px=photo_height_px,
+                                        )
                                         displayed_count += 1
                                 except Exception as e:
-                                    logger.exception(f"History POI card error for {poi.get('name', 'Unknown')}: {e}")
+                                    logger.exception(
+                                        f"History POI card error for {poi.get('name', 'Unknown')}: {e}"
+                                    )
                                     continue
                     else:
                         st.info("No valid past visits found")
@@ -597,19 +700,18 @@ def show():
 # =============================================================================
 
 
-def plot_feature_activations(activations: List[Dict], original_activations: List[Dict] = None):
+def plot_feature_activations(
+    activations: List[Dict], original_activations: List[Dict] = None
+):
     """Plot horizontal bar chart of top feature activations with optional original comparison.
-    
+
     Args:
         activations: List of dicts with neuron_idx, label, activation
         original_activations: Optional list of original activations to show as greyed-out bars
     """
 
     # Format labels with neuron index as string in description
-    labels = [
-        format_feature_id(a["neuron_idx"], a["label"])
-        for a in activations
-    ]
+    labels = [format_feature_id(a["neuron_idx"], a["label"]) for a in activations]
     values = [a["activation"] for a in activations]
 
     # Keep order with largest values at top (Plotly renders top-to-bottom)
@@ -619,7 +721,10 @@ def plot_feature_activations(activations: List[Dict], original_activations: List
     # Generate colors for each bar (colorful spectrum - Viridis)
     # Use activation values for color mapping
     color_scale = np.linspace(0, 1, len(values))
-    colors = [f"hsl({180 + h*180}, 100%, {40 + l*20}%)" for h, l in zip(color_scale, np.linspace(0, 1, len(values)))]
+    colors = [
+        f"hsl({180 + h*180}, 100%, {40 + l*20}%)"
+        for h, l in zip(color_scale, np.linspace(0, 1, len(values)))
+    ]
 
     # Add steered activations as main bars with colorful bars
     fig.add_trace(
@@ -645,7 +750,7 @@ def plot_feature_activations(activations: List[Dict], original_activations: List
         # Map original activations by neuron_idx for lookup
         original_map = {a["neuron_idx"]: a["activation"] for a in original_activations}
         original_values = [original_map.get(a["neuron_idx"], 0.0) for a in activations]
-        
+
         fig.add_trace(
             go.Bar(
                 y=labels,
@@ -669,23 +774,27 @@ def plot_feature_activations(activations: List[Dict], original_activations: List
         yaxis=dict(autorange="reversed"),  # Ensure all labels are visible
     )
 
-    st.plotly_chart(fig, use_container_width='stretch')
+    st.plotly_chart(fig, use_container_width="stretch")
 
 
-def build_folium_map(recommendations: List[Dict], data_service, past_visits: List[Dict] = None) -> folium.Map | None:
+def build_folium_map(
+    recommendations: List[Dict], data_service, past_visits: List[Dict] = None
+) -> folium.Map | None:
     """Build interactive Folium map with POI markers (recommendations and past visits).
-    
+
     Args:
         recommendations: List of recommendation dicts with item_id/poi_idx and score
         data_service: DataService instance for fetching POI details
         past_visits: Optional list of POI detail dicts for past visits (pre-fetched POI details, not indices!)
                      This should be a list of dicts with lat/lon/name/etc, NOT a list of indices
     """
-    
+
     # DEBUG: Log what we received
     logger.debug(f"build_folium_map() called with:")
     logger.debug(f"  - recommendations: {len(recommendations)} items")
-    logger.debug(f"  - past_visits: {len(past_visits) if past_visits else 0} POI detail dicts (pre-fetched, no DB lookups needed)")
+    logger.debug(
+        f"  - past_visits: {len(past_visits) if past_visits else 0} POI detail dicts (pre-fetched, no DB lookups needed)"
+    )
 
     if not HAS_FOLIUM:
         logger.warning("Folium not available for map rendering")
@@ -706,7 +815,7 @@ def build_folium_map(recommendations: List[Dict], data_service, past_visits: Lis
                 logger.warning(f"Recommendation {i}: No item_id or poi_idx found")
                 failed_pois.append((i, poi_idx, "No index"))
                 continue
-                
+
             poi = data_service.get_poi_details(poi_idx)
             if poi and poi.get("lat") and poi.get("lon"):
                 pois.append(poi)
@@ -714,21 +823,29 @@ def build_folium_map(recommendations: List[Dict], data_service, past_visits: Lis
                 if not poi:
                     reason = "Empty POI (not in mapping or database)"
                 elif not poi.get("lat") or not poi.get("lon"):
-                    reason = f"Invalid coords: lat={poi.get('lat')}, lon={poi.get('lon')}"
+                    reason = (
+                        f"Invalid coords: lat={poi.get('lat')}, lon={poi.get('lon')}"
+                    )
                 else:
                     reason = "Unknown"
                 failed_pois.append((i, poi_idx, reason))
-        
+
         if failed_pois:
-            logger.warning(f"Failed to load {len(failed_pois)}/{len(recommendations)} POIs:")
+            logger.warning(
+                f"Failed to load {len(failed_pois)}/{len(recommendations)} POIs:"
+            )
             for rec_idx, poi_idx, reason in failed_pois[:5]:  # Log first 5 failures
                 logger.warning(f"  - Rec #{rec_idx}: poi_idx={poi_idx} ({reason})")
             if len(failed_pois) > 5:
                 logger.warning(f"  ... and {len(failed_pois) - 5} more")
-        
+
         if not pois:
-            logger.error(f"No valid POI data: all {len(recommendations)} recommendations failed to load.")
-            logger.error(f"Check: (1) index2item mapping exists, (2) database connectivity, (3) POI data has coordinates")
+            logger.error(
+                f"No valid POI data: all {len(recommendations)} recommendations failed to load."
+            )
+            logger.error(
+                f"Check: (1) index2item mapping exists, (2) database connectivity, (3) POI data has coordinates"
+            )
             return None
 
         # Get past visit POIs (already pre-fetched, just use them)
@@ -736,14 +853,20 @@ def build_folium_map(recommendations: List[Dict], data_service, past_visits: Lis
         if past_visits:
             # past_visits is already a list of POI detail dicts (pre-fetched from cache)
             # No need to call get_poi_details again!
-            past_visit_pois = [p for p in past_visits if p and p.get("lat") and p.get("lon")]
-            logger.debug(f"Using {len(past_visit_pois)} pre-fetched past visit POI details (no DB lookups)")
+            past_visit_pois = [
+                p for p in past_visits if p and p.get("lat") and p.get("lon")
+            ]
+            logger.debug(
+                f"Using {len(past_visit_pois)} pre-fetched past visit POI details (no DB lookups)"
+            )
         else:
             logger.debug(f"No past visits provided to map (past_visits={past_visits})")
-        
+
         # DEBUG: Log data service state
         if failed_pois:
-            logger.warning(f"Data service state: index2item={'present' if hasattr(data_service, 'index2item') and data_service.index2item else 'missing'}, backend={getattr(data_service, 'backend_type', 'unknown')}")
+            logger.warning(
+                f"Data service state: index2item={'present' if hasattr(data_service, 'index2item') and data_service.index2item else 'missing'}, backend={getattr(data_service, 'backend_type', 'unknown')}"
+            )
 
         # Calculate center from RECOMMENDATIONS ONLY (ignore past visits for map focus)
         lats = [p["lat"] for p in pois if p.get("lat")]
@@ -786,17 +909,19 @@ def build_folium_map(recommendations: List[Dict], data_service, past_visits: Lis
                 popup_text += "📜 <i>Past Visit</i><br>"
                 if poi.get("category"):
                     popup_text += f"{poi['category']}<br>"
-                popup_text += f"⭐ {poi.get('rating', 0)} ({poi.get('review_count', 0)} reviews)"
+                popup_text += (
+                    f"⭐ {poi.get('rating', 0)} ({poi.get('review_count', 0)} reviews)"
+                )
 
                 # Create checkmark icon using HTML (much smaller than recommendations)
-                checkmark_html = '''
+                checkmark_html = """
                 <div style="font-size: 12px; color: white; background-color: #888; 
                             border-radius: 50%; width: 16px; height: 16px; 
                             display: flex; align-items: center; justify-content: center;
                             font-weight: bold; border: 1px solid white; box-shadow: 0 1px 2px rgba(0,0,0,0.3);">✓</div>
-                '''
+                """
                 icon = folium.DivIcon(html=checkmark_html)
-                
+
                 folium.Marker(
                     location=[poi["lat"], poi["lon"]],
                     popup=folium.Popup(popup_text, max_width=250),
@@ -804,17 +929,25 @@ def build_folium_map(recommendations: List[Dict], data_service, past_visits: Lis
                     icon=icon,
                 ).add_to(m)
             except Exception as e:
-                logger.debug(f"Failed to add past visit marker for {poi.get('name', 'Unknown')}: {e}")
+                logger.debug(
+                    f"Failed to add past visit marker for {poi.get('name', 'Unknown')}: {e}"
+                )
                 continue
 
         # Add recommendation markers (colored with rank numbers)
         # Add in REVERSE order so rank 1 appears on top (last added = highest z-index)
         # When we enumerate(reversed(pois)), we iterate: worst→...→best
         # This means rank 1 (best) is added LAST, so it appears on top ✓
-        logger.info(f"Adding {len(pois)} recommendation markers in REVERSE order (so rank 1 is added last = on top)")
-        logger.debug(f"First POI in list (best/rank1): {pois[0].get('name', 'unknown')}")
-        logger.debug(f"Last POI in list (worst/rank{len(pois)}): {pois[-1].get('name', 'unknown')}")
-        
+        logger.info(
+            f"Adding {len(pois)} recommendation markers in REVERSE order (so rank 1 is added last = on top)"
+        )
+        logger.debug(
+            f"First POI in list (best/rank1): {pois[0].get('name', 'unknown')}"
+        )
+        logger.debug(
+            f"Last POI in list (worst/rank{len(pois)}): {pois[-1].get('name', 'unknown')}"
+        )
+
         for rank_in_reversed, poi in enumerate(reversed(pois), 1):
             try:
                 # Convert reversed enumeration index to actual rank
@@ -833,14 +966,14 @@ def build_folium_map(recommendations: List[Dict], data_service, past_visits: Lis
                 )
 
                 # Create numbered badge using HTML (colored circles with rank number)
-                rank_html = f'''
+                rank_html = f"""
                 <div style="font-size: 14px; color: white; background-color: {hex_color}; 
                             border-radius: 50%; width: 34px; height: 34px; 
                             display: flex; align-items: center; justify-content: center;
                             font-weight: bold; border: 2px solid white; box-shadow: 0 2px 4px rgba(0,0,0,0.3);">
                     {actual_rank}
                 </div>
-                '''
+                """
                 icon = folium.DivIcon(html=rank_html)
 
                 folium.Marker(
@@ -849,15 +982,19 @@ def build_folium_map(recommendations: List[Dict], data_service, past_visits: Lis
                     tooltip=f"Rank {actual_rank}: {poi.get('name', 'Unknown')}",
                     icon=icon,
                 ).add_to(m)
-                
+
                 # Log key markers for debugging
-                if actual_rank in [1, 2, len(pois)-1, len(pois)]:
-                    logger.debug(f"  ✅ Added rank {actual_rank}/{len(pois)} ({poi.get('name', 'unknown')[:20]}..., added in position {rank_in_reversed})")
+                if actual_rank in [1, 2, len(pois) - 1, len(pois)]:
+                    logger.debug(
+                        f"  ✅ Added rank {actual_rank}/{len(pois)} ({poi.get('name', 'unknown')[:20]}..., added in position {rank_in_reversed})"
+                    )
             except Exception as e:
                 logger.exception(f"Failed to add marker for rank {actual_rank}: {e}")
                 continue
 
-        logger.info(f"✅ Map created with {len(pois)} recommendations and {len(past_visit_pois)} past visits")
+        logger.info(
+            f"✅ Map created with {len(pois)} recommendations and {len(past_visit_pois)} past visits"
+        )
         return m
 
     except Exception as e:
@@ -922,7 +1059,13 @@ def _image_to_base64(image_bytes: bytes) -> str:
         return ""
 
 
-def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False, card_width_px: int = 300, photo_height_px: int = 87):
+def draw_poi_card(
+    poi: Dict,
+    recommendation: Dict,
+    show_scores: bool = False,
+    card_width_px: int = 300,
+    photo_height_px: int = 87,
+):
     """
     Draw a single POI recommendation card with photo - fixed height with scrollable content.
 
@@ -947,8 +1090,13 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False, ca
         header_height_px = 40
         footer_height_px = 30  # Fixed footer for Yelp button
         content_min_height_px = 231  # Adjusted for footer
-        card_height_px = header_height_px + photo_height_px + content_min_height_px + footer_height_px
-        
+        card_height_px = (
+            header_height_px
+            + photo_height_px
+            + content_min_height_px
+            + footer_height_px
+        )
+
         # Inject CSS for card sizing (one-time per page)
         st.markdown(
             f"""
@@ -1060,7 +1208,7 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False, ca
         # Build photo HTML (cloud first, fallback to local/placeholder)
         photo_html = ""
         photo_loaded = False
-        
+
         if poi.get("primary_photo"):
             try:
                 photo_path = poi["primary_photo"]
@@ -1128,12 +1276,14 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False, ca
                 neuron_idx = feat.get("idx")
                 feature_label = feat.get("label") or f"Feature {neuron_idx}"
                 activation = feat.get("activation")
-                
+
                 if activation is not None:
-                    formatted_feature = format_feature_id(neuron_idx, feature_label, activation)
+                    formatted_feature = format_feature_id(
+                        neuron_idx, feature_label, activation
+                    )
                 else:
                     formatted_feature = format_feature_id(neuron_idx, feature_label)
-                
+
                 content_parts.append(f"<div>🧠 Why: {formatted_feature}</div>")
 
         # Score
@@ -1141,7 +1291,7 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False, ca
             content_parts.append(f"<div>Score: {recommendation['score']:.3f}</div>")
 
         content_html = "".join(content_parts)
-        
+
         # Yelp link (for footer, separate from scrollable content)
         url = poi.get("url", "")
         footer_html = ""
@@ -1149,7 +1299,7 @@ def draw_poi_card(poi: Dict, recommendation: Dict, show_scores: bool = False, ca
             footer_html = f'<a href="{url}" target="_blank">View on Yelp →</a>'
 
         # Build complete card as HTML
-        business_name = poi.get('name', 'Unknown')
+        business_name = poi.get("name", "Unknown")
         card_html = f"""
         <div class="poi-card-wrapper">
             <div class="poi-card-header">
