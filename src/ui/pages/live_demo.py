@@ -26,6 +26,460 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+@st.fragment
+@st.fragment
+def _render_active_features_section(
+    selected_user: str,
+    inference,
+) -> List[Dict]:
+    """Isolated active features display fragment.
+
+    Returns ALL activations (unfiltered).
+    Only displays top num_features in the chart.
+    Reads num_features from session_state - not a parameter, so doesn't rerun on change.
+    """
+    info_section(
+        "🧠 Your Active Features",
+        "Shows the top active features for this user based on their interaction history. "
+        "Higher activation means this feature is more relevant to their preferences.",
+    )
+
+    try:
+        user_z = inference.user_latents[selected_user]
+        # Get ALL activations (large number to avoid filtering side effects)
+        all_activations = inference.get_top_activations(user_z, k=64)
+
+        # Display only top num_features (read from session_state, doesn't trigger rerun)
+        num_features = st.session_state.get("display_num_features", 9)
+        if all_activations:
+            plot_feature_activations(all_activations[:num_features])
+        else:
+            st.info("No active features found")
+
+        # Return ALL activations for steering (not filtered by num_features)
+        return all_activations
+
+    except Exception as e:
+        st.error(f"Failed to get activations: {e}")
+        logger.exception("Activation retrieval failed")
+        return []
+
+
+@st.fragment
+def _render_steering_and_recommendations(
+    selected_user: str,
+    inference,
+    data,
+    activations: List[Dict],
+) -> None:
+    """Isolated steering controls & recommendations fragment.
+
+    Only reruns when steering sliders change.
+    Computes recommendations ONLY on steering change, then caches them.
+    All other parameter changes (num_features, num_recommendations) use cached results.
+    """
+    info_section(
+        "🎚️ Adjust Your Preferences",
+        "Use sliders to steer recommendations by adjusting feature activation. "
+        "Left (-1) = Avoid, Center (0) = No change, Right (+2) = Strongly prefer",
+    )
+
+    if activations and len(activations) > 0:
+        st.markdown(
+            """
+        Adjust feature importance to steer recommendations:
+        - **Left (-1)**: Strongly avoid this feature
+        - **Center (0)**: Use current feature importance
+        - **Right (+2)**: Strongly prefer this feature
+        """
+        )
+
+        steering_updates = {}
+
+        try:
+            current_activations = inference.get_user_steering(selected_user)
+        except ValueError as e:
+            logger.warning(f"Could not get current activations: {e}")
+            current_activations = {}
+
+        # Display sliders for top num_features only (read from session_state, doesn't trigger rerun)
+        num_features_to_display = st.session_state.get("display_num_features", 9)
+        top_features = activations[:num_features_to_display]
+        cols_per_row = 3
+
+        for row_idx in range(0, len(top_features), cols_per_row):
+            cols = st.columns(cols_per_row)
+
+            for col_idx, col in enumerate(cols):
+                feature_idx = row_idx + col_idx
+
+                if feature_idx < len(top_features):
+                    feature = top_features[feature_idx]
+                    neuron_idx = feature["neuron_idx"]
+                    label = feature["label"]
+
+                    current_val = current_activations.get(neuron_idx, 0.5)
+
+                    with col:
+                        formatted_label = format_feature_id(neuron_idx, label)
+
+                        steering_value = st.slider(
+                            f"{formatted_label}",
+                            min_value=-1.0,
+                            max_value=2.0,
+                            value=0.0,
+                            step=0.1,
+                            key=f"slider_{neuron_idx}_{selected_user}",
+                        )
+
+                        if steering_value != 0.0:
+                            try:
+                                steered_activation = (
+                                    inference.get_steered_neuron_activation(
+                                        selected_user, neuron_idx, steering_value
+                                    )
+                                )
+                                st.caption(
+                                    f"📊 Current: {current_val:.2f} → After steering: {steered_activation:.2f}"
+                                )
+                                steering_updates[neuron_idx] = steering_value
+                            except Exception as e:
+                                logger.debug(
+                                    f"Could not compute steered activation: {e}"
+                                )
+                                st.caption(
+                                    f"📊 Current: {current_val:.2f} → Steered to: {steering_value:.2f}"
+                                )
+                                steering_updates[neuron_idx] = steering_value
+                        else:
+                            st.caption(f"📊 Current: {current_val:.2f}")
+
+        st.divider()
+
+        if steering_updates:
+            try:
+                st.subheader("📊 Features: Original vs After Steering")
+                original_activations = inference.get_user_steering(selected_user)
+                original_features = [
+                    {
+                        **feat,
+                        "activation": original_activations.get(feat["neuron_idx"], 0.0),
+                    }
+                    for feat in top_features
+                ]
+                steered_activations = inference.get_steered_activations(
+                    selected_user, steering_updates, k=len(top_features)
+                )
+                if steered_activations:
+                    plot_feature_activations(
+                        steered_activations, original_activations=original_features
+                    )
+            except Exception as e:
+                logger.debug(f"Could not compute steered activations chart: {e}")
+
+        # COMPUTE RECOMMENDATIONS - only on steering change or first load
+        try:
+            steering_cache_key = f"steering_{selected_user}"
+            last_steering = st.session_state.get(steering_cache_key, {})
+            steering_changed = steering_updates != last_steering
+
+            reco_cache_key = f"recommendations_all_{selected_user}"
+
+            if steering_changed or reco_cache_key not in st.session_state:
+                logger.info(
+                    "Computing recommendations (steering changed or first load)"
+                )
+
+                if selected_user not in inference.baseline_recommendations:
+                    logger.debug(f"Computing baseline for {selected_user}")
+                    inference.get_baseline_recommendations(selected_user, 50)
+
+                steering_config = None
+                if steering_updates:
+                    st.info(f"🎨 Steering applied: {len(steering_updates)} features")
+                    steering_config = {
+                        "type": "neuron",
+                        "neuron_values": steering_updates,
+                        "alpha": 0.3,
+                    }
+
+                logger.info(f"Fetching recommendations for {selected_user}")
+
+                # Get valid item IDs from data service (filtered by current state)
+                valid_item_ids = data.get_valid_item_ids()
+                logger.info(
+                    f"State filtering: {len(valid_item_ids)} valid items available"
+                )
+
+                # Request top_k recommendations with state filter applied
+                # Inference service handles filtering internally
+                recommendations_with_delta = inference.get_recommendations_with_delta(
+                    selected_user,
+                    steering_config=steering_config,
+                    top_k=20,
+                    valid_item_ids=valid_item_ids,
+                )
+                logger.info(
+                    f"Inference returned {len(recommendations_with_delta)} recommendations"
+                )
+
+                # Pre-filter ALL valid recommendations (one-time DB lookups)
+                valid_recommendations = []
+                for original_idx, reco in enumerate(recommendations_with_delta):
+                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
+                    poi_details = data.get_poi_details(poi_idx)
+                    if poi_details:
+                        valid_recommendations.append(reco)
+                        logger.debug(
+                            f"  ✅ Valid reco #{len(valid_recommendations)}: original_idx={original_idx}, poi_idx={poi_idx} → {poi_details.get('name', 'Unknown')}"
+                        )
+                    else:
+                        logger.debug(
+                            f"Not valid: original_idx={original_idx}, poi_idx={poi_idx}"
+                        )
+
+                # Cache ALL valid recommendations
+                st.session_state[reco_cache_key] = valid_recommendations
+                st.session_state[steering_cache_key] = steering_updates
+
+                logger.info(
+                    f"Filtering results: {len(recommendations_with_delta)} total → {len(recommendations_with_delta) - len(valid_recommendations)} filtered out → {len(valid_recommendations)} valid (cached)"
+                )
+            else:
+                logger.debug("Using cached recommendations (steering unchanged)")
+
+            # Update session state with cached recommendations
+            reco_cache = st.session_state.get(reco_cache_key, [])
+            st.session_state.current_recommendations = reco_cache
+            st.session_state.steering_modified = len(steering_updates) > 0
+
+        except Exception as e:
+            st.error(f"Failed to generate recommendations: {e}")
+            logger.exception("Recommendation generation failed")
+            return
+
+    else:
+        st.info("No active features to steer")
+
+
+@st.fragment
+def _render_poi_cards_section(
+    data,
+    available_width: int,
+    card_width_px: int,
+    show_scores: bool,
+    photo_height_px: int,
+) -> None:
+    """Isolated POI cards display fragment.
+
+    Reruns only when recommendations or display settings change.
+    Does not trigger rerun when steering or other factors change.
+    """
+    if st.session_state.get("filtered_recommendations_to_display"):
+        st.subheader("🏆 Recommended for You")
+
+        recommendations_to_display = st.session_state.get(
+            "filtered_recommendations_to_display", []
+        )
+
+        responsive_cards_per_row = max(1, available_width // card_width_px)
+        cols = st.columns(responsive_cards_per_row)
+
+        for display_idx, reco in enumerate(recommendations_to_display):
+            poi_idx = reco.get("item_id") or reco.get("poi_idx")
+            poi_details = data.get_poi_details(poi_idx)
+
+            with cols[display_idx % responsive_cards_per_row]:
+                try:
+                    draw_poi_card(
+                        poi_details,
+                        reco,
+                        show_scores,
+                        card_width_px,
+                        photo_height_px,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        f"POI card error for {poi_details.get('name', 'Unknown')}: {e}"
+                    )
+                    continue
+
+
+@st.fragment
+def _render_history_section(
+    selected_user: str,
+    data,
+    inference,
+    available_width: int,
+    card_width_px: int,
+    photo_height_px: int,
+) -> None:
+    """Isolated history display fragment.
+
+    Reruns only when display settings or history cache changes.
+    Uses cached POI details - zero DB lookups on reruns.
+    """
+    st.subheader("📜 Your Past Visits")
+
+    history_cache_key = f"past_visits_{selected_user}"
+    history_pois_cache_key = f"past_visits_pois_{selected_user}"
+
+    # Try to get cached POI details first (zero DB lookups)
+    if history_pois_cache_key in st.session_state:
+        history_pois = st.session_state.get(history_pois_cache_key, [])
+        logger.debug(
+            f"✅ Using cached POI details for {len(history_pois)} past visits (zero DB lookups)"
+        )
+    else:
+        # If POI details not cached, fetch from indices (shouldn't happen if map section ran first)
+        history_indices = st.session_state.get(history_cache_key, [])
+        if history_indices:
+            history_pois = [data.get_poi_details(idx) for idx in history_indices]
+            history_pois = [p for p in history_pois if p]
+            logger.debug(
+                f"Loaded {len(history_pois)} valid POI details from {len(history_indices)} indices"
+            )
+        else:
+            history_pois = []
+
+    if history_pois:
+        try:
+            if history_pois:
+                with st.expander(
+                    f"Show {len(history_pois)} past visits", expanded=False
+                ):
+                    hist_cols = st.columns(max(1, available_width // card_width_px))
+                    displayed_count = 0
+
+                    for poi in history_pois:
+                        try:
+                            with hist_cols[displayed_count % len(hist_cols)]:
+                                draw_poi_card(
+                                    poi,
+                                    {},
+                                    show_scores=False,
+                                    card_width_px=card_width_px,
+                                    photo_height_px=photo_height_px,
+                                )
+                                displayed_count += 1
+                        except Exception as e:
+                            logger.exception(
+                                f"History POI card error for {poi.get('name', 'Unknown')}: {e}"
+                            )
+                            continue
+            else:
+                st.info("No valid past visits found")
+        except Exception as e:
+            st.error(f"❌ Error displaying past visits: {e}")
+            logger.exception(f"Past visits display error: {e}")
+
+
+@st.fragment
+def _render_map_section(
+    selected_user: str,
+    data,
+    inference,
+) -> None:
+    """Isolated map rendering fragment - reruns independently without affecting page.
+
+    This fragment is separate from the main page so that map interactions
+    (panning, zooming, clicking markers) don't trigger a full page rerun.
+    Assumes filtered_recommendations_to_display is already in session_state (pre-filtered by steering fragment).
+    Reads show_history from session_state to avoid reruns on sidebar changes.
+    The st_folium key is computed to include the POI count, so:
+    - Panning the map doesn't rebuild it (key unchanged)
+    - Changing num_recommendations creates new map instance (key changed)
+    """
+    # Read from session_state so sidebar changes don't trigger map rerun
+    show_history = st.session_state.get("show_history_checkbox", False)
+    if st.session_state.get("current_recommendations"):
+        info_section(
+            "📍 Recommended Locations",
+            "Interactive map showing recommended POI locations (colored markers). "
+            "Each marker represents a place based on your interests.",
+        )
+
+        if HAS_FOLIUM:
+            try:
+                # STEP 1: Check if we need to load past visits
+                past_visits_for_map = None
+                history_cache_key = f"past_visits_{selected_user}"
+                history_pois_cache_key = f"past_visits_pois_{selected_user}"
+
+                if show_history:
+                    if history_pois_cache_key in st.session_state:
+                        past_visits_for_map = st.session_state.get(
+                            history_pois_cache_key
+                        )
+                        logger.debug(
+                            f"✅ Using cached POI details for {len(past_visits_for_map)} past visits (instant, no DB lookups)"
+                        )
+                    else:
+                        logger.info(
+                            f"Past visits checkbox is ON but not cached - loading now..."
+                        )
+                        try:
+                            past_visits_indices = inference.get_user_history(
+                                selected_user
+                            )
+                            logger.info(
+                                f"  → Fetching POI details for {len(past_visits_indices)} past visits..."
+                            )
+
+                            past_visits_pois = [
+                                data.get_poi_details(idx) for idx in past_visits_indices
+                            ]
+                            past_visits_pois = [
+                                p
+                                for p in past_visits_pois
+                                if p and p.get("lat") and p.get("lon")
+                            ]
+
+                            st.session_state[history_cache_key] = past_visits_indices
+                            st.session_state[history_pois_cache_key] = past_visits_pois
+                            past_visits_for_map = past_visits_pois
+
+                            logger.info(
+                                f"✅ Loaded and cached {len(past_visits_pois)}/{len(past_visits_indices)} valid past visits (POI details cached for instant map rendering)"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Could not load past visits: {e}")
+
+                # STEP 2: Build the map using already-filtered recommendations
+                # Use filtered_recommendations_to_display (pre-filtered by steering fragment)
+                map_obj = build_folium_map(
+                    st.session_state.get("filtered_recommendations_to_display", []),
+                    data,
+                    past_visits=past_visits_for_map,
+                )
+                if map_obj is None:
+                    st.warning(
+                        "⚠️ Could not load map. Check that recommendations have valid locations in the database."
+                    )
+                    logger.warning(
+                        "Map object returned None - recommendations may lack coordinates"
+                    )
+                else:
+                    # Key includes POI count so changing num_recommendations creates new map
+                    # But panning same map doesn't trigger rebuild
+                    poi_count = len(
+                        st.session_state.get("filtered_recommendations_to_display", [])
+                    )
+                    st_folium(
+                        map_obj,
+                        width=None,
+                        height=500,
+                        key=f"folium_{selected_user}_{show_history}_{poi_count}",
+                    )
+            except Exception as e:
+                st.error(f"❌ Map rendering failed: {e}")
+                logger.exception(f"Folium map error: {e}")
+        else:
+            st.info(
+                "📦 Install streamlit-folium for map visualization: `pip install streamlit-folium`"
+            )
+
+
 def show():
     """Display live demo page with interactive steering."""
 
@@ -151,22 +605,18 @@ def show():
         num_features = st.slider("Features to display", 5, 64, 9)
         num_recommendations = st.slider("Recommendations", 5, 50, 20)
 
+        # Store in session_state so fragments can read without rerunning
+        st.session_state.display_num_features = num_features
+        st.session_state.display_num_recommendations = num_recommendations
+
         st.divider()
 
         # Actions
-        reset_cols = st.columns(2)
-        with reset_cols[0]:
-            if st.button("🔄 Reset Steering", use_container_width=True):
-                st.session_state.steering_modified = False
-                st.session_state.current_recommendations = []
-                st.session_state.baseline_recommendations = None
-                st.rerun()
-
-        with reset_cols[1]:
-            if st.button("🔄 Reload Users", use_container_width=True):
-                st.session_state.pop("cached_test_users", None)
-                logger.info("Cleared cached test users")
-                st.rerun()
+        if st.button("🔄 Reset Steering", use_container_width=True):
+            st.session_state.steering_modified = False
+            st.session_state.current_recommendations = []
+            st.session_state.baseline_recommendations = None
+            st.rerun()
 
     # =====================================================================
     # MAIN AREA
@@ -291,419 +741,66 @@ def show():
                 return
 
         # ===================================================================
-        # Section 1: Active Features
+        # Section 1: Active Features (isolated fragment)
         # ===================================================================
-
         if show_latent:
-            info_section(
-                "🧠 Your Active Features",
-                "Shows the top active features for this user based on their interaction history. "
-                "Higher activation means this feature is more relevant to their preferences.",
+            activations = _render_active_features_section(
+                selected_user=selected_user,
+                inference=inference,
             )
-
-            try:
-                # Get top activations
-                user_z = inference.user_latents[selected_user]
-                activations = inference.get_top_activations(user_z, k=num_features)
-
-                if activations:
-                    # Plot feature bars
-                    plot_feature_activations(activations)
-                else:
-                    st.info("No active features found")
-
-            except Exception as e:
-                st.error(f"Failed to get activations: {e}")
-                logger.exception("Activation retrieval failed")
-                activations = []
         else:
             activations = []
 
         # ===================================================================
-        # Section 2: Steering Sliders
+        # Section 2: Steering Sliders & Recommendations (isolated fragment)
         # ===================================================================
-
-        info_section(
-            "🎚️ Adjust Your Preferences",
-            "Use sliders to steer recommendations by adjusting feature activation. "
-            "Left (-1) = Avoid, Center (0) = No change, Right (+2) = Strongly prefer",
+        _render_steering_and_recommendations(
+            selected_user=selected_user,
+            inference=inference,
+            data=data,
+            activations=activations,
         )
 
-        if activations and len(activations) > 0:
-            st.markdown(
-                """
-            Adjust feature importance to steer recommendations:
-            - **Left (-1)**: Strongly avoid this feature
-            - **Center (0)**: Use current feature importance
-            - **Right (+2)**: Strongly prefer this feature
-            """
-            )
+        # Now slice cached recommendations for display
+        all_recommendations = st.session_state.get(
+            "recommendations_all_{0}".format(selected_user), []
+        )
+        filtered_recommendations = all_recommendations[:num_recommendations]
+        st.session_state[
+            "filtered_recommendations_to_display"
+        ] = filtered_recommendations
 
-            # Create sliders in columns
-            steering_updates = {}
-
-            # Get current activation values for all neurons
-            try:
-                current_activations = inference.get_user_steering(selected_user)
-            except ValueError as e:
-                logger.warning(f"Could not get current activations: {e}")
-                current_activations = {}
-
-            # Show sliders for top features (no cap - display all requested)
-            top_features = activations[:num_features]
-
-            # Create 3-column layout for sliders
-            cols_per_row = 3
-
-            for row_idx in range(0, len(top_features), cols_per_row):
-                cols = st.columns(cols_per_row)
-
-                for col_idx, col in enumerate(cols):
-                    feature_idx = row_idx + col_idx
-
-                    if feature_idx < len(top_features):
-                        feature = top_features[feature_idx]
-                        neuron_idx = feature["neuron_idx"]
-                        label = feature["label"]
-
-                        # Get current activation value for this neuron (0.0 if not found)
-                        current_val = current_activations.get(neuron_idx, 0.5)
-
-                        with col:
-                            # Format slider label with feature # and label
-                            formatted_label = format_feature_id(neuron_idx, label)
-
-                            # Slider for steering adjustment (-1 to +2, default to 0 = no steering)
-                            steering_value = st.slider(
-                                f"{formatted_label}",
-                                min_value=-1.0,
-                                max_value=2.0,
-                                value=0.0,  # ← Default to 0 (NO steering)
-                                step=0.1,
-                                key=f"slider_{neuron_idx}_{selected_user}",
-                            )
-
-                            # Display current activation and after-steering on same line
-                            if steering_value != 0.0:
-                                try:
-                                    steered_activation = (
-                                        inference.get_steered_neuron_activation(
-                                            selected_user, neuron_idx, steering_value
-                                        )
-                                    )
-                                    st.caption(
-                                        f"📊 Current: {current_val:.2f} → After steering: {steered_activation:.2f}"
-                                    )
-                                    steering_updates[neuron_idx] = steering_value
-                                except Exception as e:
-                                    logger.debug(
-                                        f"Could not compute steered activation: {e}"
-                                    )
-                                    st.caption(
-                                        f"📊 Current: {current_val:.2f} → Steered to: {steering_value:.2f}"
-                                    )
-                                    steering_updates[neuron_idx] = steering_value
-                            else:
-                                st.caption(f"📊 Current: {current_val:.2f}")
-
-            st.divider()
-
-            # Display combined chart: original (greyed) + steered activations if steering is applied
-            if steering_updates:
-                try:
-                    st.subheader("📊 Features: Original vs After Steering")
-                    # Get original activations for comparison
-                    original_activations = inference.get_user_steering(selected_user)
-                    original_features = [
-                        {
-                            **feat,
-                            "activation": original_activations.get(
-                                feat["neuron_idx"], 0.0
-                            ),
-                        }
-                        for feat in top_features[:num_features]
-                    ]
-                    steered_activations = inference.get_steered_activations(
-                        selected_user, steering_updates, k=num_features
-                    )
-                    if steered_activations:
-                        plot_feature_activations(
-                            steered_activations, original_activations=original_features
-                        )
-                except Exception as e:
-                    logger.debug(f"Could not compute steered activations chart: {e}")
-
-            # Generate recommendations with steering
-            try:
-                # Get baseline recommendations if not already computed
-                if selected_user not in inference.baseline_recommendations:
-                    logger.debug(f"Computing baseline for {selected_user}")
-                    inference.get_baseline_recommendations(
-                        selected_user, num_recommendations
-                    )
-
-                # Prepare steering config
-                steering_config = None
-                if steering_updates:
-                    st.info(f"🎨 Steering applied: {len(steering_updates)} features")
-                    steering_config = {
-                        "type": "neuron",
-                        "neuron_values": steering_updates,
-                        "alpha": 0.3,  # Default interpolation strength
-                    }
-
-                # Get recommendations with position deltas
-                # Request extra recommendations to account for filtered/invalid POIs
-                # Request significantly more to ensure we get num_recommendations after filtering
-                buffer_factor = 2.0  # Request 2x to account for 10-15% failure rate
-                recommendations_with_delta = inference.get_recommendations_with_delta(
-                    selected_user,
-                    steering_config=steering_config,
-                    top_k=int(num_recommendations * buffer_factor),
-                )
-
-                logger.info(
-                    f"Requested {int(num_recommendations * buffer_factor)} recommendations with {buffer_factor}x buffer, got {len(recommendations_with_delta)} items"
-                )
-
-                st.session_state.current_recommendations = recommendations_with_delta
-                st.session_state.steering_modified = len(steering_updates) > 0
-
-                # ===================================================================
-                # PRE-FILTER: Validate and cap recommendations early (for map + POI cards)
-                # ===================================================================
-                # Filter to only valid POIs first
-                valid_recommendations = []
-                for reco in recommendations_with_delta:
-                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
-                    poi_details = data.get_poi_details(poi_idx)
-                    if poi_details:
-                        valid_recommendations.append(reco)
-                    else:
-                        logger.debug(
-                            f"Pre-filter: Filtered out invalid POI at index {poi_idx}"
-                        )
-
-                # Cap to exactly num_recommendations
-                filtered_and_capped = valid_recommendations[:num_recommendations]
-                st.session_state[
-                    "filtered_recommendations_to_display"
-                ] = filtered_and_capped
-                logger.info(
-                    f"Pre-filter: {len(recommendations_with_delta)} loaded → {len(valid_recommendations)} valid → {len(filtered_and_capped)} capped to display"
-                )
-
-            except Exception as e:
-                st.error(f"Failed to generate recommendations: {e}")
-                logger.exception("Recommendation generation failed")
-                return
-
-        else:
-            st.info("No active features to steer")
-
-        # ===================================================================
         # Section 3: Map Visualization (ALWAYS renders instantly with recommendations)
         # ===================================================================
-
-        if st.session_state.get("current_recommendations"):
-            info_section(
-                "📍 Recommended Locations",
-                "Interactive map showing recommended POI locations (colored markers). "
-                "Each marker represents a place based on your interests.",
-            )
-
-            # PRE-FILTER: Ensure recommendations are filtered and capped
-            # (This runs every time to handle cached recommendations from previous runs)
-            if not st.session_state.get("filtered_recommendations_to_display"):
-                all_recommendations = st.session_state.current_recommendations
-                valid_recommendations = []
-                for reco in all_recommendations:
-                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
-                    poi_details = data.get_poi_details(poi_idx)
-                    if poi_details:
-                        valid_recommendations.append(reco)
-
-                filtered_and_capped = valid_recommendations[:num_recommendations]
-                st.session_state[
-                    "filtered_recommendations_to_display"
-                ] = filtered_and_capped
-                logger.info(
-                    f"Late-filter (on rerun): {len(all_recommendations)} loaded → {len(valid_recommendations)} valid → {len(filtered_and_capped)} capped"
-                )
-
-            if HAS_FOLIUM:
-                try:
-                    # STEP 1: Check if we need to load past visits
-                    past_visits_for_map = None
-                    history_cache_key = f"past_visits_{selected_user}"
-                    history_pois_cache_key = f"past_visits_pois_{selected_user}"
-
-                    if show_history:
-                        # Check if we have past visits POI details cached (not just indices)
-                        if history_pois_cache_key in st.session_state:
-                            # Use cached POI details - no database lookups needed!
-                            past_visits_for_map = st.session_state.get(
-                                history_pois_cache_key
-                            )
-                            logger.debug(
-                                f"✅ Using cached POI details for {len(past_visits_for_map)} past visits (instant, no DB lookups)"
-                            )
-                        else:
-                            # Load them now (first time checkbox is enabled)
-                            logger.info(
-                                f"Past visits checkbox is ON but not cached - loading now..."
-                            )
-                            try:
-                                past_visits_indices = inference.get_user_history(
-                                    selected_user
-                                )
-                                logger.info(
-                                    f"  → Fetching POI details for {len(past_visits_indices)} past visits..."
-                                )
-
-                                # IMPORTANT: Cache the POI details, not just indices
-                                # This way the map renders instantly next time (no DB lookups)
-                                past_visits_pois = [
-                                    data.get_poi_details(idx)
-                                    for idx in past_visits_indices
-                                ]
-                                past_visits_pois = [
-                                    p
-                                    for p in past_visits_pois
-                                    if p and p.get("lat") and p.get("lon")
-                                ]
-
-                                # Cache BOTH for reference
-                                st.session_state[
-                                    history_cache_key
-                                ] = past_visits_indices
-                                st.session_state[
-                                    history_pois_cache_key
-                                ] = past_visits_pois
-                                past_visits_for_map = past_visits_pois
-
-                                logger.info(
-                                    f"✅ Loaded and cached {len(past_visits_pois)}/{len(past_visits_indices)} valid past visits (POI details cached for instant map rendering)"
-                                )
-                            except Exception as e:
-                                logger.warning(f"Could not load past visits: {e}")
-
-                    # STEP 2: Build the map (with or without past visits)
-                    # Use the same capped and filtered recommendations that POI cards will use
-                    map_obj = build_folium_map(
-                        st.session_state.get("filtered_recommendations_to_display", []),
-                        data,
-                        past_visits=past_visits_for_map,
-                    )
-                    if map_obj is None:
-                        st.warning(
-                            "⚠️ Could not load map. Check that recommendations have valid locations in the database."
-                        )
-                        logger.warning(
-                            "Map object returned None - recommendations may lack coordinates"
-                        )
-                    else:
-                        st_folium(
-                            map_obj,
-                            width=None,
-                            height=500,
-                            key=f"folium_{selected_user}_{show_history}",
-                        )
-                except Exception as e:
-                    st.error(f"❌ Map rendering failed: {e}")
-                    logger.exception(f"Folium map error: {e}")
-            else:
-                st.info(
-                    "📦 Install streamlit-folium for map visualization: `pip install streamlit-folium`"
-                )
+        _render_map_section(
+            selected_user=selected_user,
+            data=data,
+            inference=inference,
+        )
 
         # ===================================================================
         # Section 4: POI Cards (Recommendations)
-
-        if st.session_state.get("filtered_recommendations_to_display"):
-            st.subheader("🏆 Recommended for You")
-
-            # Use pre-filtered and capped recommendations (filtered before map rendering)
-            recommendations_to_display = st.session_state.get(
-                "filtered_recommendations_to_display", []
-            )
-
-            # Display POI cards with responsive layout
-            # Calculate cards per row based on user's card width preference
-            responsive_cards_per_row = max(1, available_width // card_width_px)
-            cols = st.columns(responsive_cards_per_row)
-
-            for display_idx, reco in enumerate(recommendations_to_display):
-                poi_idx = reco.get("item_id") or reco.get("poi_idx")
-                poi_details = data.get_poi_details(poi_idx)
-
-                with cols[display_idx % responsive_cards_per_row]:
-                    try:
-                        draw_poi_card(
-                            poi_details,
-                            reco,
-                            show_scores,
-                            card_width_px,
-                            photo_height_px,
-                        )
-                    except Exception as e:
-                        logger.exception(
-                            f"POI card error for {poi_details.get('name', 'Unknown')}: {e}"
-                        )
-                        # Skip this POI and continue to next
-                        continue
+        # ===================================================================
+        _render_poi_cards_section(
+            data=data,
+            available_width=available_width,
+            card_width_px=card_width_px,
+            show_scores=show_scores,
+            photo_height_px=photo_height_px,
+        )
 
         # ===================================================================
         # Section 5: User History Display (uses cached data from pre-load)
         # ===================================================================
-
         if show_history:
-            st.subheader("📜 Your Past Visits")
-
-            # Use cached data (loaded earlier)
-            history_cache_key = f"past_visits_{selected_user}"
-            history_indices = st.session_state.get(history_cache_key, [])
-
-            if history_indices:
-                try:
-                    history_pois = [
-                        data.get_poi_details(idx) for idx in history_indices
-                    ]
-                    history_pois = [p for p in history_pois if p]
-                    logger.debug(
-                        f"Loaded {len(history_pois)} valid POI details from {len(history_indices)} indices"
-                    )
-
-                    if history_pois:
-                        with st.expander(
-                            f"Show {len(history_pois)} past visits", expanded=False
-                        ):
-                            hist_cols = st.columns(
-                                max(1, available_width // card_width_px)
-                            )
-                            displayed_count = 0
-
-                            for poi in history_pois:
-                                try:
-                                    with hist_cols[displayed_count % len(hist_cols)]:
-                                        draw_poi_card(
-                                            poi,
-                                            {},
-                                            show_scores=False,
-                                            card_width_px=card_width_px,
-                                            photo_height_px=photo_height_px,
-                                        )
-                                        displayed_count += 1
-                                except Exception as e:
-                                    logger.exception(
-                                        f"History POI card error for {poi.get('name', 'Unknown')}: {e}"
-                                    )
-                                    continue
-                    else:
-                        st.info("No valid past visits found")
-                except Exception as e:
-                    st.error(f"❌ Error displaying past visits: {e}")
-                    logger.exception(f"Past visits display error: {e}")
+            _render_history_section(
+                selected_user=selected_user,
+                data=data,
+                inference=inference,
+                available_width=available_width,
+                card_width_px=card_width_px,
+                photo_height_px=photo_height_px,
+            )
 
 
 # =============================================================================

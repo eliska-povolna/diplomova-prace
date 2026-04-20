@@ -766,6 +766,7 @@ class InferenceService:
         user_id: str,
         steering_config: Optional[Dict] = None,
         top_k: int = 20,
+        valid_item_ids: Optional[set] = None,
     ) -> List[Dict]:
         """
         Get recommendations with position deltas after steering.
@@ -790,6 +791,8 @@ class InferenceService:
                 - concept_vector: tensor for concept steering
                 - alpha: interpolation strength (default 0.3)
             top_k: Number of recommendations to return
+            valid_item_ids: Optional set of valid item indices. If provided, only
+                           recommend items in this set (e.g., items in filtered state).
 
         Returns:
             List of recommendation dicts with position deltas
@@ -799,7 +802,7 @@ class InferenceService:
                 f"User {user_id} not encoded yet. Call encode_user() first."
             )
 
-        # Get or create baseline
+        # Get or create baseline (always use top_k for baseline)
         cache_key = (user_id, top_k)
         if cache_key not in self.baseline_recommendations:
             self.get_baseline_recommendations(user_id, top_k)
@@ -818,17 +821,32 @@ class InferenceService:
 
         with torch.no_grad():
             scores = z_final @ self.elsa._A_norm.T
-            top_scores, top_indices = torch.topk(scores, k=min(top_k, scores.shape[0]))
+            # When filtering is active, fetch more to ensure we get enough valid items
+            # Use a heuristic: if filtering, assume ~70% will be valid, so fetch ~1.5x
+            fetch_size = int(top_k * 1.5) if valid_item_ids else top_k
+            top_scores, top_indices = torch.topk(
+                scores, k=min(fetch_size, scores.shape[0])
+            )
 
             # Get SAE activations for attribution
             h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze(0)
 
-        # Build recommendations with deltas
+        # Build recommendations with deltas, filtering as we go
         recommendations = []
+        rank_counter = 0  # Track filtered rank position
 
-        for rank_after, (score, item_id) in enumerate(zip(top_scores, top_indices)):
+        for original_rank, (score, item_id) in enumerate(zip(top_scores, top_indices)):
             item_id = int(item_id.item())
+
+            # Apply state filter if provided
+            if valid_item_ids and item_id not in valid_item_ids:
+                continue
+
             score = float(score.item())
+
+            # Use filtered rank (not original rank) for position_delta
+            rank_after = rank_counter
+            rank_counter += 1
 
             # Get baseline rank (if not in baseline, assign penalty)
             rank_before = baseline.get(item_id, top_k + 10)
@@ -862,6 +880,10 @@ class InferenceService:
                     "contributing_neurons": contributing_neurons,
                 }
             )
+
+            # Stop once we have top_k valid recommendations
+            if len(recommendations) >= top_k:
+                break
 
         logger.debug(
             f"Generated {len(recommendations)} recommendations with deltas for {user_id}"

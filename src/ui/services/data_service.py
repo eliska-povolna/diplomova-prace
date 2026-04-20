@@ -683,41 +683,37 @@ class DataService:
         business_id, row = self._resolve_business_and_row(poi_idx)
         if row is None:
             # Expected when POI is outside filtered region or doesn't exist in map
-            logger.debug(f"POI index {poi_idx} not available (outside filtered data)")
+            logger.warning(f"  🚫 POI {poi_idx}: NOT AVAILABLE (outside filtered data)")
             return {}
 
         # Validate required fields to skip invalid POI data
         try:
             name = str(row.get("name", "")).strip()
             if not name or name.lower() == "unnamed":
-                logger.debug(f"POI index {poi_idx} has no valid name, skipping")
+                logger.warning(f"  🚫 POI {poi_idx}: NO VALID NAME (got '{name}')")
                 return {}
 
             # Validate coordinates are reasonable
             lat = float(row.get("latitude", 0))
             lon = float(row.get("longitude", 0))
             if lat == 0 and lon == 0:
-                logger.debug(
-                    f"POI index {poi_idx} ({name}) has invalid coordinates (0,0), skipping"
-                )
+                logger.warning(f"  🚫 POI {poi_idx} ({name}): INVALID COORDINATES (0,0)")
                 return {}
 
             # Validate basic numeric fields
             rating = float(row.get("stars", 0))
             if rating < 0 or rating > 5:
-                logger.debug(
-                    f"POI index {poi_idx} ({name}) has invalid rating {rating}, skipping"
-                )
+                logger.warning(f"  🚫 POI {poi_idx} ({name}): INVALID RATING {rating}")
                 return {}
 
         except (ValueError, TypeError) as e:
-            logger.debug(f"POI index {poi_idx} has invalid data: {e}, skipping")
+            logger.warning(f"  🚫 POI {poi_idx}: INVALID DATA - {e}")
             return {}
 
         # Resolve business_id early for use in logging
         resolved_business_id = str(row.get("business_id", business_id or ""))
         if not resolved_business_id:
-            logger.debug(f"POI index {poi_idx} has no business_id, skipping")
+            logger.warning(f"  🚫 POI {poi_idx}: NO BUSINESS_ID")
             return {}
 
         photos = self._get_local_photos_for_business(business_id or "")
@@ -750,6 +746,30 @@ class DataService:
             "primary_photo": photos[0] if photos else None,
             "photo_count": len(photos),
         }
+
+    def get_valid_item_ids(self) -> set:
+        """
+        Get set of valid item indices for current state filter.
+
+        Returns a set of POI indices that exist in the filtered dataset.
+        Used by inference service to filter recommendations to current state.
+
+        Returns:
+            Set of valid POI indices
+        """
+        if not self.state_filter:
+            # No filtering - all items are valid
+            return set(self.index2item.keys())
+
+        # Build set of valid items by checking index2item mapping
+        # (index2item only contains items that exist in filtered state)
+        valid_ids = set(self.index2item.keys())
+
+        logger.info(
+            f"State filter active ({self.state_filter}): {len(valid_ids)} valid items available for recommendations"
+        )
+
+        return valid_ids
 
     def get_pois_batch(self, poi_indices: List[int]) -> List[Dict]:
         """Bulk lookup for multiple POIs. Skips POIs that can't be resolved."""
