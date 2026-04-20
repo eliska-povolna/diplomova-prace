@@ -28,7 +28,7 @@ elsa:
 
 # TopK SAE configuration
 sae:
-  width_ratio: 4                        # hidden_dim = width_ratio * latent_dim
+  width_ratio: 2                        # hidden_dim = width_ratio * latent_dim (reduced from 4 to 2: 1024 neurons instead of 2048)
   k: 32                                 # Sparsity: keep top-k activations
   learning_rate: 0.0003              # 3e-4
   l1_coef: 0.0003                    # 3e-4
@@ -48,3 +48,8 @@ output:
 evaluation:
   k_values: [10, 20, 50]                # Compute metrics @ k
   device: "cuda"                        # or "cpu"
+
+# UI and Interpretability configuration
+ui:
+  semantic_search_threshold: 0.5        # Cosine similarity threshold for semantic search (0.0-1.0)
+  semantic_search_top_k: 10             # Maximum number of results to return

@@ -96,6 +96,8 @@ try:
         load_data_service,
         load_inference_service,
         load_labeling_service,
+        load_semantic_search_model,
+        load_training_results,
         load_wordcloud_service,
     )
 
@@ -121,12 +123,22 @@ try:
     with st.spinner("Initializing co-activation service..."):
         coactivation = load_coactivation_service(config)
 
+    with st.spinner("Loading training results..."):
+        training_results = load_training_results(config)
+
+    with st.spinner("Loading semantic search model..."):
+        semantic_search_model = load_semantic_search_model()
+
     # Store in session for access from pages
     st.session_state.inference = inference
     st.session_state.data = data
     st.session_state.labels = labels
     st.session_state.wordcloud = wordcloud
     st.session_state.coactivation = coactivation
+    st.session_state.training_results = training_results
+    st.session_state.config = (
+        config  # Store config for UI settings (e.g., semantic search threshold)
+    )
 
     logger.info("✅ All services initialized")
 
@@ -162,6 +174,13 @@ pages = [
     st.Page(show_live_demo, title="🎛️ Live Demo"),
     st.Page(show_interpretability, title="🔍 Interpretability"),
 ]
+
+# Store pages in session_state for access from other pages (for st.switch_page)
+st.session_state["_streamlit_pages"] = pages
+st.session_state["_home_page"] = pages[0]
+st.session_state["_results_page"] = pages[1]
+st.session_state["_live_demo_page"] = pages[2]
+st.session_state["_interpretability_page"] = pages[3]
 
 # Navigation
 navigation = st.navigation(pages)

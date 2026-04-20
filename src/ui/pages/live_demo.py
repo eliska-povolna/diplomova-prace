@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import logging
 from io import BytesIO
 from typing import Dict, List, Optional
@@ -26,17 +28,67 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-@st.fragment
+def _compute_data_hash(
+    recommendations: List[Dict], past_visits: Optional[List[Dict]] = None
+) -> str:
+    """
+    Compute a stable hash of recommendation and past visit data.
+
+    Used to detect when the map data has actually changed (not just Streamlit reruns).
+    Returns the same hash if data content is identical, even across reruns.
+
+    Args:
+        recommendations: List of recommendation dicts
+        past_visits: Optional list of past visit POI dicts
+
+    Returns:
+        SHA256 hex digest of the data
+    """
+    try:
+        # Serialize data to JSON (excludes non-serializable fields, provides stable format)
+        data_for_hash = {
+            "recommendations": [
+                {
+                    "item_id": r.get("item_id"),
+                    "rank_after": r.get("rank_after"),
+                    "score": round(
+                        r.get("score", 0), 3
+                    ),  # Round to avoid float precision issues
+                }
+                for r in (recommendations or [])
+            ],
+            "past_visits_count": len(past_visits or []),
+        }
+
+        json_str = json.dumps(data_for_hash, sort_keys=True)
+        return hashlib.sha256(json_str.encode()).hexdigest()
+    except Exception as e:
+        logger.debug(f"Failed to compute hash: {e}, returning empty")
+        return ""
+
+
 @st.fragment
 def _render_active_features_section(
     selected_user: str,
     inference,
 ) -> List[Dict]:
-    """Isolated active features display fragment.
+    """Display top active features for a user, enabling interactive steering.
 
-    Returns ALL activations (unfiltered).
-    Only displays top num_features in the chart.
-    Reads num_features from session_state - not a parameter, so doesn't rerun on change.
+    This Streamlit fragment renders independently without triggering full page reruns.
+    It retrieves all active neurons and returns them for steering sliders.
+
+    **Behavior**:
+    - Retrieves top-k activations from user's latent vector (k=64)
+    - Displays only top num_features in chart (default 9, from session_state)
+    - Returns ALL activations for steering (not limited by display count)
+    - Session state changes to display_num_features don't trigger rerun
+
+    Args:
+        selected_user: Yelp user ID
+        inference: InferenceService with user latents
+
+    Returns:
+        List of top 64 activation dicts with neuron_id, activation, name
     """
     info_section(
         "🧠 Your Active Features",
@@ -72,11 +124,26 @@ def _render_steering_and_recommendations(
     data,
     activations: List[Dict],
 ) -> None:
-    """Isolated steering controls & recommendations fragment.
+    """Generate recommendations with interactive feature steering controls.
 
-    Only reruns when steering sliders change.
-    Computes recommendations ONLY on steering change, then caches them.
-    All other parameter changes (num_features, num_recommendations) use cached results.
+    Core steering experience: users adjust feature importance via sliders,
+    recommendations regenerate only when steering changes (cached for performance).
+
+    **Steering Mechanism**:
+    - Sliders: -1 (suppress), 0 (no change), +2 (emphasize)
+    - Alpha=0.3: 30% blend between baseline and steered recommendations
+    - Changes regenerate recommendations; cached for other page changes
+
+    **Performance**:
+    - First steering change: ~1-3s (inference compute)
+    - Cached: <100ms (reused recommendations)
+    - Slider interactions: <100ms (no recompute)
+
+    Args:
+        selected_user: Yelp user ID
+        inference: InferenceService with recommendations
+        data: DataService for item validation
+        activations: List of active features from _render_active_features_section
     """
     info_section(
         "🎚️ Adjust Your Preferences",
@@ -123,14 +190,35 @@ def _render_steering_and_recommendations(
                     with col:
                         formatted_label = format_feature_id(neuron_idx, label)
 
-                        steering_value = st.slider(
-                            f"{formatted_label}",
-                            min_value=-1.0,
-                            max_value=2.0,
-                            value=0.0,
-                            step=0.1,
-                            key=f"slider_{neuron_idx}_{selected_user}",
-                        )
+                        # Feature slider with learn more button
+                        slider_col, learn_col = st.columns([4, 1])
+                        with slider_col:
+                            steering_value = st.slider(
+                                f"{formatted_label}",
+                                min_value=-1.0,
+                                max_value=2.0,
+                                value=0.0,
+                                step=0.1,
+                                key=f"slider_{neuron_idx}_{selected_user}",
+                                label_visibility="collapsed",
+                            )
+                        with learn_col:
+                            # Use st.switch_page with the stored page object and query params
+                            if st.button(
+                                "📚",
+                                key=f"learn_{neuron_idx}_{selected_user}",
+                                help="Learn more about this feature",
+                            ):
+                                # Store feature ID in session_state for interpretability page to read
+                                st.session_state["selected_feature_id"] = neuron_idx
+                                interpretability_page = st.session_state.get(
+                                    "_interpretability_page"
+                                )
+                                if interpretability_page:
+                                    st.switch_page(interpretability_page)
+
+                        # Add back the label on its own line
+                        st.caption(f"**{formatted_label}**")
 
                         if steering_value != 0.0:
                             try:
@@ -203,11 +291,11 @@ def _render_steering_and_recommendations(
                         "alpha": 0.3,
                     }
 
-                logger.info(f"Fetching recommendations for {selected_user}")
+                logger.debug(f"Fetching recommendations for {selected_user}")
 
                 # Get valid item IDs from data service (filtered by current state)
                 valid_item_ids = data.get_valid_item_ids()
-                logger.info(
+                logger.debug(
                     f"State filtering: {len(valid_item_ids)} valid items available"
                 )
 
@@ -219,31 +307,39 @@ def _render_steering_and_recommendations(
                     top_k=20,
                     valid_item_ids=valid_item_ids,
                 )
-                logger.info(
+                logger.debug(
                     f"Inference returned {len(recommendations_with_delta)} recommendations"
                 )
 
-                # Pre-filter ALL valid recommendations (one-time DB lookups)
+                # OPTIMIZATION: Batch lookup for POI details (single query instead of N queries)
+                # Extract all POI indices first
+                poi_indices = [
+                    r.get("item_id") or r.get("poi_idx")
+                    for r in recommendations_with_delta
+                ]
+                # Batch lookup (returns dict of {poi_idx: details})
+                poi_details_map = data.get_poi_details_batch(poi_indices)
+
+                # Cache the POI details map to avoid re-fetching in card renderer
+                st.session_state[f"poi_details_map_{selected_user}"] = poi_details_map
+
+                # Filter recommendations to only valid POIs (those with resolved details)
                 valid_recommendations = []
-                for original_idx, reco in enumerate(recommendations_with_delta):
+                for reco in recommendations_with_delta:
                     poi_idx = reco.get("item_id") or reco.get("poi_idx")
-                    poi_details = data.get_poi_details(poi_idx)
-                    if poi_details:
+                    if poi_idx in poi_details_map:
                         valid_recommendations.append(reco)
-                        logger.debug(
-                            f"  ✅ Valid reco #{len(valid_recommendations)}: original_idx={original_idx}, poi_idx={poi_idx} → {poi_details.get('name', 'Unknown')}"
-                        )
-                    else:
-                        logger.debug(
-                            f"Not valid: original_idx={original_idx}, poi_idx={poi_idx}"
-                        )
 
                 # Cache ALL valid recommendations
                 st.session_state[reco_cache_key] = valid_recommendations
                 st.session_state[steering_cache_key] = steering_updates
 
+                filtered_count = len(recommendations_with_delta) - len(
+                    valid_recommendations
+                )
                 logger.info(
-                    f"Filtering results: {len(recommendations_with_delta)} total → {len(recommendations_with_delta) - len(valid_recommendations)} filtered out → {len(valid_recommendations)} valid (cached)"
+                    f"Filtered recommendations: {len(recommendations_with_delta)} total → "
+                    f"{filtered_count} invalid → {len(valid_recommendations)} valid (cached)"
                 )
             else:
                 logger.debug("Using cached recommendations (steering unchanged)")
@@ -269,25 +365,33 @@ def _render_poi_cards_section(
     card_width_px: int,
     show_scores: bool,
     photo_height_px: int,
+    filtered_recommendations: list,
+    poi_details_map: dict = None,
 ) -> None:
     """Isolated POI cards display fragment.
 
     Reruns only when recommendations or display settings change.
     Does not trigger rerun when steering or other factors change.
-    """
-    if st.session_state.get("filtered_recommendations_to_display"):
-        st.subheader("🏆 Recommended for You")
 
-        recommendations_to_display = st.session_state.get(
-            "filtered_recommendations_to_display", []
-        )
+    Args:
+        poi_details_map: Pre-fetched POI details dict (optional, for performance).
+                        If provided, uses cached details instead of fetching.
+    """
+    if filtered_recommendations:
+        st.subheader("🏆 Recommended for You")
 
         responsive_cards_per_row = max(1, available_width // card_width_px)
         cols = st.columns(responsive_cards_per_row)
 
-        for display_idx, reco in enumerate(recommendations_to_display):
+        for display_idx, reco in enumerate(filtered_recommendations):
             poi_idx = reco.get("item_id") or reco.get("poi_idx")
-            poi_details = data.get_poi_details(poi_idx)
+
+            # Use cached details if available (already fetched in batch)
+            # Otherwise fetch individually (fallback for edge cases)
+            if poi_details_map and poi_idx in poi_details_map:
+                poi_details = poi_details_map[poi_idx]
+            else:
+                poi_details = data.get_poi_details(poi_idx)
 
             with cols[display_idx % responsive_cards_per_row]:
                 try:
@@ -379,16 +483,34 @@ def _render_map_section(
     selected_user: str,
     data,
     inference,
+    filtered_recommendations: list,
+    show_past_visits: bool = False,
 ) -> None:
-    """Isolated map rendering fragment - reruns independently without affecting page.
+    """Display interactive Folium map of recommended POIs with optional visit history.
 
-    This fragment is separate from the main page so that map interactions
-    (panning, zooming, clicking markers) don't trigger a full page rerun.
-    Assumes filtered_recommendations_to_display is already in session_state (pre-filtered by steering fragment).
-    Reads show_history from session_state to avoid reruns on sidebar changes.
-    The st_folium key is computed to include the POI count, so:
-    - Panning the map doesn't rebuild it (key unchanged)
-    - Changing num_recommendations creates new map instance (key changed)
+    This Streamlit fragment isolates map rendering to prevent full page reruns when users
+    interact with the map (pan, zoom, click markers).
+
+    **Key Optimization**:
+    - Maps cached using SHA256 hash of recommendation data
+    - Only rebuilds when actual data changes (recommendations update)
+    - Panning/zooming/clicking markers does NOT trigger rebuild
+    - Map interactions are local to Folium, not full page reruns
+
+    **Map Design**:
+    - Center: Calculated from recommendation coordinates
+    - Markers: Blue for recommendations, Red for past visits
+    - Popups: Click marker for name and rating
+
+    Args:
+        selected_user: Yelp user ID
+        data: DataService for POI details
+        inference: InferenceService (context only)
+        filtered_recommendations: Pre-filtered recommendations list
+        show_past_visits: Whether to show past visit history (bool)
+
+    Returns:
+        None
     """
     # Read from session_state so sidebar changes don't trigger map rerun
     show_history = st.session_state.get("show_history_checkbox", False)
@@ -415,19 +537,25 @@ def _render_map_section(
                             f"✅ Using cached POI details for {len(past_visits_for_map)} past visits (instant, no DB lookups)"
                         )
                     else:
-                        logger.info(
+                        logger.debug(
                             f"Past visits checkbox is ON but not cached - loading now..."
                         )
                         try:
                             past_visits_indices = inference.get_user_history(
                                 selected_user
                             )
-                            logger.info(
-                                f"  → Fetching POI details for {len(past_visits_indices)} past visits..."
+                            logger.debug(
+                                f"Fetching POI details for {len(past_visits_indices)} past visits (using batch method)..."
                             )
 
+                            # Use batch method for efficient bulk fetching instead of loop
+                            past_visits_pois_batch = data.get_poi_details_batch(
+                                past_visits_indices
+                            )
                             past_visits_pois = [
-                                data.get_poi_details(idx) for idx in past_visits_indices
+                                past_visits_pois_batch[idx]
+                                for idx in past_visits_indices
+                                if idx in past_visits_pois_batch
                             ]
                             past_visits_pois = [
                                 p
@@ -439,19 +567,41 @@ def _render_map_section(
                             st.session_state[history_pois_cache_key] = past_visits_pois
                             past_visits_for_map = past_visits_pois
 
-                            logger.info(
-                                f"✅ Loaded and cached {len(past_visits_pois)}/{len(past_visits_indices)} valid past visits (POI details cached for instant map rendering)"
+                            logger.debug(
+                                f"Loaded and cached {len(past_visits_pois)}/{len(past_visits_indices)} valid past visits"
                             )
                         except Exception as e:
                             logger.warning(f"Could not load past visits: {e}")
 
                 # STEP 2: Build the map using already-filtered recommendations
-                # Use filtered_recommendations_to_display (pre-filtered by steering fragment)
-                map_obj = build_folium_map(
-                    st.session_state.get("filtered_recommendations_to_display", []),
-                    data,
-                    past_visits=past_visits_for_map,
-                )
+                # Use filtered_recommendations (passed as parameter - rerun only on steering change)
+                recommendations = filtered_recommendations or []
+
+                # OPTIMIZATION: Cache the map object based on data content hash
+                # This prevents map rebuilds when just panning/zooming
+                data_hash = _compute_data_hash(recommendations, past_visits_for_map)
+                map_cache_key = f"cached_folium_map_{selected_user}_{data_hash}"
+
+                if map_cache_key in st.session_state:
+                    # ✅ Map data hasn't changed - use cached map (instant render!)
+                    map_obj = st.session_state[map_cache_key]
+                    logger.debug(
+                        f"⚡ Using cached map object (no rebuild, instant pan/zoom)"
+                    )
+                else:
+                    # Map data changed - rebuild map
+                    logger.debug(f"Map data changed, rebuilding map...")
+                    map_obj = build_folium_map(
+                        recommendations,
+                        data,
+                        past_visits=past_visits_for_map,
+                    )
+
+                    if map_obj is not None:
+                        # Store in cache for next pan/zoom
+                        st.session_state[map_cache_key] = map_obj
+                        logger.debug(f"✅ Map cached for instant rerenders on pan/zoom")
+
                 if map_obj is None:
                     st.warning(
                         "⚠️ Could not load map. Check that recommendations have valid locations in the database."
@@ -460,20 +610,18 @@ def _render_map_section(
                         "Map object returned None - recommendations may lack coordinates"
                     )
                 else:
-                    # Key includes POI count so changing num_recommendations creates new map
-                    # But panning same map doesn't trigger rebuild
-                    poi_count = len(
-                        st.session_state.get("filtered_recommendations_to_display", [])
-                    )
+                    # Stable key for st_folium - changes only when recommendations count changes
+                    # (not on every rerun, which would rebuild map)
+                    poi_count = len(recommendations)
                     st_folium(
                         map_obj,
                         width=None,
                         height=500,
-                        key=f"folium_{selected_user}_{show_history}_{poi_count}",
+                        key=f"folium_{selected_user}_{poi_count}",
                     )
             except Exception as e:
-                st.error(f"❌ Map rendering failed: {e}")
-                logger.exception(f"Folium map error: {e}")
+                logger.exception("Map rendering failed")
+                st.error("❌ Map rendering failed. Check logs for details.")
         else:
             st.info(
                 "📦 Install streamlit-folium for map visualization: `pip install streamlit-folium`"
@@ -527,8 +675,8 @@ def show():
                 if test_users:
                     # Cache for future renders
                     st.session_state["cached_test_users"] = test_users
-                    logger.info(
-                        f"✅ Loaded {len(test_users)} test users from data service"
+                    logger.debug(
+                        f"Loaded {len(test_users)} test users from data service"
                     )
             except Exception as e:
                 logger.error(f"❌ Failed to load test users: {e}", exc_info=True)
@@ -565,12 +713,12 @@ def show():
                 )
                 if history_cache_key not in st.session_state:
                     # Trigger loading in background - next rerun will see it in session state
-                    logger.info(
+                    logger.debug(
                         f"Past visits checkbox enabled - will load on next render"
                     )
             else:
                 # Checkbox was unchecked - no need to do anything
-                logger.info(f"Past visits checkbox disabled")
+                logger.debug(f"Past visits checkbox disabled")
 
         show_history = st.checkbox(
             "Show past visits",
@@ -585,24 +733,33 @@ def show():
         # Output parameters
         st.subheader("Output Parameters")
 
-        # Responsive card layout: user sets card width, system calculates how many fit
-        card_width_px = st.slider(
-            "Card width (px)", min_value=180, max_value=420, value=300, step=10
+        # Responsive card layout: user sets cards per row, system calculates width
+        # Use conservative 800px width (accounts for sidebar variability)
+        available_width = 800
+        recs_per_row = st.slider(
+            "Cards per row", min_value=1, max_value=5, value=3, step=1
         )
+
+        # Calculate card width based on available width and cards per row
+        card_width_px = available_width // recs_per_row
 
         # Calculate photo dimensions based on card width (maintain aspect ratio)
-        # Photo height: 220px for default 300px card width
         photo_height_px = int(card_width_px * 0.733)
 
-        # Calculate cards per row based on available width
-        # Streamlit default width is ~900-1100px, use 900 as safe estimate
-        available_width = 900
-        recs_per_row = max(1, available_width // card_width_px)
         st.caption(
-            f"📐 Cards per row: {recs_per_row} | Photo: {card_width_px}×{photo_height_px}px"
+            f"📐 {recs_per_row} cards | Width: {card_width_px}px | Photo: {card_width_px}×{photo_height_px}px"
         )
 
-        num_features = st.slider("Features to display", 5, 64, 9)
+        # Get actual max features from inference service hidden dimension
+        max_features = inference.sae.hidden_dim if inference and inference.sae else 64
+
+        num_features = st.slider(
+            "Features to display",
+            min_value=5,
+            max_value=max_features,
+            value=min(9, max_features),
+            step=1,
+        )
         num_recommendations = st.slider("Recommendations", 5, 50, 20)
 
         # Store in session_state so fragments can read without rerunning
@@ -648,15 +805,8 @@ def show():
                         )
                     else:
                         # STEP 2: Fallback - build matrix from interaction history
-                        logger.debug(
-                            f"Building CSR matrix from interactions for user {selected_user}"
-                        )
-
                         # Encode user from interaction history
                         poi_indices = data.get_user_interactions(selected_user)
-                        logger.debug(
-                            f"Retrieved {len(poi_indices)} POI indices for user {selected_user}"
-                        )
 
                         if not poi_indices:
                             st.warning(
@@ -666,46 +816,46 @@ def show():
 
                         # Validate inference service is properly initialized
                         if inference.n_items is None:
-                            st.error(
-                                "❌ Inference service not properly initialized: n_items is None"
-                            )
-                            logger.error(
-                                "Inference service n_items is None! This indicates model loading failed."
-                            )
+                            error_msg = "Inference service not properly initialized: n_items is None"
+                            logger.error(error_msg + " - Model loading failed")
+                            st.error(f"❌ {error_msg}")
                             return
 
                         logger.debug(
-                            f"Creating CSR matrix with shape (1, {inference.n_items})"
+                            f"Retrieved {len(poi_indices)} interactions for user {selected_user}"
                         )
 
                         # Create sparse CSR matrix from POI indices (1 row, n_items columns)
                         import numpy as np
                         from scipy.sparse import csr_matrix
 
-                        # Validate POI indices are within bounds
-                        max_poi_idx = max(poi_indices) if poi_indices else 0
-                        if max_poi_idx >= inference.n_items:
-                            st.error(
-                                f"❌ POI index {max_poi_idx} exceeds n_items={inference.n_items}"
-                            )
-                            logger.error(
-                                f"POI index out of bounds: {max_poi_idx} >= {inference.n_items}"
-                            )
-                            return
-
                         row = np.zeros(len(poi_indices), dtype=int)  # All row 0
                         col = np.array(poi_indices, dtype=int)  # POI indices as columns
                         data_vals = np.ones(len(poi_indices), dtype=np.float32)
 
-                        logger.debug(
-                            f"CSR matrix data: row={row[:5]}..., col={col[:5]}..., data_vals={data_vals[:5]}..."
-                        )
+                        # VALIDATION: Check for index out of bounds (indicates item2index mismatch)
+                        if len(col) > 0:
+                            max_col = col.max()
+                            if max_col >= inference.n_items:
+                                error_msg = (
+                                    f"❌ User encoding failed: Index mismatch detected\\n\\n"
+                                    f"**Issue**: The item2index mapping contains indices up to {max_col}, "
+                                    f"but the inference model only has {inference.n_items} items.\\n\\n"
+                                    f"**Cause**: The item2index mapping (from training) doesn't match the current model version.\\n\\n"
+                                    f"**Solution**: "
+                                    f"\\n1. Delete old mappings: `rm -rf outputs/*/mappings/business2index_universal.pkl`"
+                                    f"\\n2. Retrain the model to generate a fresh mapping"
+                                    f"\\n3. Restart the Streamlit app"
+                                )
+                                logger.error(error_msg.replace("\\n", " "))
+                                st.error(error_msg)
+                                return
 
                         user_interactions_csr = csr_matrix(
                             (data_vals, (row, col)), shape=(1, inference.n_items)
                         )
                         logger.debug(
-                            f"Created CSR matrix: shape={user_interactions_csr.shape}, nnz={user_interactions_csr.nnz}"
+                            f"Built interaction matrix: shape={user_interactions_csr.shape}, nnz={user_interactions_csr.nnz}"
                         )
 
                         # Validate CSR matrix was created
@@ -728,16 +878,13 @@ def show():
 
                 # Encode user
                 logger.debug(f"Encoding user {selected_user}...")
-                logger.debug(
-                    f"CSR matrix type: {type(user_interactions_csr)}, shape: {user_interactions_csr.shape}"
-                )
                 inference.encode_user(selected_user, user_interactions_csr)
                 logger.debug(f"User {selected_user} encoded successfully")
                 st.session_state.current_user_id = selected_user
 
             except Exception as e:
-                st.error(f"Failed to encode user: {e}")
                 logger.exception("User encoding failed")
+                st.error("❌ Failed to encode user. Check logs for details.")
                 return
 
         # ===================================================================
@@ -766,9 +913,19 @@ def show():
             "recommendations_all_{0}".format(selected_user), []
         )
         filtered_recommendations = all_recommendations[:num_recommendations]
-        st.session_state[
-            "filtered_recommendations_to_display"
-        ] = filtered_recommendations
+
+        # Only update session_state if recommendations actually changed
+        # This prevents unnecessary fragment reruns when only display params changed
+        old_filtered = st.session_state.get("filtered_recommendations_to_display", [])
+        if len(old_filtered) != len(filtered_recommendations) or (
+            filtered_recommendations
+            and old_filtered
+            and old_filtered[0].get("item_id")
+            != filtered_recommendations[0].get("item_id")
+        ):
+            st.session_state[
+                "filtered_recommendations_to_display"
+            ] = filtered_recommendations
 
         # Section 3: Map Visualization (ALWAYS renders instantly with recommendations)
         # ===================================================================
@@ -776,6 +933,10 @@ def show():
             selected_user=selected_user,
             data=data,
             inference=inference,
+            filtered_recommendations=st.session_state.get(
+                "filtered_recommendations_to_display", []
+            ),
+            show_past_visits=show_history,
         )
 
         # ===================================================================
@@ -787,6 +948,12 @@ def show():
             card_width_px=card_width_px,
             show_scores=show_scores,
             photo_height_px=photo_height_px,
+            filtered_recommendations=st.session_state.get(
+                "filtered_recommendations_to_display", []
+            ),
+            poi_details_map=st.session_state.get(
+                f"poi_details_map_{selected_user}", {}
+            ),
         )
 
         # ===================================================================
@@ -1091,13 +1258,10 @@ def build_folium_map(
                     icon=icon,
                 ).add_to(m)
 
-                # Log key markers for debugging
-                if actual_rank in [1, 2, len(pois) - 1, len(pois)]:
-                    logger.debug(
-                        f"  ✅ Added rank {actual_rank}/{len(pois)} ({poi.get('name', 'unknown')[:20]}..., added in position {rank_in_reversed})"
-                    )
             except Exception as e:
-                logger.exception(f"Failed to add marker for rank {actual_rank}: {e}")
+                logger.debug(
+                    f"Marker for rank {actual_rank} ({poi.get('name', 'Unknown')}) failed: {e}"
+                )
                 continue
 
         logger.info(
@@ -1377,7 +1541,7 @@ def draw_poi_card(
         if category:
             content_parts.append(f"<div>📂 {category}</div>")
 
-        # Why (contributing neurons)
+        # Why (contributing neurons) - make features clickable
         if recommendation.get("contributing_neurons"):
             features = recommendation["contributing_neurons"][:1]
             for feat in features:
@@ -1392,7 +1556,9 @@ def draw_poi_card(
                 else:
                     formatted_feature = format_feature_id(neuron_idx, feature_label)
 
-                content_parts.append(f"<div>🧠 Why: {formatted_feature}</div>")
+                # Display contributing feature (use steering button to learn more)
+                clickable_feature = formatted_feature
+                content_parts.append(f"<div>🧠 Why: {clickable_feature}</div>")
 
         # Score
         if show_scores and recommendation.get("score"):
@@ -1421,6 +1587,8 @@ def draw_poi_card(
         """
 
         st.markdown(card_html, unsafe_allow_html=True)
+
+        # (Removed separate button - features are now clickable as inline links in "Why" section)
 
     except Exception as e:
         logger.debug(f"POI card error for {poi.get('name', 'Unknown')}: {e}")

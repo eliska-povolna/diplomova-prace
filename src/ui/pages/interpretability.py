@@ -4,9 +4,68 @@ import logging
 
 import streamlit as st
 
-from src.ui.utils import info_section
-
 logger = logging.getLogger(__name__)
+
+
+def resolve_item_to_business_name(item: dict, data_service, wordcloud_service) -> tuple:
+    """Try to resolve an item to its business name.
+
+    Returns (business_name, activation_value)
+    """
+    # Handle non-dict items (raw IDs)
+    if not isinstance(item, dict):
+        if data_service and hasattr(data_service, "get_business_name"):
+            try:
+                name = data_service.get_business_name(str(item))
+                return (name, 0) if name else (str(item), 0)
+            except Exception:
+                pass
+        return str(item), 0
+
+    # Extract activation value
+    activation = item.get("activation", item.get("avg_activation", 0))
+    if isinstance(activation, dict):
+        activation = activation.get("avg_activation", 0)
+
+    # Extract business_id
+    business_id = (
+        item.get("business_id")
+        or item.get("item_id")
+        or item.get("id")
+        or item.get("business")
+        or item.get("name")
+    )
+
+    # Always try to look up business name from database
+    if business_id and data_service and hasattr(data_service, "get_business_name"):
+        try:
+            name = data_service.get_business_name(str(business_id))
+            if name:
+                return name, activation
+        except Exception:
+            pass
+
+    # Fallback: return business_id as-is
+    return (
+        str(business_id) if business_id else f"Item {item.get('index', '?')}",
+        activation,
+    )
+
+
+def render_clickable_feature(feature_id: int, feature_label: str):
+    """Render a clickable feature button that navigates to the feature on this page."""
+    if st.button(
+        f"🔗 {feature_id}: {feature_label}", key=f"related_feature_{feature_id}"
+    ):
+        # Update session state: set feature ID and use a separate variable for pending search
+        # (can't modify feature_search key directly after widget creation)
+        logger.info(f"🔘 Related feature button clicked: feature_id={feature_id}, label={feature_label}")
+        st.session_state.selected_feature_id = feature_id
+        st.session_state._pending_feature_search = str(feature_id)
+        logger.info(f"   ✓ Set session_state.selected_feature_id = {feature_id}")
+        logger.info(f"   ✓ Set session_state._pending_feature_search = '{feature_id}'")
+        logger.info(f"   → Triggering rerun...")
+        st.rerun()
 
 
 def show():
@@ -24,6 +83,8 @@ def show():
     # Initialize services
     labels_service = st.session_state.get("labels")
     wordcloud_service = st.session_state.get("wordcloud")
+    data_service = st.session_state.get("data")
+    config = st.session_state.get("config", {})
 
     if not labels_service:
         st.error("❌ Labeling service not initialized")
@@ -34,120 +95,229 @@ def show():
             "⚠️ Wordcloud service not available - labels will display without visualizations"
         )
 
-    # Feature selector
-    col1, col2 = st.columns([2, 1])
+    # Get semantic search settings from config
+    semantic_threshold = config.get("ui", {}).get("semantic_search_threshold", 0.5)
+    semantic_top_k = config.get("ui", {}).get("semantic_search_top_k", 10)
 
-    with col1:
-        # Get maximum neuron count from loaded model
-        max_neuron = (
-            st.session_state.inference.sae.k - 1
-            if (
-                hasattr(st.session_state, "inference")
-                and hasattr(st.session_state.inference, "sae")
-            )
-            else 63
+    # Get maximum neuron count from loaded model
+    max_neuron = (
+        st.session_state.inference.sae.k - 1
+        if (
+            hasattr(st.session_state, "inference")
+            and hasattr(st.session_state.inference, "sae")
+        )
+        else 63
+    )
+
+    # ═══════════════════════════════════════════════════════════════════
+    # SIDEBAR: Feature Search and Selection
+    # ═══════════════════════════════════════════════════════════════════
+    with st.sidebar:
+        st.markdown("## 🔍 Search Features")
+        st.caption(
+            "Search by feature number (e.g., '5', '42'), label name (e.g., 'Italian', 'Coffee'), or by meaning (e.g., 'Asian' finds semantically similar features)"
         )
 
-        neuron_idx = st.slider(
-            "Select Feature",
-            min_value=0,
-            max_value=max_neuron,
-            value=0,
-            step=1,
-            key="neuron_slider",
+        # If pending feature search was set by button click, update session state directly
+        # (value param doesn't override existing keyed widget values in session_state)
+        if st.session_state.get("_pending_feature_search"):
+            pending_value = st.session_state._pending_feature_search
+            logger.info(f"📝 Found pending_feature_search in session_state: '{pending_value}'")
+            logger.info(f"   → Updating session_state.feature_search to '{pending_value}'")
+            st.session_state.feature_search = pending_value
+            logger.info(f"   ✓ session_state.feature_search updated")
+            del st.session_state._pending_feature_search
+            logger.info(f"   ✓ Cleared _pending_feature_search")
+        else:
+            logger.debug("No pending_feature_search found")
+
+        logger.debug(f"Current session_state.feature_search = '{st.session_state.get('feature_search', '')}' (before widget creation)")
+        
+        search_query = st.text_input(
+            "Search features",
+            placeholder="e.g., Italian or 5 or Asian",
+            key="feature_search",
+            label_visibility="collapsed",
         )
+        
+        logger.debug(f"Search bar widget created, search_query = '{search_query}'")
 
-    with col2:
-        if st.button("🎛️ Use in Live Demo"):
-            st.session_state.selected_neuron = neuron_idx
-            st.switch_page("🎛️ Live Demo")
+        # Check if feature was passed via session_state (from related features button)
+        neuron_idx = None
+        if st.session_state.get("selected_feature_id") is not None:
+            neuron_idx = st.session_state.selected_feature_id
+        # Check URL query parameter as fallback
+        elif "feature" in st.query_params:
+            try:
+                neuron_idx = int(st.query_params["feature"])
+            except (ValueError, TypeError):
+                neuron_idx = None
 
+        # Validate neuron index
+        if neuron_idx is not None and not (0 <= neuron_idx <= max_neuron):
+            neuron_idx = None
+
+        # Only run search if there's a query AND we haven't already selected a feature
+        matching_features = []
+        if search_query and neuron_idx is None:
+            # Try to match as a number first
+            try:
+                search_num = int(search_query)
+                if 0 <= search_num <= max_neuron:
+                    try:
+                        label = labels_service.get_label(search_num)
+                        matching_features.append((search_num, label))
+                    except Exception:
+                        matching_features.append((search_num, f"Feature {search_num}"))
+            except ValueError:
+                pass
+
+            # If no exact number match, try substring search
+            if not matching_features:
+                for idx in range(max_neuron + 1):
+                    try:
+                        label = labels_service.get_label(idx)
+                        if search_query.lower() in label.lower():
+                            matching_features.append((idx, label))
+                    except Exception:
+                        pass
+
+            # If still no results, try semantic search (use cached model from cache.py)
+            if not matching_features:
+                try:
+                    from cache import load_semantic_search_model, cache_all_label_embeddings
+
+                    semantic_model = load_semantic_search_model()
+                    logger.info(f"Semantic model loaded: {semantic_model is not None}")
+
+                    if semantic_model is not None:
+                        # Get cached label embeddings (cached in session_state on first call)
+                        label_embeddings_dict = cache_all_label_embeddings(
+                            labels_service, max_neuron
+                        )
+                        logger.info(
+                            f"Label embeddings cached: {label_embeddings_dict is not None}, count: {len(label_embeddings_dict) if label_embeddings_dict else 0}"
+                        )
+
+                        if label_embeddings_dict:
+                            # Encode query once
+                            query_embedding = semantic_model.encode(
+                                search_query, show_progress_bar=False
+                            )
+                            logger.info(
+                                f"Query embedding - type: {type(query_embedding).__name__}, shape: {query_embedding.shape}"
+                            )
+
+                            # Compute batch similarity with all cached label embeddings using numpy
+                            import numpy as np
+
+                            similarities = []
+                            logger.info(
+                                f"Computing similarities for {len(label_embeddings_dict)} labels"
+                            )
+
+                            for idx, label_embedding in label_embeddings_dict.items():
+                                try:
+                                    # Compute cosine similarity using numpy (more reliable)
+                                    # cos_sim = dot(a, b) / (norm(a) * norm(b))
+                                    dot_product = np.dot(query_embedding, label_embedding)
+                                    norm_query = np.linalg.norm(query_embedding)
+                                    norm_label = np.linalg.norm(label_embedding)
+                                    similarity = dot_product / (norm_query * norm_label)
+
+                                    label = labels_service.get_label(idx)
+                                    similarities.append((idx, label, similarity))
+                                    logger.debug(
+                                        f"  idx={idx}, label={label}, sim={similarity:.4f}"
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        f"Similarity computation failed for idx {idx}: {type(e).__name__}: {e}"
+                                    )
+
+                            # Sort by similarity and take top 10
+                            similarities.sort(key=lambda x: x[2], reverse=True)
+                            logger.info(
+                                f"Top 5 similarities: {[(idx, sim) for idx, _, sim in similarities[:5]]}"
+                            )
+
+                            matching_features = [
+                                (idx, label)
+                                for idx, label, sim in similarities[:semantic_top_k]
+                                if sim > semantic_threshold  # Threshold from config
+                            ]
+                            logger.info(
+                                f"Features matching threshold {semantic_threshold}: {len(matching_features)}"
+                            )
+                        else:
+                            logger.warning("Label embeddings dict is None or empty")
+                    else:
+                        logger.warning("Semantic model is None")
+                except Exception as e:
+                    logger.error(f"Semantic search failed: {e}", exc_info=True)
+
+            # Display all matching results in sidebar
+            if matching_features:
+                st.write(f"**Found {len(matching_features)} match(es)**")
+
+                # Create a scrollable selection area in sidebar
+                selected_idx = st.radio(
+                    "Select a feature",
+                    options=range(len(matching_features)),
+                    format_func=lambda i: f"#{matching_features[i][0]}: {matching_features[i][1]}",
+                    key="feature_selection_radio",
+                    label_visibility="collapsed",
+                )
+                neuron_idx = matching_features[selected_idx][0]
+                st.session_state.selected_feature_id = neuron_idx
+            else:
+                if search_query:
+                    st.warning("No features found. Try a different search.")
+        elif neuron_idx is None and not search_query:
+            st.info("👉 Enter a feature name or number to get started")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # MAIN AREA: Feature Details
+    # ═══════════════════════════════════════════════════════════════════
+    
+    # Get the selected feature from sidebar (session_state handles the selection)
+    neuron_idx = st.session_state.get("selected_feature_id")
+    logger.info(f"🔍 Main area: retrieved selected_feature_id = {neuron_idx}")
+    
+    # Clear it so it doesn't interfere with next interaction
+    if "selected_feature_id" in st.session_state:
+        logger.info(f"   ✓ Clearing selected_feature_id from session_state")
+        del st.session_state.selected_feature_id
+    
+    # Validate neuron index
+    if neuron_idx is not None and not (0 <= neuron_idx <= max_neuron):
+        logger.warning(f"   ✗ Invalid neuron_idx {neuron_idx} (max_neuron={max_neuron}), setting to None")
+        neuron_idx = None
+    elif neuron_idx is not None:
+        logger.info(f"   ✓ Valid neuron_idx: {neuron_idx} (max_neuron={max_neuron})")
+
+    # If no feature selected, show placeholder
+    if neuron_idx is None:
+        st.info("👈 Use the left panel to search for and select a feature")
+        st.stop()
+
+    # Get label
+    try:
+        label = labels_service.get_label(neuron_idx)
+    except Exception as e:
+        label = f"Feature {neuron_idx}"
+        logger.warning(f"Failed to get label: {e}")
+
+    # Headline
+    st.markdown(f"## Feature #{neuron_idx}: {label}")
     st.divider()
 
-    # Feature details - Two column layout
-    col_left, col_right = st.columns([1, 1.5])
+    # Top Activating Categories Chart + Wordcloud (side by side)
+    col_chart, col_wordcloud = st.columns([1.2, 1])
 
-    with col_left:
-        # Label section
-        info_section(
-            "📝 Label",
-            "Human-readable interpretation of what this feature detects. "
-            "Features are automatically labeled based on the categories and businesses that activate them.",
-        )
+    with col_chart:
+        st.subheader("🔥 Top Activating Categories")
 
-        # Get label from service
-        try:
-            label = labels_service.get_label(neuron_idx)
-        except Exception as e:
-            label = f"Feature {neuron_idx}"
-            logger.warning(f"Failed to get label: {e}")
-
-        st.markdown(
-            f"""
-        ### {label}
-        
-        **Feature Index**: `{neuron_idx}`  
-        **Type**: Interpretable dimension (SAE neuron)
-        """
-        )
-
-        # Copy-friendly code block
-        st.code(label, language="text")
-
-        # Get categories if available
-        if wordcloud_service:
-            try:
-                categories = wordcloud_service.get_categories_for_neuron(neuron_idx)
-                if categories:
-                    info_section(
-                        "📂 Top Categories",
-                        "Business categories ranked by frequency (how many items have activated this feature). "
-                        "Higher frequency = more businesses in that category activate this feature.",
-                    )
-                    # Display as pills
-                    for i in range(0, len(categories), 2):
-                        cols = st.columns(2)
-                        with cols[0]:
-                            st.caption(f"• {categories[i]}")
-                        if i + 1 < len(categories):
-                            with cols[1]:
-                                st.caption(f"• {categories[i+1]}")
-            except Exception as e:
-                logger.debug(f"Could not display categories: {e}")
-
-    with col_right:
-        info_section(
-            "☁️ Category Wordcloud",
-            "Visual word cloud where larger words represent categories that activate this feature more frequently. "
-            "This provides an intuitive at-a-glance view of the feature's category preferences.",
-        )
-
-        if wordcloud_service:
-            try:
-                # Generate wordcloud
-                fig = wordcloud_service.generate_wordcloud_fig(
-                    neuron_idx, figsize=(6, 4), width=600, height=400, colormap="tab20"
-                )
-
-                if fig is not None:
-                    st.pyplot(fig, use_container_width=True)
-                else:
-                    st.info("📊 No wordcloud data available for this feature")
-            except Exception as e:
-                st.warning(f"⚠️ Wordcloud generation failed: {str(e)[:80]}")
-                logger.error(f"Wordcloud generation error: {e}")
-        else:
-            st.info("📊 Wordcloud service not available")
-
-    with col_right:
-        info_section(
-            "🔥 Top Activating Categories",
-            "Categories ranked by average activation strength (σ values). "
-            "Higher σ values indicate stronger activations. "
-            "'n' shows how many times the category was activated for this feature.",
-        )
-
-        # Get categories sorted by activation strength (from wordcloud service)
         if wordcloud_service:
             try:
                 top_categories = wordcloud_service.get_top_activating_categories(
@@ -155,9 +325,6 @@ def show():
                 )
 
                 if top_categories:
-                    # Display categories with activation strength bars
-                    st.markdown("**Categories by average activation strength:**")
-
                     # Find max activation for normalization
                     max_activation = (
                         max([c["avg_activation"] for c in top_categories])
@@ -165,13 +332,13 @@ def show():
                         else 1.0
                     )
 
-                    # Create a simple bar-like visualization using progress bars and text
+                    # Display categories with activation strength bars
                     for item in top_categories:
                         category = item["category"]
                         avg_activation = item["avg_activation"]
                         frequency = item["frequency"]
 
-                        # Normalize for display (assuming activations are typically 0-1)
+                        # Normalize for display
                         strength_pct = min(100, max(0, int(avg_activation * 100)))
                         normalized_strength = (
                             avg_activation / max_activation if max_activation > 0 else 0
@@ -191,39 +358,48 @@ def show():
                             min(1.0, normalized_strength), text=f"{strength_pct}%"
                         )
                 else:
-                    st.info(
-                        """
-                    📊 **Category Data Unavailable**
-                    
-                    This feature would display business categories extracted during model training,
-                    sorted by average activation strength.
-                    Run the training pipeline to generate category metadata.
-                    """
-                    )
+                    st.info("No category data available for this feature")
             except Exception as e:
                 st.warning(f"Could not load activation categories: {e}")
         else:
-            st.info("⚠️ Wordcloud service not available")
+            st.info("Wordcloud service not available")
+
+    with col_wordcloud:
+        st.subheader("☁️ Wordcloud")
+
+        if wordcloud_service:
+            try:
+                fig = wordcloud_service.generate_wordcloud_fig(
+                    neuron_idx, figsize=(6, 4), width=600, height=400, colormap="tab20"
+                )
+
+                if fig is not None:
+                    st.pyplot(fig, use_container_width=True)
+                else:
+                    st.info("No wordcloud data available")
+            except Exception as e:
+                st.warning(f"Wordcloud generation failed: {str(e)[:80]}")
+                logger.error(f"Wordcloud generation error: {e}")
+        else:
+            st.info("Wordcloud service not available")
 
     st.divider()
 
     # Top activating businesses section
     if wordcloud_service:
-        info_section(
-            "🏢 Top Activating Businesses",
-            "Specific businesses/places that most strongly activate this feature. "
-            "σ values show activation strength. This data arrives once the notebook exports business activation data.",
-        )
+        st.subheader("🏢 Top Activating Businesses")
         try:
-            top_items = wordcloud_service.get_top_items(neuron_idx, top_k=5)
+            top_items = wordcloud_service.get_top_items(neuron_idx, top_k=10)
+            logger.debug(f"🔍 DISPLAYING TOP ITEMS: {len(top_items)} items found")
             if top_items:
-                st.markdown("**Places that most strongly activate this feature:**")
+                logger.debug(f"   First item: {top_items[0]}")
                 for i, item in enumerate(top_items, 1):
-                    # Display business name/info if available
-                    business_name = item.get(
-                        "name", item.get("business_id", f"Business {i}")
+                    logger.debug(f"   Item #{i}: {item}")
+                    # Resolve item to business name
+                    business_name, activation = resolve_item_to_business_name(
+                        item, data_service, wordcloud_service
                     )
-                    activation = item.get("activation", item.get("avg_activation", 0))
+                    logger.debug(f"   Resolved to: {business_name}")
 
                     col_rank, col_name, col_stats = st.columns([0.5, 2, 1])
                     with col_rank:
@@ -233,28 +409,30 @@ def show():
                     with col_stats:
                         st.caption(f"σ={activation:.2f}")
             else:
-                st.info(
-                    """
-                🏢 **Top Businesses Not Yet Available**
-                
-                This section will show top-activating businesses once the notebook exports
-                this data (requires re-running notebook 03 with updated export code).
-                """
-                )
+                st.info("No business data available for this feature")
         except Exception as e:
-            st.caption(f"⚠️ Could not load top businesses: {e}")
+            st.caption(f"Could not load top businesses: {e}")
+            logger.error(f"Top businesses error: {e}", exc_info=True)
 
     st.divider()
 
     # Related Features (co-activation section)
     coactivation_service = st.session_state.get("coactivation")
 
-    if coactivation_service:
-        info_section(
-            "🔗 Related Features",
-            "Features that are frequently or rarely co-activated with this feature (based on correlation analysis). "
-            "Frequently co-activated features often detect complementary patterns in the data.",
-        )
+    if coactivation_service and neuron_idx is not None:
+        st.subheader("🔗 Related Features")
+        
+        # Log diagnostic info about data sources
+        if hasattr(coactivation_service, 'coactivation_data') and coactivation_service.coactivation_data:
+            coact_neuron_ids = [int(k) for k in coactivation_service.coactivation_data.keys()]
+            coact_max = max(coact_neuron_ids) if coact_neuron_ids else 0
+            logger.debug(
+                f"🔍 Data source mismatch diagnostic:"
+                f"\n   Model max_neuron: {max_neuron}"
+                f"\n   Coactivation data max neuron_id: {coact_max}"
+                f"\n   Coactivation data neurons: {len(coactivation_service.coactivation_data)}"
+                f"\n   Current neuron_idx: {neuron_idx}"
+            )
 
         col1, col2 = st.columns(2)
 
@@ -263,7 +441,7 @@ def show():
             highly_coactivated = coactivation_service.get_highly_coactivated(neuron_idx)
             if highly_coactivated:
                 for item in highly_coactivated:
-                    st.caption(f"• {item['label']} (Feature {item['neuron_id']})")
+                    render_clickable_feature(item["neuron_id"], item["label"])
             else:
                 st.caption("*No positive co-activation data found*")
 
@@ -272,10 +450,6 @@ def show():
             rarely_coactivated = coactivation_service.get_rarely_coactivated(neuron_idx)
             if rarely_coactivated:
                 for item in rarely_coactivated:
-                    st.caption(f"• {item['label']} (Feature {item['neuron_id']})")
+                    render_clickable_feature(item["neuron_id"], item["label"])
             else:
                 st.caption("*No negative correlations found*")
-
-        st.divider()
-
-    # End of page content

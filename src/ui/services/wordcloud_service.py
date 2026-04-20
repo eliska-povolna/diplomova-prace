@@ -17,6 +17,19 @@ try:
 except ImportError:
     HAS_WORDCLOUD = False
 
+# Conditional Streamlit import for caching
+try:
+    from streamlit import cache_data
+
+    HAS_STREAMLIT = True
+except ImportError:
+    HAS_STREAMLIT = False
+
+    # Dummy decorator for non-Streamlit contexts
+    def cache_data(func):
+        return func
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -241,7 +254,10 @@ class WordcloudService:
             logger.error(f"Failed to generate wordcloud: {e}")
             return None
 
-    def generate_wordcloud_fig(self, neuron_id: int, figsize: tuple = (8, 6), **kwargs):
+    @cache_data
+    def generate_wordcloud_fig(
+        _self, neuron_id: int, figsize: tuple = (8, 6), **kwargs
+    ):
         """
         Generate matplotlib figure with wordcloud.
 
@@ -255,7 +271,7 @@ class WordcloudService:
         """
         import matplotlib.pyplot as plt
 
-        wc = self.generate_wordcloud(neuron_id, **kwargs)
+        wc = _self.generate_wordcloud(neuron_id, **kwargs)
         if wc is None:
             return None
 
@@ -264,7 +280,7 @@ class WordcloudService:
         ax.set_axis_off()
 
         # Add title with neuron label
-        label = self.get_neuron_label(neuron_id)
+        label = _self.get_neuron_label(neuron_id)
         ax.set_title(
             f"Feature {neuron_id}: {label}", fontsize=14, fontweight="bold", pad=20
         )

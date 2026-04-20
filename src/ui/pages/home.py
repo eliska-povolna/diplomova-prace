@@ -141,15 +141,21 @@ def show():
 
     with col1:
         if st.button("📊 View Evaluation Results", use_container_width=True):
-            st.switch_page("📊 Results")
+            results_page = st.session_state.get("_results_page")
+            if results_page:
+                st.switch_page(results_page)
 
     with col2:
         if st.button("🎛️ Try Interactive Steering", use_container_width=True):
-            st.switch_page("🎛️ Live Demo")
+            live_demo_page = st.session_state.get("_live_demo_page")
+            if live_demo_page:
+                st.switch_page(live_demo_page)
 
     with col3:
         if st.button("🔍 Browse Features", use_container_width=True):
-            st.switch_page("🔍 Interpretability")
+            interpretability_page = st.session_state.get("_interpretability_page")
+            if interpretability_page:
+                st.switch_page(interpretability_page)
 
     # Footer
     st.divider()

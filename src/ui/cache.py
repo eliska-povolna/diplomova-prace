@@ -341,14 +341,66 @@ def load_data_service(config: Dict):
 
     logger.info("🔄 Initializing Data Service...")
 
-    # Path to UNIVERSAL item2index mapping (all ~17k businesses)
-    # This preserves user interaction history before filtering
-    item2index_path = (
-        Path(__file__).parent.parent.parent
-        / "data"
-        / "processed_yelp_easystudy"
-        / "item2index.pkl"
-    )
+    # Check if local data files exist before trying to initialize
+    duckdb_path = Path(config["duckdb_path"])
+    parquet_dir = Path(config["parquet_dir"])
+    data_available_locally = duckdb_path.exists() and parquet_dir.exists()
+
+    # Path to item2index mapping - search in multiple locations
+    # Priority:
+    # 1. Latest training output: outputs/YYYYMMDD_HHMMSS/mappings/business2index_universal.pkl
+    # 2. In parquet directory first (where the data actually is)
+    # 3. Then try hardcoded path for backward compatibility
+    item2index_path = None
+    item2index_candidates = []
+
+    # Strategy 1: Find latest training output with business2index_universal.pkl
+    outputs_base = Path(__file__).parent.parent.parent / "outputs"
+    if outputs_base.exists():
+        # List timestamp directories, sorted newest first
+        timestamp_dirs = sorted(
+            [d for d in outputs_base.iterdir() if d.is_dir() and len(d.name) == 15],
+            reverse=True,
+        )  # YYYYMMDD_HHMMSS format
+        for ts_dir in timestamp_dirs:
+            candidate = ts_dir / "mappings" / "business2index_universal.pkl"
+            if candidate.exists():
+                item2index_path = candidate
+                logger.info(f"✓ Found business2index_universal.pkl at: {item2index_path}")
+                break
+            item2index_candidates.append(candidate)
+
+    # Strategy 2: Try in parquet directory
+    if not item2index_path:
+        for candidate in [
+            parquet_dir / "item2index.pkl",  # With parquet data
+            parquet_dir.parent / "item2index.pkl",  # Parent directory
+        ]:
+            item2index_candidates.append(candidate)
+            if candidate.exists():
+                item2index_path = candidate
+                logger.info(f"✓ Found item2index at: {item2index_path}")
+                break
+
+    # Strategy 3: Try hardcoded legacy path
+    if not item2index_path:
+        candidate = (
+            Path(__file__).parent.parent.parent
+            / "data"
+            / "processed_yelp_easystudy"
+            / "item2index.pkl"
+        )
+        item2index_candidates.append(candidate)
+        if candidate.exists():
+            item2index_path = candidate
+            logger.info(f"✓ Found item2index at: {item2index_path}")
+
+    if not item2index_path:
+        logger.warning(
+            f"⚠️ item2index.pkl/business2index_universal.pkl not found in any location. "
+            f"Tried: {[str(c) for c in item2index_candidates[:5]]}"
+        )
+        # Don't fail - item2index is optional, app can work without it
 
     # Path to local photos folder (support common folder naming variants)
     project_root = Path(__file__).parent.parent.parent
@@ -357,11 +409,6 @@ def load_data_service(config: Dict):
         project_root / "Yelp-Photos",
     ]
     local_photos_path = next((p for p in photo_candidates if p.exists()), None)
-
-    # Check if local data files exist before trying to initialize
-    duckdb_path = Path(config["duckdb_path"])
-    parquet_dir = Path(config["parquet_dir"])
-    data_available_locally = duckdb_path.exists() and parquet_dir.exists()
 
     # Check for Cloud SQL credentials
     from src.ui.services.secrets_helper import get_cloudsql_config
@@ -683,6 +730,190 @@ def load_coactivation_service(config: Dict) -> Optional["CoactivationService"]:
     service = CoactivationService(coactivation_path=coactivation_path)
     logger.info("✅ Co-activation service initialized")
     return service
+
+
+@st_cache_resource
+def load_training_results(config: Dict) -> Optional[Dict]:
+    """
+    Load training results from GCS (if available) or local filesystem.
+
+    Tries in order:
+    1. Latest results from GCS (if GCS_BUCKET_NAME configured)
+    2. Latest results from local outputs/ directory
+
+    Returns:
+        Dict with 'summary' and 'ranking_metrics' keys, or None if not found
+    """
+    import os
+
+    results = {"summary": None, "ranking_metrics": None, "source": None}
+
+    # Try GCS first
+    gcs_bucket_name = os.getenv("GCS_BUCKET_NAME")
+    if gcs_bucket_name:
+        try:
+            from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+            cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
+
+            # List all model result directories in GCS
+            models_prefix = "models/"
+            blobs = cloud_storage.bucket.list_blobs(prefix=models_prefix)
+            timestamps = set()
+            for blob in blobs:
+                # Extract timestamp from path like "models/YYYYMMDD_HHMMSS/summary.json"
+                parts = blob.name.split("/")
+                if len(parts) >= 2:
+                    timestamp = parts[1]
+                    if len(timestamp) == 15:  # YYYYMMDD_HHMMSS format
+                        timestamps.add(timestamp)
+
+            if timestamps:
+                latest_timestamp = sorted(timestamps)[-1]
+                logger.info(f"Found latest training results in GCS: {latest_timestamp}")
+
+                # Download summary
+                try:
+                    summary_data = cloud_storage.read_json(
+                        f"models/{latest_timestamp}/summary.json"
+                    )
+                    results["summary"] = summary_data
+                    results["ranking_metrics"] = summary_data.get("ranking_metrics")
+                    results["source"] = "GCS"
+                    logger.info(
+                        f"✅ Loaded training results from GCS (timestamp: {latest_timestamp})"
+                    )
+                    return results
+                except Exception as e:
+                    logger.warning(f"Failed to download summary from GCS: {e}")
+
+        except Exception as e:
+            logger.debug(f"GCS results unavailable: {e}")
+
+    # Fall back to local filesystem
+    outputs_base = Path("outputs")
+    if outputs_base.exists():
+        timestamped_dirs = [
+            d
+            for d in outputs_base.iterdir()
+            if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
+        ]
+
+        if timestamped_dirs:
+            output_dir = sorted(timestamped_dirs)[-1]  # Most recent
+            summary_path = output_dir / "summary.json"
+
+            if summary_path.exists():
+                import json
+
+                try:
+                    with open(summary_path) as f:
+                        summary_data = json.load(f)
+                    results["summary"] = summary_data
+                    results["ranking_metrics"] = summary_data.get("ranking_metrics")
+                    results["source"] = "Local"
+                    logger.info(
+                        f"✅ Loaded training results from local (timestamp: {output_dir.name})"
+                    )
+                    return results
+                except Exception as e:
+                    logger.warning(f"Failed to load local summary: {e}")
+
+    logger.warning("No training results found (GCS or local)")
+    return None
+
+
+@st_cache_resource
+def load_semantic_search_model():
+    """Load sentence transformer model for semantic search (cached at startup).
+
+    This model is cached as a resource, so it's loaded once at startup
+    and reused for all semantic search queries. Uses the lightweight
+    all-MiniLM-L6-v2 model (~22MB) for fast inference.
+
+    Returns:
+        SentenceTransformer model or None if loading fails
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        logger.info("✅ Semantic search model loaded and cached")
+        return model
+    except Exception as e:
+        logger.warning(f"Could not load semantic search model: {e}")
+        return None
+
+
+def cache_all_label_embeddings(labels_service, max_neuron: int):
+    """Cache all label embeddings in session state for efficient semantic search.
+
+    Encodes all feature labels once using batch encoding and stores them
+    in session_state to avoid re-encoding on every search.
+
+    Args:
+        labels_service: LabelingService for fetching labels
+        max_neuron: Maximum neuron index (0 to max_neuron inclusive)
+    """
+    cache_key = "all_label_embeddings"
+
+    # Return cached version if available
+    if cache_key in st.session_state and st.session_state[cache_key] is not None:
+        logger.info(
+            f"✅ Using cached label embeddings: {len(st.session_state[cache_key])} embeddings"
+        )
+        return st.session_state[cache_key]
+
+    try:
+        semantic_model = load_semantic_search_model()
+        if semantic_model is None:
+            logger.warning("Cannot cache embeddings: semantic model is None")
+            return None
+
+        logger.info(
+            f"Encoding all {max_neuron + 1} feature labels for semantic search..."
+        )
+
+        # Get all labels and their indices
+        all_labels = []
+        label_indices = []
+        for idx in range(max_neuron + 1):
+            try:
+                label = labels_service.get_label(idx)
+                all_labels.append(label)
+                label_indices.append(idx)
+            except Exception as e:
+                logger.debug(f"Failed to get label for {idx}: {e}")
+
+        logger.info(f"Found {len(all_labels)} labels to encode")
+
+        if not all_labels:
+            logger.warning("No labels found for embedding")
+            return None
+
+        # Batch encode all labels at once (much faster than one-by-one)
+        logger.info(f"Batch encoding {len(all_labels)} labels...")
+        label_embeddings = semantic_model.encode(all_labels, show_progress_bar=False)
+        logger.info(
+            f"Batch encoding complete. Shape: {label_embeddings.shape}, dtype: {label_embeddings.dtype}"
+        )
+
+        # Create dictionary mapping label index to embedding
+        # Keep as numpy arrays for consistency and easy computation
+        embeddings_dict = {
+            idx: embedding for idx, embedding in zip(label_indices, label_embeddings)
+        }
+
+        # Cache in session state
+        st.session_state[cache_key] = embeddings_dict
+        logger.info(
+            f"✅ Cached {len(embeddings_dict)} label embeddings in session state"
+        )
+        return embeddings_dict
+
+    except Exception as e:
+        logger.error(f"Failed to cache label embeddings: {e}", exc_info=True)
+        return None
 
 
 def init_session_state():
