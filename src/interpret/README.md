@@ -9,7 +9,7 @@ This module provides tools for interpreting and labeling neurons in sparse autoe
 | File | Purpose |
 |------|---------|
 | **`activations.py`** | Low-level activation extraction and analysis utilities |
-| **`neuron_interpreter.py`** | High-level LLM-based neuron interpretation (uses Gemini/GitHub Models APIs) |
+| **`neuron_interpreter.py`** | High-level LLM-based neuron interpretation (uses Google Gemini) |
 | **`neuron_labeling.py`** | Tag-based neuron labeling from business categories |
 | **`USAGE_GUIDE.md`** | Complete usage examples and patterns |
 
@@ -80,8 +80,8 @@ For semantic interpretation using LLMs:
 ```python
 from src.interpret.neuron_interpreter import NeuronInterpreter
 
-# Initialize with GitHub Models (requires GITHUB_TOKEN)
-interpreter = NeuronInterpreter(provider="github_models")
+# Initialize with Google Gemini (requires GOOGLE_API_KEY)
+interpreter = NeuronInterpreter()
 
 # Interpret a neuron
 label = interpreter.label_neuron(neuron_profiles[neuron_id])
@@ -99,7 +99,7 @@ label = interpreter.label_neuron(neuron_profiles[neuron_id])
 
 ### `neuron_interpreter.py` - LLM-Based Interpretation
 ✓ Generate semantic descriptions using LLMs  
-✓ Support multiple LLM providers (GitHub Models, Gemini)  
+✓ Uses Google Gemini for semantic interpretation  
 ✓ Extract tags and reasons from LLM responses  
 
 **When to use:** For generating human-readable interpretations of neuron behavior.

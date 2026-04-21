@@ -24,6 +24,9 @@ python -m src.setup_database --json-dir ~/Downloads/Yelp-JSON/yelp_dataset
 # 2. Preprocess data
 python -m src.preprocess_data --config configs/default.yaml
 
+# Optional: combine setup + preprocess in one command
+python -m src.preprocess_data --config configs/default.yaml --setup-database --json-dir ~/Downloads/Yelp-JSON/yelp_dataset
+
 # 3. Train models
 python -m src.train --config configs/default.yaml
 
@@ -48,5 +51,5 @@ jupyter lab
 ## Notes
 
 - All notebooks import from `src/` (sys.path is set in first cell)
-- Outputs are saved to `../outputs/` (project root), not `notebooks/outputs/`
+- Outputs are saved to `../outputs/` (project root)
 - Run notebooks in sequence; each depends on previous pipeline stages
