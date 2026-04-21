@@ -59,7 +59,9 @@ def render_clickable_feature(feature_id: int, feature_label: str):
     ):
         # Update session state: set feature ID and use a separate variable for pending search
         # (can't modify feature_search key directly after widget creation)
-        logger.info(f"🔘 Related feature button clicked: feature_id={feature_id}, label={feature_label}")
+        logger.info(
+            f"🔘 Related feature button clicked: feature_id={feature_id}, label={feature_label}"
+        )
         st.session_state.selected_feature_id = feature_id
         st.session_state._pending_feature_search = str(feature_id)
         logger.info(f"   ✓ Set session_state.selected_feature_id = {feature_id}")
@@ -100,13 +102,16 @@ def show():
     semantic_top_k = config.get("ui", {}).get("semantic_search_top_k", 10)
 
     # Get maximum neuron count from loaded model
+    # IMPORTANT: Use hidden_dim (actual neuron count), NOT k (sparsity level)
+    # k = how many neurons to keep active per sample
+    # hidden_dim = total neurons in the dictionary
     max_neuron = (
-        st.session_state.inference.sae.k - 1
+        st.session_state.inference.sae.hidden_dim - 1
         if (
             hasattr(st.session_state, "inference")
             and hasattr(st.session_state.inference, "sae")
         )
-        else 63
+        else 1023
     )
 
     # ═══════════════════════════════════════════════════════════════════
@@ -122,8 +127,12 @@ def show():
         # (value param doesn't override existing keyed widget values in session_state)
         if st.session_state.get("_pending_feature_search"):
             pending_value = st.session_state._pending_feature_search
-            logger.info(f"📝 Found pending_feature_search in session_state: '{pending_value}'")
-            logger.info(f"   → Updating session_state.feature_search to '{pending_value}'")
+            logger.info(
+                f"📝 Found pending_feature_search in session_state: '{pending_value}'"
+            )
+            logger.info(
+                f"   → Updating session_state.feature_search to '{pending_value}'"
+            )
             st.session_state.feature_search = pending_value
             logger.info(f"   ✓ session_state.feature_search updated")
             del st.session_state._pending_feature_search
@@ -131,15 +140,17 @@ def show():
         else:
             logger.debug("No pending_feature_search found")
 
-        logger.debug(f"Current session_state.feature_search = '{st.session_state.get('feature_search', '')}' (before widget creation)")
-        
+        logger.debug(
+            f"Current session_state.feature_search = '{st.session_state.get('feature_search', '')}' (before widget creation)"
+        )
+
         search_query = st.text_input(
             "Search features",
             placeholder="e.g., Italian or 5 or Asian",
             key="feature_search",
             label_visibility="collapsed",
         )
-        
+
         logger.debug(f"Search bar widget created, search_query = '{search_query}'")
 
         # Check if feature was passed via session_state (from related features button)
@@ -185,7 +196,10 @@ def show():
             # If still no results, try semantic search (use cached model from cache.py)
             if not matching_features:
                 try:
-                    from cache import load_semantic_search_model, cache_all_label_embeddings
+                    from cache import (
+                        load_semantic_search_model,
+                        cache_all_label_embeddings,
+                    )
 
                     semantic_model = load_semantic_search_model()
                     logger.info(f"Semantic model loaded: {semantic_model is not None}")
@@ -220,7 +234,9 @@ def show():
                                 try:
                                     # Compute cosine similarity using numpy (more reliable)
                                     # cos_sim = dot(a, b) / (norm(a) * norm(b))
-                                    dot_product = np.dot(query_embedding, label_embedding)
+                                    dot_product = np.dot(
+                                        query_embedding, label_embedding
+                                    )
                                     norm_query = np.linalg.norm(query_embedding)
                                     norm_label = np.linalg.norm(label_embedding)
                                     similarity = dot_product / (norm_query * norm_label)
@@ -279,19 +295,21 @@ def show():
     # ═══════════════════════════════════════════════════════════════════
     # MAIN AREA: Feature Details
     # ═══════════════════════════════════════════════════════════════════
-    
+
     # Get the selected feature from sidebar (session_state handles the selection)
     neuron_idx = st.session_state.get("selected_feature_id")
     logger.info(f"🔍 Main area: retrieved selected_feature_id = {neuron_idx}")
-    
+
     # Clear it so it doesn't interfere with next interaction
     if "selected_feature_id" in st.session_state:
         logger.info(f"   ✓ Clearing selected_feature_id from session_state")
         del st.session_state.selected_feature_id
-    
+
     # Validate neuron index
     if neuron_idx is not None and not (0 <= neuron_idx <= max_neuron):
-        logger.warning(f"   ✗ Invalid neuron_idx {neuron_idx} (max_neuron={max_neuron}), setting to None")
+        logger.warning(
+            f"   ✗ Invalid neuron_idx {neuron_idx} (max_neuron={max_neuron}), setting to None"
+        )
         neuron_idx = None
     elif neuron_idx is not None:
         logger.info(f"   ✓ Valid neuron_idx: {neuron_idx} (max_neuron={max_neuron})")
@@ -421,10 +439,15 @@ def show():
 
     if coactivation_service and neuron_idx is not None:
         st.subheader("🔗 Related Features")
-        
+
         # Log diagnostic info about data sources
-        if hasattr(coactivation_service, 'coactivation_data') and coactivation_service.coactivation_data:
-            coact_neuron_ids = [int(k) for k in coactivation_service.coactivation_data.keys()]
+        if (
+            hasattr(coactivation_service, "coactivation_data")
+            and coactivation_service.coactivation_data
+        ):
+            coact_neuron_ids = [
+                int(k) for k in coactivation_service.coactivation_data.keys()
+            ]
             coact_max = max(coact_neuron_ids) if coact_neuron_ids else 0
             logger.debug(
                 f"🔍 Data source mismatch diagnostic:"

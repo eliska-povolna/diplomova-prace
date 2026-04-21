@@ -70,9 +70,7 @@ def load_config(config_path: Path) -> Dict:
         config["duckdb_path"] = _resolve_to_project_root(
             raw_config["data"].get("db_path", "")
         )
-        config["parquet_dir"] = _resolve_to_project_root(
-            raw_config["data"].get("parquet_dir", "")
-        )
+        config["preprocess_dir"] = _resolve_to_project_root("data/preprocessed_yelp")
 
     # ELSA hyperparameters
     if "elsa" in raw_config:
@@ -332,7 +330,7 @@ def load_data_service(config: Dict):
 
     The unified DataService automatically detects which backend to use:
     - If Cloud SQL credentials (CLOUDSQL_INSTANCE, etc.) are present -> Uses Cloud SQL
-    - Otherwise -> Uses local DuckDB + Parquet files
+    - Otherwise -> Uses local DuckDB tables
 
     The USE_CLOUD_STORAGE env var can force local-only mode if set to "false".
 
@@ -343,18 +341,18 @@ def load_data_service(config: Dict):
 
     # Check if local data files exist before trying to initialize
     duckdb_path = Path(config["duckdb_path"])
-    parquet_dir = Path(config["parquet_dir"])
-    data_available_locally = duckdb_path.exists() and parquet_dir.exists()
+    data_available_locally = duckdb_path.exists()
 
     # Path to item2index mapping - search in multiple locations
     # Priority:
-    # 1. Latest training output: outputs/YYYYMMDD_HHMMSS/mappings/business2index_universal.pkl
-    # 2. In parquet directory first (where the data actually is)
-    # 3. Then try hardcoded path for backward compatibility
+    # 1. Latest training output: outputs/YYYYMMDD_HHMMSS/mappings/item2index.pkl (FILTERED - post-k-core!)
+    # 2. Fallback: outputs/YYYYMMDD_HHMMSS/mappings/business2index_universal.pkl (universal - less ideal)
+    # 3. In parquet directory (legacy location)
+    # 4. Hardcoded path for backward compatibility
     item2index_path = None
     item2index_candidates = []
 
-    # Strategy 1: Find latest training output with business2index_universal.pkl
+    # Strategy 1A: Find latest FILTERED mapping (post-k-core) - PRIORITIZE THIS
     outputs_base = Path(__file__).parent.parent.parent / "outputs"
     if outputs_base.exists():
         # List timestamp directories, sorted newest first
@@ -363,18 +361,38 @@ def load_data_service(config: Dict):
             reverse=True,
         )  # YYYYMMDD_HHMMSS format
         for ts_dir in timestamp_dirs:
-            candidate = ts_dir / "mappings" / "business2index_universal.pkl"
+            # Try filtered mapping first (what model actually uses)
+            candidate = ts_dir / "mappings" / "item2index.pkl"
             if candidate.exists():
                 item2index_path = candidate
-                logger.info(f"✓ Found business2index_universal.pkl at: {item2index_path}")
+                logger.info(
+                    f"✓ Found filtered item2index.pkl (post-k-core): {item2index_path}"
+                )
                 break
             item2index_candidates.append(candidate)
 
-    # Strategy 2: Try in parquet directory
+    # Strategy 1B: Fallback to universal mapping (backward compat, but NOT ideal for index alignment)
+    if not item2index_path and outputs_base.exists():
+        timestamp_dirs = sorted(
+            [d for d in outputs_base.iterdir() if d.is_dir() and len(d.name) == 15],
+            reverse=True,
+        )
+        for ts_dir in timestamp_dirs:
+            candidate = ts_dir / "mappings" / "business2index_universal.pkl"
+            if candidate.exists():
+                item2index_path = candidate
+                logger.warning(
+                    f"⚠️ Using universal mapping (may have index mismatch): {item2index_path}"
+                )
+                break
+            item2index_candidates.append(candidate)
+
+    # Strategy 2: Try in preprocessed directory
     if not item2index_path:
+        preprocess_dir = Path(config.get("preprocess_dir", ""))
         for candidate in [
-            parquet_dir / "item2index.pkl",  # With parquet data
-            parquet_dir.parent / "item2index.pkl",  # Parent directory
+            preprocess_dir / "item2index.pkl",  # Preprocessed data directory
+            preprocess_dir.parent / "item2index.pkl",  # Parent directory
         ]:
             item2index_candidates.append(candidate)
             if candidate.exists():
@@ -438,7 +456,7 @@ def load_data_service(config: Dict):
             "**To fix locally:**\n"
             "Ensure `configs/default.yaml` has correct paths to:\n"
             f"- DuckDB: {duckdb_path}\n"
-            f"- Parquet: {parquet_dir}"
+            "- Optional preprocessed mappings in data/preprocessed_yelp/"
         )
         if HAS_STREAMLIT:
             st.error(error_msg)
@@ -451,7 +469,6 @@ def load_data_service(config: Dict):
     try:
         service = DataService(
             duckdb_path=duckdb_path,
-            parquet_dir=parquet_dir,
             config=config,
             item2index_path=item2index_path,
             local_photos_dir=local_photos_path,
@@ -583,27 +600,23 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
     import os
 
     has_gemini = bool(get_gemini_api_key())
-    has_github = bool(os.environ.get("GITHUB_TOKEN"))
 
-    if has_gemini or has_github:
-        # Only import NeuronInterpreter if we have API keys configured
+    if has_gemini:
+        # Only import NeuronInterpreter if we have Gemini API key configured
         try:
             from src.interpret.neuron_interpreter import NeuronInterpreter
 
             try:
-                interpreter = NeuronInterpreter()  # Auto-detect provider
-                logger.info(f"✅ LLM provider available: {interpreter.provider}")
+                interpreter = NeuronInterpreter()  # Uses GOOGLE_API_KEY
+                logger.info("✅ LLM interpreter available (Gemini API)")
             except ValueError as e:
-                logger.debug(f"LLM provider not available: {e}")
+                logger.debug(f"LLM interpreter not available: {e}")
                 interpreter = None
         except ImportError as e:
             logger.debug(f"NeuronInterpreter not available: {e}")
             interpreter = None
     else:
-        logger.debug(
-            "No LLM API keys configured (GITHUB_TOKEN, GOOGLE_API_KEY). "
-            "Using basic pre-computed labels."
-        )
+        logger.debug("No GOOGLE_API_KEY configured. Using basic pre-computed labels.")
 
     service = LabelingService(
         labels_json_path=labels_path,

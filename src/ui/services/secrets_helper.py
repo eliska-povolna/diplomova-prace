@@ -9,8 +9,6 @@ import logging
 import os
 from typing import Any, Optional
 
-import streamlit as st
-
 logger = logging.getLogger(__name__)
 
 
@@ -19,7 +17,7 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     Retrieve a secret from Streamlit secrets or environment variables.
 
     Tries (in order):
-    1. Streamlit secrets (st.secrets[key])
+    1. Streamlit secrets (st.secrets[key]) - if Streamlit is available
     2. Environment variable (os.getenv)
     3. Default value
 
@@ -30,17 +28,21 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
     Returns:
         Secret value or default, or None if not found
     """
+    # Try Streamlit secrets first (if available)
     try:
-        # Try Streamlit secrets first (works in both local + Cloud)
+        import streamlit as st
+
         if key in st.secrets:
             logger.debug(f"✓ Found {key} in Streamlit secrets")
             return st.secrets[key]
         else:
             logger.debug(f"✗ {key} not in Streamlit secrets")
-    except Exception as e:
-        logger.debug(f"✗ Could not access st.secrets: {e}")
+    except (ImportError, RuntimeError, AttributeError) as e:
+        logger.debug(
+            f"✗ Streamlit not available or st.secrets not accessible: {type(e).__name__}"
+        )
 
-    # Fall back to environment variables (for CI/CD or manual env setup)
+    # Fall back to environment variables (for CI/CD, training scripts, or when Streamlit unavailable)
     env_val = os.getenv(key)
     if env_val:
         logger.debug(f"✓ Found {key} in environment variables")

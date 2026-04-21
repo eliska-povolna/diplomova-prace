@@ -1,4 +1,4 @@
-"""LLM-based neuron interpretation for SAE sparse features.
+"""LLM-based neuron interpretation for SAE sparse features (Streamlit UI).
 
 This module provides automated labeling of sparse autoencoder neurons
 using a two-phase LLM approach:
@@ -6,9 +6,8 @@ using a two-phase LLM approach:
 Phase 1: Initial labeling via max/zero-activating examples
 Phase 2: Hierarchical organization into super-features (feature families)
 
-Supports two LLM APIs:
-- GitHub Models (GPT-4o) - Recommended for quality and availability
-- Google Gemini API - Free tier alternative with rate limiting
+Uses Google Gemini API for LLM-based interpretation.
+For batch neuron labeling, use src/interpret/neuron_labeling.py instead.
 """
 
 from __future__ import annotations
@@ -19,117 +18,66 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Optional
 
 import numpy as np
 import torch
 
 logger = logging.getLogger(__name__)
 
-# Try to import both APIs
-try:
-    from openai import OpenAI
-
-    HAS_GITHUB_MODELS = True
-except ImportError:
-    HAS_GITHUB_MODELS = False
-    logger.debug("openai not installed. GitHub Models support unavailable.")
-
+# Import Gemini
 try:
     import google.generativeai as genai
 
     HAS_GEMINI = True
 except ImportError:
     HAS_GEMINI = False
-    logger.debug("google-generativeai not installed. Gemini support unavailable.")
+    logger.debug(
+        "google-generativeai not installed. Install with: pip install google-generativeai"
+    )
 
 
 class NeuronInterpreter:
-    """Interprets SAE neurons using LLM with max/zero-activating examples.
+    """Interprets SAE neurons using Google Gemini API with max/zero-activating examples.
 
-    Supports both GitHub Models (GPT-4o) and Google Gemini APIs.
+    This is the UI-specific interpreter for Streamlit interactive labeling.
+    For batch labeling, use src/interpret/neuron_labeling.LLMBasedLabeler instead.
 
     Parameters
     ----------
-    provider : str, optional
-        LLM provider: "github_models" or "gemini" (default: auto-detect from available APIs)
     api_key : str, optional
-        API key for the provider. If not provided, reads from environment.
-        - GitHub Models: GITHUB_TOKEN env variable
-        - Gemini: GOOGLE_API_KEY env variable
+        Gemini API key. If not provided, reads from GOOGLE_API_KEY environment variable.
     model_name : str, optional
-        Model to use (default: depends on provider)
-        - GitHub Models: "gpt-4o" (via Azure inference)
-        - Gemini: "gemini-2.0-flash"
+        Model to use (default: "gemini-2.0-flash")
     """
 
     def __init__(
         self,
-        provider: Optional[Literal["github_models", "gemini"]] = None,
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
     ):
-        # Auto-detect provider if not specified
-        if provider is None:
-            if HAS_GITHUB_MODELS and os.environ.get("GITHUB_TOKEN"):
-                provider = "github_models"
-            elif HAS_GEMINI:
-                provider = "gemini"
-            else:
-                raise ValueError(
-                    "No LLM provider available. Install one of:\n"
-                    "  - openai (for GitHub Models): pip install openai\n"
-                    "  - google-generativeai (for Gemini): pip install google-generativeai"
-                )
-
-        self.provider = provider
-        self._client = None
-
-        # Set up API key and model name based on provider
-        if provider == "github_models":
-            if not HAS_GITHUB_MODELS:
-                raise ImportError(
-                    "openai library required for GitHub Models. "
-                    "Install with: pip install openai"
-                )
-            self.api_key = api_key or os.environ.get("GITHUB_TOKEN")
-            if not self.api_key:
-                raise ValueError(
-                    "GITHUB_TOKEN not provided and not in environment variables. "
-                    "Set it: export GITHUB_TOKEN=<your_github_pat>"
-                )
-            self.model_name = model_name or "gpt-4o"
-
-        elif provider == "gemini":
-            if not HAS_GEMINI:
-                raise ImportError(
-                    "google-generativeai library required for Gemini. "
-                    "Install with: pip install google-generativeai"
-                )
-            self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
-            if not self.api_key:
-                raise ValueError(
-                    "GOOGLE_API_KEY not provided and not in environment variables. "
-                    "Get a free key from: https://aistudio.google.com/app/apikey"
-                )
-            self.model_name = model_name or "gemini-2.0-flash"
-        else:
-            raise ValueError(
-                f"Unknown provider: {provider}. Use 'github_models' or 'gemini'"
+        if not HAS_GEMINI:
+            raise ImportError(
+                "google-generativeai library required. "
+                "Install with: pip install google-generativeai"
             )
+
+        self.api_key = api_key or os.environ.get("GOOGLE_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "GOOGLE_API_KEY not provided and not in environment variables. "
+                "Get a free key from: https://aistudio.google.com/app/apikey"
+            )
+
+        self.model_name = model_name or "gemini-2.0-flash"
+        self._client = None
 
     @property
     def client(self):
-        """Lazy-load API client to avoid import errors if not installed."""
+        """Lazy-load Gemini API client."""
         if self._client is None:
-            if self.provider == "github_models":
-                self._client = OpenAI(
-                    api_key=self.api_key,
-                    base_url="https://models.inference.ai.azure.com",
-                )
-            elif self.provider == "gemini":
-                genai.configure(api_key=self.api_key)
-                self._client = genai
+            genai.configure(api_key=self.api_key)
+            self._client = genai
         return self._client
 
     def _format_examples(self, items: list[dict], max_items: int = 5) -> str:
@@ -260,19 +208,9 @@ Zero-activating examples for neuron {neuron_idx}:
             try:
                 response_text = None
 
-                if self.provider == "github_models":
-                    response = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3,
-                        max_tokens=400,  # Increased from 100 to allow full analysis + FINAL label
-                    )
-                    response_text = response.choices[0].message.content.strip()
-
-                elif self.provider == "gemini":
-                    model = self.client.GenerativeModel(self.model_name)
-                    response = model.generate_content(prompt)
-                    response_text = response.text.strip()
+                model = self.client.GenerativeModel(self.model_name)
+                response = model.generate_content(prompt)
+                response_text = response.text.strip()
 
                 # Parse response for "FINAL: <label>" format
                 # Try exact match first (response includes FINAL: line)
@@ -315,7 +253,7 @@ Zero-activating examples for neuron {neuron_idx}:
 
             except Exception as e:
                 logger.warning(
-                    f"Neuron {neuron_idx}, attempt {attempt+1}: {self.provider} error: {e}"
+                    f"Neuron {neuron_idx}, attempt {attempt+1}: Gemini error: {e}"
                 )
 
             # Rate limiting between attempts
@@ -399,28 +337,22 @@ Zero-activating examples for neuron {neuron_idx}:
 
 
 class SuperfeatureGenerator:
-    """Generate hierarchical super-features from neuron labels.
-
-    Supports both GitHub Models and Gemini APIs (same as NeuronInterpreter).
+    """Generate hierarchical super-features from neuron labels using Gemini API.
 
     Parameters
     ----------
-    provider : str, optional
-        LLM provider: "github_models" or "gemini"
     api_key : str, optional
-        API key for the provider
+        Gemini API key. If not provided, reads from GOOGLE_API_KEY environment variable.
     model_name : str, optional
-        Model to use
+        Model to use (default: "gemini-2.0-flash")
     """
 
     def __init__(
         self,
-        provider: Optional[Literal["github_models", "gemini"]] = None,
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
     ):
         self.interpreter = NeuronInterpreter(
-            provider=provider,
             api_key=api_key,
             model_name=model_name,
         )
@@ -531,23 +463,11 @@ SUPERLABEL: <super_label>
 """
 
             try:
-                response_text = None
-
-                if self.interpreter.provider == "github_models":
-                    response = self.interpreter.client.chat.completions.create(
-                        model=self.interpreter.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.3,
-                        max_tokens=50,
-                    )
-                    response_text = response.choices[0].message.content.strip()
-
-                elif self.interpreter.provider == "gemini":
-                    model = self.interpreter.client.GenerativeModel(
-                        self.interpreter.model_name
-                    )
-                    response = model.generate_content(prompt)
-                    response_text = response.text.strip()
+                model = self.interpreter.client.GenerativeModel(
+                    self.interpreter.model_name
+                )
+                response = model.generate_content(prompt)
+                response_text = response.text.strip()
 
                 match = re.search(r"SUPERLABEL:\s*(.+?)(?:\n|$)", response_text)
                 if match:

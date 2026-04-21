@@ -30,9 +30,41 @@ class CoactivationService:
             if coactivation_path.exists():
                 with open(coactivation_path, "r", encoding="utf-8") as f:
                     self.coactivation_data = json.load(f)
-                logger.info(
-                    f"Loaded co-activation data for {len(self.coactivation_data)} neurons"
-                )
+
+                # Analyze the data
+                num_neurons = len(self.coactivation_data)
+                if num_neurons > 0:
+                    neuron_ids = [int(k) for k in self.coactivation_data.keys()]
+                    max_neuron_id = max(neuron_ids)
+                    min_neuron_id = min(neuron_ids)
+
+                    logger.info(
+                        f"✅ Loaded co-activation data:"
+                        f"\n   Neurons: {num_neurons}"
+                        f"\n   Range: {min_neuron_id}-{max_neuron_id}"
+                        f"\n   File: {coactivation_path}"
+                    )
+
+                    # Check for indices in coactivation data
+                    total_coactivations = 0
+                    all_referenced_ids = set(neuron_ids)
+                    for neuron_data in self.coactivation_data.values():
+                        for item in neuron_data.get("highly_coactivated", []):
+                            all_referenced_ids.add(item.get("neuron_id", -1))
+                            total_coactivations += 1
+                        for item in neuron_data.get("rarely_coactivated", []):
+                            all_referenced_ids.add(item.get("neuron_id", -1))
+                            total_coactivations += 1
+
+                    max_referenced_id = (
+                        max(all_referenced_ids) if all_referenced_ids else -1
+                    )
+                    logger.debug(
+                        f"   Referenced neuron IDs: {min(all_referenced_ids)}-{max_referenced_id}"
+                        f"\n   Total coactivation entries: {total_coactivations}"
+                    )
+                else:
+                    logger.warning("Co-activation file is empty")
             else:
                 logger.warning(f"Co-activation file not found: {coactivation_path}")
         except Exception as e:

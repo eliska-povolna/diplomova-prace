@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 
 from src.ui.utils import info_section
 from src.ui.utils.formatting import format_feature_id, format_features_list
+from src.ui.components.concept_steering_panel import render_concept_steering_panel
 
 try:
     import folium
@@ -115,6 +116,32 @@ def _render_active_features_section(
         st.error(f"Failed to get activations: {e}")
         logger.exception("Activation retrieval failed")
         return []
+
+
+@st.fragment
+def render_steering_tabs(
+    selected_user: str,
+    inference,
+    data,
+    activations: List[Dict],
+) -> None:
+    """Render neuron steering and concept steering in separate tabs."""
+    tab_neuron, tab_concept = st.tabs(["Neuron Steering", "Concept Steering"])
+
+    with tab_neuron:
+        _render_steering_and_recommendations(
+            selected_user=selected_user,
+            inference=inference,
+            data=data,
+            activations=activations,
+        )
+
+    with tab_concept:
+        render_concept_steering_panel(
+            inference_service=inference,
+            config=getattr(inference, "config", {}),
+            session_state=st.session_state,
+        )
 
 
 @st.fragment
@@ -901,7 +928,7 @@ def show():
         # ===================================================================
         # Section 2: Steering Sliders & Recommendations (isolated fragment)
         # ===================================================================
-        _render_steering_and_recommendations(
+        render_steering_tabs(
             selected_user=selected_user,
             inference=inference,
             data=data,

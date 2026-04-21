@@ -47,14 +47,17 @@ def show():
         latest_run = run_dirs[0]
         st.info(f"Showing results from: `{latest_run.name}`")
 
-        # Load results JSON
-        results_file = latest_run / "training_results.json"
+        # Load results JSON (try summary.json first, then training_results.json)
+        results_file = latest_run / "summary.json"
+        if not results_file.exists():
+            results_file = latest_run / "training_results.json"
+
         if results_file.exists():
             with open(results_file) as f:
                 results = json.load(f)
             show_actual_results(results)
         else:
-            st.warning("No training_results.json found. Using placeholder data.")
+            st.warning("No results file found. Using placeholder data.")
             show_placeholder_results()
 
     except Exception as e:
@@ -66,19 +69,105 @@ def show():
 def show_actual_results(results: dict):
     """Display actual evaluation results from training."""
 
-    tab_metrics, tab_ablation, tab_speed = st.tabs(
-        ["📈 Metrics", "🔧 Ablations", "⚡ Performance"]
+    tab_metrics, tab_comparison, tab_ablation, tab_speed = st.tabs(
+        ["📈 Metrics", "⚖️ Model Comparison", "🔧 Ablations", "⚡ Performance"]
     )
 
     with tab_metrics:
-        st.subheader("Recommendation Quality")
+        st.subheader("SAE+ELSA Recommendation Quality Metrics")
 
-        # Metrics table
-        if "metrics" in results:
-            metrics_df = pd.DataFrame(results["metrics"])
-            st.dataframe(metrics_df, width="stretch")
+        # Extract ranking metrics from summary
+        ranking_metrics = results.get("ranking_metrics", {})
+        model_sizes = results.get("model_sizes", {})
+
+        if ranking_metrics:
+            # Create metrics table
+            metrics_data = []
+
+            # Ranking metrics at k=20
+            for metric_name in [
+                "recall",
+                "precision",
+                "hit_rate",
+                "ndcg",
+                "mrr",
+                "map",
+            ]:
+                if metric_name in ranking_metrics:
+                    metric_key = (
+                        "@20"
+                        if isinstance(ranking_metrics[metric_name], dict)
+                        else None
+                    )
+                    if isinstance(ranking_metrics[metric_name], dict):
+                        value = ranking_metrics[metric_name].get("@20", 0)
+                        metrics_data.append(
+                            {
+                                "Metric": f"{metric_name.upper()}@20",
+                                "Value": f"{value:.4f}",
+                                "Score": value,
+                            }
+                        )
+
+            # Coverage and entropy
+            if "coverage" in ranking_metrics:
+                coverage_val = ranking_metrics["coverage"]
+                metrics_data.append(
+                    {
+                        "Metric": "Coverage",
+                        "Value": f"{coverage_val*100:.2f}%",
+                        "Score": coverage_val,
+                    }
+                )
+
+            if "entropy" in ranking_metrics:
+                entropy_val = ranking_metrics["entropy"]
+                metrics_data.append(
+                    {
+                        "Metric": "Entropy (Diversity)",
+                        "Value": f"{entropy_val:.4f}",
+                        "Score": entropy_val,
+                    }
+                )
+
+            # Model size
+            if model_sizes:
+                total_size = model_sizes.get("total_mb", 0)
+                metrics_data.append(
+                    {
+                        "Metric": "Total Model Size",
+                        "Value": f"{total_size:.2f} MB",
+                        "Score": -total_size,  # Negative so lower is better in sorting
+                    }
+                )
+
+            if metrics_data:
+                metrics_df = pd.DataFrame(metrics_data)
+
+                # Display metrics in two columns
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.markdown("#### Key Metrics")
+                    # Show top metrics
+                    for idx, row in metrics_df.head(4).iterrows():
+                        st.metric(row["Metric"], row["Value"])
+
+                with col2:
+                    st.markdown("#### Additional Metrics")
+                    # Show remaining metrics
+                    for idx, row in metrics_df.iloc[4:].iterrows():
+                        st.metric(row["Metric"], row["Value"])
+
+                st.markdown("---")
+
+                # Detailed table
+                st.markdown("#### Detailed Metrics")
+                st.dataframe(metrics_df[["Metric", "Value"]], use_container_width=True)
+            else:
+                st.info("Metrics data not available in results.")
         else:
-            st.info("Metrics data not available in results.")
+            st.info("Ranking metrics not available. Model may still be training.")
 
         # Metric explanations in expandable sections
         with st.expander("📖 Metric Explanations", expanded=False):
@@ -89,45 +178,167 @@ def show_actual_results(results: dict):
                     """
                 **Recall@20** 
                 - % of user's liked items appearing in top-20 recommendations
-                - Range: 0-100% (higher = better)
-                - Good value: > 20%
+                - Range: 0-1 (higher = better)
+                - Good value: > 0.20
                 - Measures: Coverage of user preferences
                 
                 **Precision@20**
-                - % of recommendations that are actually relevant to user
-                - Range: 0-100% (higher = better)
-                - Good value: > 25%
+                - % of top-20 recommendations that user actually likes
+                - Range: 0-1 (higher = better)
+                - Good value: > 0.25
                 - Measures: Accuracy of recommendations
                 
                 **Hit Rate@20**
                 - % of users who got ≥1 relevant item in top-20
-                - Range: 0-100% (higher = better)
-                - Good value: > 60%
+                - Range: 0-1 (higher = better)
+                - Good value: > 0.60
                 - Measures: Utility for typical users
+                
+                **NDCG@20**
+                - Normalized Discounted Cumulative Gain (ranking quality)
+                - Range: 0-1 (higher = better)
+                - Good value: > 0.25
+                - Penalizes wrong ranking order
                 """
                 )
 
             with col2:
                 st.markdown(
                     """
-                **NDCG@20** (Normalized Discounted Cumulative Gain)
-                - Quality of ranking (best items ranked first)
+                **MRR@20** (Mean Reciprocal Rank)
+                - Average position of first relevant item (reciprocal)
                 - Range: 0-1 (higher = better)
-                - Good value: > 0.25
-                - Penalizes wrong ranking order
+                - Good value: > 0.40
+                - Rewards early matching
+                
+                **MAP@20** (Mean Average Precision)
+                - Average precision across all relevant items in top-20
+                - Range: 0-1 (higher = better)
+                - Good value: > 0.15
+                - Combines precision and recall
                 
                 **Coverage**
                 - % of total items recommended across all users
-                - Range: 0-100% (higher = better discovery)
-                - Good value: > 20%
+                - Range: 0-1 (higher = better for discovery)
+                - Good value: > 0.20
                 - Measures: Item variety in recommendations
                 
-                **Model Size**
-                - Compressed model size in MB
-                - Trade-off: smaller = faster, but may reduce accuracy
-                - Shows SAE (sparse) vs ELSA (dense) compression
+                **Entropy (Diversity)**
+                - Measures how uniformly distributed recommendations are
+                - Range: 0-1 (higher = more diverse)
+                - Good value: > 0.50
+                - Low entropy = concentrated on popular items
                 """
                 )
+
+    with tab_comparison:
+        st.subheader("ELSA vs SAE+ELSA Performance Comparison")
+
+        st.markdown(
+            """
+        This tab compares the performance of ELSA (collaborative filtering alone)
+        vs SAE+ELSA (ELSA with sparse autoencoder compression).
+        """
+        )
+
+        # Get both metrics
+        ranking_metrics_elsa = results.get("ranking_metrics_elsa", {})
+        ranking_metrics_sae = results.get("ranking_metrics_sae", {})
+
+        if ranking_metrics_elsa and ranking_metrics_sae:
+            # Create comparison table for each metric
+            comparison_data = []
+
+            metric_names = {
+                "ndcg": "NDCG",
+                "recall": "Recall",
+                "precision": "Precision",
+                "mrr": "MRR",
+                "hr": "Hit Rate",
+                "map": "MAP",
+            }
+
+            for metric_key, metric_display_name in metric_names.items():
+                if (
+                    metric_key in ranking_metrics_elsa
+                    and metric_key in ranking_metrics_sae
+                ):
+                    elsa_metrics = ranking_metrics_elsa[metric_key]
+                    sae_metrics = ranking_metrics_sae[metric_key]
+
+                    for k_str in ["@5", "@10", "@20"]:
+                        if k_str in elsa_metrics and k_str in sae_metrics:
+                            elsa_val = elsa_metrics[k_str]
+                            sae_val = sae_metrics[k_str]
+                            diff = sae_val - elsa_val
+                            pct_change = (
+                                (diff / elsa_val * 100) if elsa_val != 0 else 0.0
+                            )
+
+                            comparison_data.append(
+                                {
+                                    "Metric": metric_display_name,
+                                    "K": k_str,
+                                    "ELSA": f"{elsa_val:.4f}",
+                                    "SAE+ELSA": f"{sae_val:.4f}",
+                                    "Difference": f"{diff:+.4f}",
+                                    "Change %": f"{pct_change:+.2f}%",
+                                    "Better": (
+                                        "SAE+ELSA ↑"
+                                        if pct_change > 0
+                                        else ("ELSA ↓" if pct_change < 0 else "Equal →")
+                                    ),
+                                }
+                            )
+
+            if comparison_data:
+                comparison_df = pd.DataFrame(comparison_data)
+                st.dataframe(comparison_df, use_container_width=True)
+
+                # Summary statistics
+                st.markdown("#### Summary")
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    # Count wins for SAE
+                    wins = len(
+                        [
+                            row
+                            for _, row in comparison_df.iterrows()
+                            if "↑" in row["Better"]
+                        ]
+                    )
+                    st.metric("SAE+ELSA Wins", f"{wins}/{len(comparison_df)}")
+
+                with col2:
+                    # Count wins for ELSA
+                    wins_elsa = len(
+                        [
+                            row
+                            for _, row in comparison_df.iterrows()
+                            if "↓" in row["Better"]
+                        ]
+                    )
+                    st.metric("ELSA Wins", f"{wins_elsa}/{len(comparison_df)}")
+
+                with col3:
+                    # Model sizes
+                    model_sizes = results.get("model_sizes", {})
+                    if model_sizes:
+                        elsa_size = model_sizes.get("elsa_mb", 0)
+                        sae_size = model_sizes.get("sae_mb", 0)
+                        compression = (
+                            (1 - sae_size / elsa_size) * 100 if elsa_size > 0 else 0
+                        )
+                        st.metric("Compression Gain", f"{compression:.1f}%")
+            else:
+                st.info(
+                    "Comparison data not available. Make sure both ELSA and SAE+ELSA metrics are saved."
+                )
+        else:
+            st.info(
+                "⚠️ Comparison metrics not available. Training must save both `ranking_metrics_elsa` and `ranking_metrics_sae`."
+            )
 
     with tab_ablation:
         st.subheader("Ablation: Effect of SAE Sparsity")
@@ -181,43 +392,69 @@ def show_actual_results(results: dict):
     with tab_speed:
         st.subheader("Inference Latency & Performance")
 
-        if "latency" in results:
-            latency = results["latency"]
+        # Try to get latency from ranking metrics
+        ranking_metrics = results.get("ranking_metrics", {})
+        latency_data = (
+            ranking_metrics.get("latency", {})
+            if isinstance(ranking_metrics.get("latency"), dict)
+            else None
+        )
 
-            col1, col2, col3 = st.columns(3)
+        # Also check top-level latency key
+        if not latency_data:
+            latency_data = results.get("latency", {})
+
+        if latency_data:
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Mean Latency", f"{latency.get('mean', 0):.1f}ms")
+                mean_ms = latency_data.get("mean_ms", 0)
+                st.metric("Mean Latency", f"{mean_ms:.2f}ms")
             with col2:
-                st.metric("P95 Latency", f"{latency.get('p95', 0):.1f}ms")
+                p50_ms = latency_data.get("p50_ms", 0)
+                st.metric("Median Latency", f"{p50_ms:.2f}ms")
             with col3:
-                st.metric("Max Latency", f"{latency.get('max', 0):.1f}ms")
-
-            st.metric("Inference Count", f"{latency.get('count', 0)} requests")
+                p95_ms = latency_data.get("p95_ms", 0)
+                st.metric("P95 Latency", f"{p95_ms:.2f}ms")
+            with col4:
+                max_ms = latency_data.get("max_ms", 0)
+                st.metric("Max Latency", f"{max_ms:.2f}ms")
 
             st.markdown(
                 f"""
             **Latency Interpretation:**
-            - Mean: Average inference time (typical user experience)
-            - P95: 95th percentile (worst 5% of requests)
-            - Max: Longest single inference
+            - **Mean**: Average inference time (typical user experience)
+            - **Median (P50)**: Middle-ground representative performance
+            - **P95**: 95th percentile (worst 5% of requests)
+            - **Max**: Longest single inference
             
-            **Performance Goals:**
-            - Mean < 500ms = Interactive (Live Demo acceptable)
-            - P95 < 1000ms = Good for web apps
+            **Performance Targets:**
+            - Mean < 100ms = Excellent (real-time responsiveness)
+            - Mean < 500ms = Good (interactive)
+            - P95 < 1000ms = Acceptable for web apps
             - P95 < 2000ms = Acceptable for pilot
+            
+            **Current Status:**
+            - Mean: {latency_data.get('mean_ms', 'N/A')} ms
+            - P95: {latency_data.get('p95_ms', 'N/A')} ms
             """
+            )
+
+            # Show estimation note
+            st.info(
+                "📊 **Note**: These latency measurements are estimates based on numpy operations. "
+                "For more accurate benchmarking in production, profile the actual deployment inference pipeline."
             )
         else:
             st.info(
                 """
             ℹ️ **Latency data not available yet**
             
-            Latency is measured automatically when using the Live Demo:
-            1. Go to **🎛️ Live Demo** page
-            2. Select a user and generate recommendations
-            3. Latency will be recorded and displayed here
+            Latency is measured automatically during training evaluation:
+            1. After model training completes
+            2. Latency is estimated for top-20 inference operations
+            3. Results appear in this Performance tab
             
-            Each inference (encoding + steering + ranking) is measured in milliseconds.
+            Each inference (encoding + ranking) is measured in milliseconds.
             """
             )
 

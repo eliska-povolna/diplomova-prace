@@ -5,7 +5,10 @@ Computes Recall@K, NDCG@K, HR@K, and other metrics.
 
 Usage
 -----
-    python src/evaluate.py --checkpoint outputs/20240316_120000/checkpoints --split test
+    python -m src.evaluate
+
+    # Evaluate a specific run
+    python -m src.evaluate --checkpoint outputs/20240316_120000/checkpoints --split test
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from src.data.yelp_loader import load_reviews
 from src.models.collaborative_filtering import ELSA, ndcg_at_k, recall_at_k
 from src.models.sae_cf_model import ELSASAEModel
 from src.models.sparse_autoencoder import TopKSAE
+from src.run_registry import RunRegistry
 from src.utils import CheckpointManager, setup_logger
 
 logger = logging.getLogger(__name__)
@@ -33,8 +37,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate SAE-CF POI recommender")
     parser.add_argument(
         "--checkpoint",
-        required=True,
-        help="Path to checkpoint directory (contains summary.json)",
+        default=None,
+        help="Path to checkpoint directory (contains summary.json). If omitted, the latest trained run is used.",
     )
     parser.add_argument(
         "--split",
@@ -56,6 +60,35 @@ def parse_args() -> argparse.Namespace:
         help="Batch size for evaluation",
     )
     return parser.parse_args()
+
+
+def resolve_checkpoint_dir(checkpoint_arg: str | None) -> Path:
+    """Resolve the checkpoint directory, defaulting to the latest trained run."""
+    if checkpoint_arg:
+        checkpoint_dir = Path(checkpoint_arg)
+        if (
+            checkpoint_dir.name != "checkpoints"
+            and (checkpoint_dir / "checkpoints").exists()
+        ):
+            checkpoint_dir = checkpoint_dir / "checkpoints"
+        return checkpoint_dir
+
+    registry = RunRegistry()
+    latest_train_runs = registry.get_runs_by_stage("train")
+    if not latest_train_runs:
+        raise FileNotFoundError(
+            "No completed training run found. Run training first or pass --checkpoint."
+        )
+
+    output_dir = Path.cwd() / "outputs" / latest_train_runs[0]
+    checkpoint_dir = output_dir / "checkpoints"
+    if not checkpoint_dir.exists():
+        raise FileNotFoundError(
+            f"Checkpoint directory not found for latest training run: {checkpoint_dir}"
+        )
+
+    logger.info(f"Auto-detected latest trained run: {latest_train_runs[0]}")
+    return checkpoint_dir
 
 
 def compute_metrics(
@@ -122,7 +155,7 @@ def main() -> None:
     args = parse_args()
 
     # Load checkpoint and config
-    checkpoint_dir = Path(args.checkpoint)
+    checkpoint_dir = resolve_checkpoint_dir(args.checkpoint)
     if not checkpoint_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoint_dir}")
 
@@ -142,6 +175,11 @@ def main() -> None:
     setup_logger(__name__, log_dir=output_dir, level=logging.INFO)
     logger.info(f"Evaluating checkpoint from {output_dir}")
 
+    # Extract run_id from output directory and initialize registry
+    run_id = output_dir.name
+    registry = RunRegistry()
+    registry.register_run(run_id, "evaluate", config={}, status="pending")
+
     device = config["evaluation"]["device"]
     logger.info(f"Using device: {device}")
 
@@ -151,13 +189,7 @@ def main() -> None:
         logger.info(f"LOADING {args.split.upper()} DATA")
         logger.info("=" * 60)
 
-        parquet_dir = Path(config["data"]["parquet_dir"])
-
-        if not parquet_dir.exists():
-            raise FileNotFoundError(f"Parquet directory not found: {parquet_dir}")
-
         reviews = load_reviews(
-            parquet_dir,
             db_path=config["data"]["db_path"],
             pos_threshold=config["data"]["pos_threshold"],
         )
@@ -281,8 +313,18 @@ def main() -> None:
 
         logger.info(f"Results saved to {results_path}")
 
+        # Register evaluation as completed
+        eval_metadata = {
+            "split": args.split,
+            "n_users_evaluated": all_scores.shape[0] if "all_scores" in locals() else 0,
+            **{str(k).replace("@", "_at_"): float(v) for k, v in metrics.items()},
+        }
+        registry.update_run_status(run_id, "evaluate", "completed", eval_metadata)
+        logger.info(f"✓ Run {run_id} registered as evaluated")
+
     except Exception as e:
         logger.exception(f"Evaluation failed: {e}")
+        registry.update_run_status(run_id, "evaluate", "failed", {"error": str(e)})
         raise
 
 

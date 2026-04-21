@@ -1,11 +1,9 @@
 # Default configuration for ELSA + TopK SAE training pipeline
-# Hyperparameters match src/yelp_initial_exploration/ reference code
 #
 # Usage: python src/train.py --config configs/default.yaml
 
 # Data configuration
 data:
-  parquet_dir: "../../Yelp-JSON/yelp_parquet"
   db_path: "../../Yelp-JSON/yelp.duckdb"
   state_filter: "PA"                    # Set to "CA", "PA", null for full dataset
   min_review_count: 20

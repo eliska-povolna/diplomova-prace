@@ -79,7 +79,6 @@ scripts/
 # ── Data files (not for version control) ─────────────────────────────────────
 # LARGE DATASETS - Keep locally or in cloud storage, do NOT commit
 # - Yelp-JSON/yelp.duckdb (1-2 GB)
-# - Yelp-JSON/yelp_parquet/ (2-3 GB)
 # + See DEPLOYMENT.md for cloud storage strategy
 
 # Development/Local data

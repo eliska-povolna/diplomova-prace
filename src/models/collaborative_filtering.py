@@ -121,6 +121,22 @@ class ELSA(nn.Module):
                 torch.cuda.empty_cache()
         return torch.cat(parts, dim=0)
 
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Reconstruct item vectors from latent vectors.
+
+        Parameters
+        ----------
+        z:
+            L2-normalised latent vectors of shape ``(batch, latent_dim)``.
+
+        Returns
+        -------
+        torch.Tensor
+            Reconstructed item vectors of shape ``(batch, n_items)``.
+        """
+        A = self._A_norm
+        return z @ A.T
+
 
 class NMSELoss(nn.Module):
     """Normalised MSE loss: MSE between L2-normalised input and output."""
