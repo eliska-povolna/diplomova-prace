@@ -1,6 +1,9 @@
 """Streamlit caching and session state management."""
 
+import json
+import os
 import logging
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -27,6 +30,225 @@ from src.ui.services import (
 from src.ui.services.coactivation_service import CoactivationService
 
 logger = logging.getLogger(__name__)
+
+
+def _get_cloud_storage_helper():
+    """Return a CloudStorageHelper when GCS is configured, otherwise None."""
+    bucket_name = os.getenv("GCS_BUCKET_NAME") or os.getenv("CLOUD_STORAGE_BUCKET")
+    if not bucket_name:
+        return None
+
+    try:
+        from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+        return CloudStorageHelper(bucket_name=bucket_name)
+    except Exception as e:
+        logger.debug(f"Cloud Storage helper unavailable: {e}")
+        return None
+
+
+def _find_latest_model_timestamp(cloud_storage) -> Optional[str]:
+    """Find the newest timestamped model prefix in GCS."""
+    try:
+        blobs = cloud_storage.bucket.list_blobs(prefix="models/")
+    except Exception as e:
+        logger.debug(f"Failed to list GCS model artifacts: {e}")
+        return None
+
+    timestamps = set()
+    for blob in blobs:
+        parts = blob.name.split("/")
+        if len(parts) >= 2 and len(parts[1]) == 15:
+            timestamps.add(parts[1])
+
+    if not timestamps:
+        return None
+
+    return sorted(timestamps)[-1]
+
+
+def _download_gcs_file(cloud_storage, gcs_path: str, local_path: Path) -> bool:
+    """Download one GCS object to a local path."""
+    try:
+        local_path.parent.mkdir(parents=True, exist_ok=True)
+        blob = cloud_storage.bucket.blob(gcs_path)
+        blob.download_to_filename(str(local_path))
+        return local_path.exists()
+    except Exception as e:
+        logger.debug(
+            f"Failed to download gs://{cloud_storage.bucket_name}/{gcs_path}: {e}"
+        )
+        return False
+
+
+def _download_gcs_prefix(cloud_storage, gcs_prefix: str, local_root: Path) -> bool:
+    """Download all objects under a GCS prefix into a local directory."""
+    try:
+        downloaded = False
+        for gcs_path in cloud_storage.list_files(prefix=gcs_prefix):
+            if not gcs_path.startswith(gcs_prefix):
+                continue
+            relative_path = gcs_path[len(gcs_prefix) :].lstrip("/")
+            if not relative_path:
+                continue
+            destination = local_root / relative_path
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            blob = cloud_storage.bucket.blob(gcs_path)
+            blob.download_to_filename(str(destination))
+            downloaded = True
+        return downloaded
+    except Exception as e:
+        logger.debug(
+            f"Failed to download GCS prefix gs://{cloud_storage.bucket_name}/{gcs_prefix}: {e}"
+        )
+        return False
+
+
+def _build_experiment_results(
+    manifest: dict,
+    *,
+    source: str,
+    experiment_dir: Path,
+) -> Optional[Dict]:
+    """Normalize an experiment manifest into the structure expected by the UI."""
+    runs = []
+
+    for raw_run in manifest.get("runs", []):
+        run = dict(raw_run)
+        summary = run.get("summary")
+
+        if not summary:
+            summary_path_str = run.get("summary_path")
+            if summary_path_str:
+                summary_path = Path(summary_path_str)
+                if summary_path.exists():
+                    try:
+                        with summary_path.open("r", encoding="utf-8") as f:
+                            summary = json.load(f)
+                    except Exception as e:
+                        logger.debug(
+                            "Could not load run summary from %s: %s", summary_path, e
+                        )
+
+        run["summary"] = summary
+        runs.append(run)
+
+    if not runs:
+        return None
+
+    selected_summary = runs[0].get("summary") or {}
+    return {
+        "summary": selected_summary,
+        "ranking_metrics": selected_summary.get("ranking_metrics"),
+        "source": source,
+        "experiment": {
+            "experiment_id": manifest.get("experiment_id"),
+            "created": manifest.get("created"),
+            "source_config": manifest.get("source_config"),
+            "base_config": manifest.get("base_config"),
+            "experiment_dir": str(experiment_dir),
+            "manifest": manifest,
+        },
+        "runs": runs,
+    }
+
+
+def _load_local_experiment_results(outputs_base: Path) -> Optional[Dict]:
+    latest_pointer = outputs_base / "LATEST_EXPERIMENT.txt"
+    experiment_dir = None
+
+    if latest_pointer.exists():
+        try:
+            experiment_dir = Path(latest_pointer.read_text(encoding="utf-8").strip())
+        except Exception as e:
+            logger.warning("Failed to read LATEST_EXPERIMENT.txt: %s", e)
+
+    if not experiment_dir or not experiment_dir.exists():
+        experiments_base = outputs_base / "experiments"
+        if experiments_base.exists():
+            experiment_dirs = [
+                d
+                for d in experiments_base.iterdir()
+                if d.is_dir() and (d / "manifest.json").exists()
+            ]
+            if experiment_dirs:
+                experiment_dir = sorted(experiment_dirs, key=lambda d: d.name)[-1]
+
+    if not experiment_dir or not experiment_dir.exists():
+        return None
+
+    manifest_path = experiment_dir / "manifest.json"
+    if not manifest_path.exists():
+        return None
+
+    try:
+        with manifest_path.open("r", encoding="utf-8") as f:
+            manifest = json.load(f)
+    except Exception as e:
+        logger.warning("Failed to load experiment manifest %s: %s", manifest_path, e)
+        return None
+
+    logger.info("✅ Loaded experiment manifest from local: %s", experiment_dir)
+    return _build_experiment_results(
+        manifest,
+        source="Local Experiment",
+        experiment_dir=experiment_dir,
+    )
+
+
+def _load_gcs_experiment_results() -> Optional[Dict]:
+    gcs_bucket_name = os.getenv("GCS_BUCKET_NAME")
+    if not gcs_bucket_name:
+        return None
+
+    try:
+        from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+        cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
+        blobs = cloud_storage.bucket.list_blobs(prefix="experiments/")
+        experiment_ids = set()
+
+        for blob in blobs:
+            parts = blob.name.split("/")
+            if len(parts) >= 3 and parts[2] == "manifest.json" and len(parts[1]) == 15:
+                experiment_ids.add(parts[1])
+
+        if not experiment_ids:
+            return None
+
+        latest_experiment_id = sorted(experiment_ids)[-1]
+        manifest = cloud_storage.read_json(
+            f"experiments/{latest_experiment_id}/manifest.json"
+        )
+        logger.info("✅ Loaded experiment manifest from GCS: %s", latest_experiment_id)
+        return _build_experiment_results(
+            manifest,
+            source="GCS Experiment",
+            experiment_dir=Path(f"experiments/{latest_experiment_id}"),
+        )
+    except Exception as e:
+        logger.debug("GCS experiment results unavailable: %s", e)
+        return None
+
+
+def _load_summary_from_run_dir(run_dir: Path) -> Optional[Dict]:
+    summary_path = run_dir / "summary.json"
+    if not summary_path.exists():
+        return None
+
+    try:
+        with summary_path.open("r", encoding="utf-8") as f:
+            summary_data = json.load(f)
+        return {
+            "summary": summary_data,
+            "ranking_metrics": summary_data.get("ranking_metrics"),
+            "source": f"Local Run: {run_dir.name}",
+            "run_dir": str(run_dir),
+        }
+    except Exception as e:
+        logger.warning("Failed to load run summary %s: %s", summary_path, e)
+        return None
+
 
 # Use streamlit's cache decorator if available, otherwise use dummy
 if HAS_STREAMLIT:
@@ -191,7 +413,10 @@ def load_config(config_path: Path) -> Dict:
 
 
 @st_cache_resource
-def load_inference_service(config: Dict) -> InferenceService:
+def load_inference_service(
+    config: Dict,
+    selected_output_dir: Optional[str] = None,
+) -> InferenceService:
     """
     Load ELSA+SAE models once per session.
 
@@ -201,8 +426,18 @@ def load_inference_service(config: Dict) -> InferenceService:
     files, NOT from config. This ensures consistency regardless of how data is
     filtered or configured on the inference machine.
     """
+    # Prefer the run selected in the Results page, then fall back to config.
+    ckpt_base = (
+        Path(selected_output_dir)
+        if selected_output_dir
+        else Path(config["model_checkpoint_dir"])
+    )
+
+    if selected_output_dir and not ckpt_base.exists():
+        logger.warning("Selected checkpoint dir does not exist: %s", ckpt_base)
+        ckpt_base = Path(config["model_checkpoint_dir"])
+
     # Find latest checkpoint - search in multiple patterns
-    ckpt_base = Path(config["model_checkpoint_dir"])
 
     logger.info(f"Looking for checkpoints starting from: {ckpt_base}")
 
@@ -247,24 +482,40 @@ def load_inference_service(config: Dict) -> InferenceService:
                     break
 
         if not checkpoint_dir:
+            cloud_storage = _get_cloud_storage_helper()
+            if cloud_storage:
+                latest_timestamp = _find_latest_model_timestamp(cloud_storage)
+                if latest_timestamp:
+                    gcs_checkpoint_prefix = f"models/{latest_timestamp}/checkpoints/"
+                    temp_checkpoint_dir = Path(
+                        tempfile.mkdtemp(prefix="diplomov_pr_ce_ckpts_")
+                    )
+                    if _download_gcs_prefix(
+                        cloud_storage, gcs_checkpoint_prefix, temp_checkpoint_dir
+                    ):
+                        checkpoint_dir = temp_checkpoint_dir
+                        logger.info(
+                            f"✅ Loaded checkpoints from GCS: gs://{cloud_storage.bucket_name}/{gcs_checkpoint_prefix}"
+                        )
+
+        if not checkpoint_dir:
             logger.error("No checkpoint subdirs found")
-            logger.error(f"Searched: {[d.name for d in subdirs]}")
-            for subdir in subdirs[:3]:  # Show contents of first 3 dirs
-                contents = list(subdir.iterdir())
-                logger.error(f"  {subdir.name}/: {[c.name for c in contents]}")
+            if ckpt_base.exists():
+                logger.error(f"Searched: {[d.name for d in subdirs]}")
+                for subdir in subdirs[:3]:  # Show contents of first 3 dirs
+                    contents = list(subdir.iterdir())
+                    logger.error(f"  {subdir.name}/: {[c.name for c in contents]}")
 
             error_msg = (
                 "❌ Model Checkpoints Not Found\n\n"
                 f"Could not find `elsa_best.pt` or `sae_best.pt` in:\n"
                 f"`{ckpt_base}`\n\n"
                 "**On Streamlit Cloud:**\n"
-                "This error occurs when model checkpoint files aren't committed to Git.\n"
-                "Checkpoint files must be explicitly added to the repository.\n\n"
+                "The app now expects checkpoints in GCS under `models/<timestamp>/checkpoints/`.\n\n"
                 "**To fix:**\n"
-                "1. Ensure checkpoint files exist locally in `outputs/*/checkpoints/`\n"
-                "2. Add them to Git: `git add outputs/**/checkpoints/ --force`\n"
-                "3. Commit and push: `git push`\n"
-                "4. Redeploy on Streamlit Cloud\n\n"
+                "1. Ensure training uploads checkpoints to GCS\n"
+                "2. Set `GCS_BUCKET_NAME` in Cloud secrets\n"
+                "3. Redeploy the app\n\n"
                 "**Local development:**\n"
                 "If running locally, ensure the `outputs/` directory has trained model files."
             )
@@ -305,7 +556,7 @@ def load_inference_service(config: Dict) -> InferenceService:
     logger.info(f"Loading SAE from {sae_ckpt}")
 
     # Load labels service
-    labels = load_labeling_service(config)
+    labels = load_labeling_service(config, selected_output_dir=selected_output_dir)
 
     # Load data service to pass to inference service
     data_service = load_data_service(config)
@@ -500,13 +751,13 @@ def load_data_service(config: Dict):
         if HAS_STREAMLIT:
             if not hasattr(st.session_state, "_startup_diagnostics"):
                 st.session_state._startup_diagnostics = {}
-            st.session_state._startup_diagnostics[
-                "backend"
-            ] = f"DuckDB ({service.num_pois} POIs)"
+            st.session_state._startup_diagnostics["backend"] = (
+                f"DuckDB ({service.num_pois} POIs)"
+            )
             if local_photos_path:
-                st.session_state._startup_diagnostics[
-                    "photos"
-                ] = f"Local ({local_photos_path})"
+                st.session_state._startup_diagnostics["photos"] = (
+                    f"Local ({local_photos_path})"
+                )
         logger.info(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
         if local_photos_path:
             logger.info(f"📷 Local photos enabled: {local_photos_path}")
@@ -547,7 +798,11 @@ def get_precomputed_cache_dir() -> Optional[Path]:
 
 
 @st_cache_resource
-def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
+def load_labeling_service(
+    config: Dict,
+    data_service=None,
+    selected_output_dir: Optional[str] = None,
+) -> LabelingService:
     """
     Load neuron labeling service.
 
@@ -555,13 +810,18 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
     If no LLM provider is available (no API keys), uses basic pre-computed labels.
     NeuronInterpreter is only imported if LLM providers are configured.
     """
-    # Find latest timestamped output directory
+    # Prefer the run selected in the Results page, then fall back to latest run.
+    output_dir = Path(selected_output_dir) if selected_output_dir else None
+
+    if output_dir and not output_dir.exists():
+        logger.warning("Selected output dir does not exist: %s", output_dir)
+        output_dir = None
+
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
-    output_dir = None
 
     if latest_run_path.exists():
         try:
-            with open(latest_run_path, "r") as f:
+            with open(latest_run_path, "r", encoding="utf-8") as f:
                 output_dir_str = f.read().strip()
             output_dir = Path(output_dir_str)
             logger.debug(f"Found latest output dir: {output_dir}")
@@ -581,13 +841,34 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
                 output_dir = sorted(timestamped_dirs)[-1]
                 logger.debug(f"Using most recent output dir: {output_dir}")
 
-    # Use labels from output dir if available
+    if not output_dir or not output_dir.exists():
+        cloud_storage = _get_cloud_storage_helper()
+        if cloud_storage:
+            latest_timestamp = _find_latest_model_timestamp(cloud_storage)
+            if latest_timestamp:
+                temp_root = Path(tempfile.mkdtemp(prefix="diplomov_pr_ce_labels_"))
+                gcs_prefix = f"models/{latest_timestamp}/neuron_interpretations/"
+                if _download_gcs_prefix(
+                    cloud_storage, gcs_prefix, temp_root / "neuron_interpretations"
+                ):
+                    output_dir = temp_root
+                    logger.info(
+                        f"✅ Loaded labels from GCS run: gs://{cloud_storage.bucket_name}/{gcs_prefix}"
+                    )
+
+    # Use the neuron_interpretations directory, which stores labels_*.pkl
     labels_path = None
     if output_dir:
-        candidate = output_dir / "neuron_labels.json"
-        if candidate.exists():
-            labels_path = candidate
-            logger.info(f"✅ Using labels from: {labels_path}")
+        interpretations_dir = output_dir / "neuron_interpretations"
+        method_files = sorted(interpretations_dir.glob("labels_*.pkl"))
+        if method_files:
+            labels_path = interpretations_dir
+            logger.info(f"✅ Using labels from run directory: {labels_path}")
+        else:
+            candidate = interpretations_dir / "neuron_labels.json"
+            if candidate.exists():
+                labels_path = candidate
+                logger.info(f"✅ Using labels from: {labels_path}")
 
     # Fallback to default path
     if not labels_path:
@@ -628,7 +909,10 @@ def load_labeling_service(config: Dict, data_service=None) -> LabelingService:
 
 
 @st_cache_resource
-def load_wordcloud_service(config: Dict) -> "WordcloudService":
+def load_wordcloud_service(
+    config: Dict,
+    selected_output_dir: Optional[str] = None,
+) -> "WordcloudService":
     """
     Load wordcloud service for neuron feature visualization.
 
@@ -640,9 +924,14 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
         logger.error("WordcloudService not available")
         return None
 
-    # Find latest timestamped output directory
+    # Prefer the run selected in the Results page, then fall back to latest run.
+    output_dir = Path(selected_output_dir) if selected_output_dir else None
+
+    if output_dir and not output_dir.exists():
+        logger.warning("Selected output dir does not exist: %s", output_dir)
+        output_dir = None
+
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
-    output_dir = None
 
     if latest_run_path.exists():
         try:
@@ -666,12 +955,34 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
                 output_dir = sorted(timestamped_dirs)[-1]  # Most recent
                 logger.debug(f"Using most recent output dir: {output_dir}")
 
+    if not output_dir or not output_dir.exists():
+        cloud_storage = _get_cloud_storage_helper()
+        if cloud_storage:
+            latest_timestamp = _find_latest_model_timestamp(cloud_storage)
+            if latest_timestamp:
+                temp_root = Path(tempfile.mkdtemp(prefix="diplomov_pr_ce_wordclouds_"))
+                labels_prefix = f"models/{latest_timestamp}/neuron_interpretations/"
+                if _download_gcs_prefix(
+                    cloud_storage,
+                    labels_prefix,
+                    temp_root / "neuron_interpretations",
+                ) and _download_gcs_file(
+                    cloud_storage,
+                    f"models/{latest_timestamp}/neuron_category_metadata.json",
+                    temp_root / "neuron_category_metadata.json",
+                ):
+                    output_dir = temp_root
+                    logger.info(
+                        f"✅ Loaded interpretability artifacts from GCS run: gs://{cloud_storage.bucket_name}/models/{latest_timestamp}/"
+                    )
+
     # Look for label and metadata files
     labels_path = None
     metadata_path = None
 
     if output_dir:
-        labels_path = output_dir / "neuron_labels.json"
+        interpretations_dir = output_dir / "neuron_interpretations"
+        labels_path = interpretations_dir / "neuron_labels.json"
         metadata_path = output_dir / "neuron_category_metadata.json"
 
         if labels_path.exists():
@@ -696,15 +1007,23 @@ def load_wordcloud_service(config: Dict) -> "WordcloudService":
 
 
 @st_cache_resource
-def load_coactivation_service(config: Dict) -> Optional["CoactivationService"]:
+def load_coactivation_service(
+    config: Dict,
+    selected_output_dir: Optional[str] = None,
+) -> Optional["CoactivationService"]:
     """
     Load co-activation service for neuron relationship visualization.
 
     Provides co-activation relationships between neurons.
     """
-    # Find latest timestamped output directory
+    # Prefer the run selected in the Results page, then fall back to latest run.
+    output_dir = Path(selected_output_dir) if selected_output_dir else None
+
+    if output_dir and not output_dir.exists():
+        logger.warning("Selected output dir does not exist: %s", output_dir)
+        output_dir = None
+
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
-    output_dir = None
 
     if latest_run_path.exists():
         try:
@@ -728,6 +1047,24 @@ def load_coactivation_service(config: Dict) -> Optional["CoactivationService"]:
                 output_dir = sorted(timestamped_dirs)[-1]  # Most recent
                 logger.debug(f"Using most recent output dir: {output_dir}")
 
+    if not output_dir or not output_dir.exists():
+        cloud_storage = _get_cloud_storage_helper()
+        if cloud_storage:
+            latest_timestamp = _find_latest_model_timestamp(cloud_storage)
+            if latest_timestamp:
+                temp_root = Path(
+                    tempfile.mkdtemp(prefix="diplomov_pr_ce_coactivation_")
+                )
+                if _download_gcs_file(
+                    cloud_storage,
+                    f"models/{latest_timestamp}/neuron_coactivation.json",
+                    temp_root / "neuron_coactivation.json",
+                ):
+                    output_dir = temp_root
+                    logger.info(
+                        f"✅ Loaded coactivation data from GCS run: gs://{cloud_storage.bucket_name}/models/{latest_timestamp}/"
+                    )
+
     # Look for coactivation file
     coactivation_path = None
 
@@ -746,13 +1083,16 @@ def load_coactivation_service(config: Dict) -> Optional["CoactivationService"]:
 
 
 @st_cache_resource
-def load_training_results(config: Dict) -> Optional[Dict]:
+def load_training_results(
+    config: Dict,
+    selected_output_dir: Optional[str] = None,
+) -> Optional[Dict]:
     """
-    Load training results from GCS (if available) or local filesystem.
+    Load training results from GCS first, then local filesystem for offline use.
 
     Tries in order:
     1. Latest results from GCS (if GCS_BUCKET_NAME configured)
-    2. Latest results from local outputs/ directory
+    2. Latest results from local outputs/ directory as an offline fallback
 
     Returns:
         Dict with 'summary' and 'ranking_metrics' keys, or None if not found
@@ -760,6 +1100,19 @@ def load_training_results(config: Dict) -> Optional[Dict]:
     import os
 
     results = {"summary": None, "ranking_metrics": None, "source": None}
+
+    if selected_output_dir:
+        selected_run = _load_summary_from_run_dir(Path(selected_output_dir))
+        if selected_run:
+            return selected_run
+
+    # Prefer latest experiment sweep if one exists.
+    experiment_results = _load_gcs_experiment_results()
+    if not experiment_results:
+        experiment_results = _load_local_experiment_results(Path("outputs"))
+
+    if experiment_results:
+        return experiment_results
 
     # Try GCS first
     gcs_bucket_name = os.getenv("GCS_BUCKET_NAME")

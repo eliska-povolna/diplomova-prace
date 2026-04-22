@@ -103,25 +103,26 @@ try:
 
     # Initialize session state first
     init_session_state()
+    selected_output_dir = st.session_state.get("selected_result_run_dir")
 
     # Load and flatten config
     logger.info("Loading configuration...")
     config = load_config(config_path)
     _show_startup_diagnostics(config)
     with st.spinner("Loading models..."):
-        inference = load_inference_service(config)
+        inference = load_inference_service(config, selected_output_dir)
 
     with st.spinner("Loading POI data..."):
         data = load_data_service(config)
 
     with st.spinner("Initializing labeling service..."):
-        labels = load_labeling_service(config)
+        labels = load_labeling_service(config, selected_output_dir=selected_output_dir)
 
     with st.spinner("Initializing wordcloud service..."):
-        wordcloud = load_wordcloud_service(config)
+        wordcloud = load_wordcloud_service(config, selected_output_dir)
 
     with st.spinner("Initializing co-activation service..."):
-        coactivation = load_coactivation_service(config)
+        coactivation = load_coactivation_service(config, selected_output_dir)
 
     # 📋 **CRITICAL DIAGNOSTIC**: Show data sources for model vs coactivation
     logger.info("\n" + "=" * 80)
@@ -137,7 +138,7 @@ try:
         f"✓ Inference sparsity (k): {inference.sae.k} (top-k neurons to activate)"
     )
     logger.info(
-        f"✓ Coactivation source: outputs/ directory (LATEST_RUN.txt or most recent timestamp)"
+        f"✓ Coactivation source: GCS artifacts first, local outputs/ only as offline fallback"
     )
     if coactivation and coactivation.coactivation_data:
         coact_neuron_ids = [int(k) for k in coactivation.coactivation_data.keys()]
@@ -156,7 +157,7 @@ try:
                 f"   ⚠️ MISMATCH: Model has {model_neurons} neurons, coactivation references up to {max(coact_neuron_ids)}"
             )
             logger.warning(
-                f"   → Solution: Regenerate coactivation.json with: python scripts/generate_coactivation.py --output-dir outputs/LATEST_RUN"
+                f"   → Solution: Regenerate coactivation.json in the latest run, then upload the run artifacts to GCS"
             )
         else:
             logger.info(
@@ -165,7 +166,7 @@ try:
     logger.info("=" * 80 + "\n")
 
     with st.spinner("Loading training results..."):
-        training_results = load_training_results(config)
+        training_results = load_training_results(config, selected_output_dir)
 
     with st.spinner("Loading semantic search model..."):
         semantic_search_model = load_semantic_search_model()

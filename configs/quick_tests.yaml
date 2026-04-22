@@ -1,0 +1,142 @@
+# Quick test configurations for learning rate, patience, epochs, min_delta
+# Use with: python scripts/quick_param_test.py
+# Or adapt individual configs to configs/test_*.yaml and run: python src/train.py --config configs/test_generous.yaml
+
+# TEST 1: Current default (baseline)
+baseline_default: &baseline
+  data:
+    db_path: "../../Yelp-JSON/yelp.duckdb"
+    state_filter: "PA"
+    min_review_count: 20
+    pos_threshold: 4.0
+    train_test_split: 0.8
+    val_split: 0.1
+
+  elsa:
+    latent_dim: 512
+    learning_rate: 3e-4
+    batch_size: 1024
+    num_epochs: 25
+    patience: 10
+    weight_decay: 0.0
+    device: "cpu"
+
+  sae:
+    width_ratio: 4
+    k: 32
+    learning_rate: 3e-4
+    l1_coef: 3e-4
+    batch_size: 1024
+    num_epochs: 50
+    patience: 10
+    min_delta: 0.0001
+    device: "cpu"
+
+  output:
+    base_dir: "outputs"
+    log_level: "INFO"
+    save_frequency: 5
+
+# TEST 2: GENEROUS TRAINING (more patience, lower LR, more epochs)
+# Hypothesis: Give model more time to find optimum
+generous_training:
+  <<: *baseline
+  elsa:
+    <<: *baseline.elsa
+    learning_rate: 1e-4         # ↓ Lower LR (slower, more stable)
+    num_epochs: 50              # ↑ More epochs
+    patience: 20                # ↑ More patience
+
+  sae:
+    <<: *baseline.sae
+    learning_rate: 1e-4         # ↓ Lower LR
+    num_epochs: 100             # ↑ More epochs
+    patience: 20                # ↑ More patience
+    min_delta: 0.00001          # ↓ Smaller improvement threshold
+
+# TEST 3: AGGRESSIVE OPTIMIZATION (very low LR, lots of patience)
+# Hypothesis: Even more generous for better convergence
+aggressive_optimization:
+  <<: *baseline
+  elsa:
+    <<: *baseline.elsa
+    learning_rate: 5e-5         # ↓↓ Very low LR
+    num_epochs: 100             # ↑↑ Many epochs
+    patience: 30                # ↑↑ High patience
+    weight_decay: 1e-4          # ✓ Add regularization
+
+  sae:
+    <<: *baseline.sae
+    learning_rate: 5e-5         # ↓↓ Very low LR
+    num_epochs: 150             # ↑↑ Many epochs
+    patience: 30                # ↑↑ High patience
+    min_delta: 1e-6             # ↓↓ Very small threshold
+    l1_coef: 1e-4               # ↓ Gentle L1
+
+# TEST 4: QUICK TRAINING (test if we can get away with shorter training)
+# Hypothesis: Maybe current epochs are overkill
+quick_training:
+  <<: *baseline
+  elsa:
+    <<: *baseline.elsa
+    learning_rate: 3e-4
+    num_epochs: 15              # ↓ Fewer epochs
+    patience: 5                 # ↓ Lower patience
+
+  sae:
+    <<: *baseline.sae
+    num_epochs: 30              # ↓ Fewer epochs
+    patience: 5                 # ↓ Lower patience
+
+# TEST 5: BALANCED (moderate adjustments)
+balanced_training:
+  <<: *baseline
+  elsa:
+    <<: *baseline.elsa
+    learning_rate: 2e-4         # Middle ground
+    num_epochs: 40
+    patience: 15
+    weight_decay: 1e-4
+
+  sae:
+    <<: *baseline.sae
+    learning_rate: 2e-4
+    num_epochs: 75
+    patience: 15
+    min_delta: 0.00005
+
+# TEST 6: COMPRESSION FOCUS (encourage slower training for better reconstruction)
+compression_focus:
+  <<: *baseline
+  elsa:
+    <<: *baseline.elsa
+    learning_rate: 1e-4
+    num_epochs: 50
+    patience: 20
+    weight_decay: 0.0           # No ELSA regularization - let it learn
+
+  sae:
+    <<: *baseline.sae
+    learning_rate: 1e-4
+    l1_coef: 1e-4               # ↓ Lower L1 (allow more features)
+    num_epochs: 120
+    patience: 25
+    min_delta: 0.00001
+
+# TEST 7: GENERALIZATION FOCUS (force sparsity, use regularization)
+generalization_focus:
+  <<: *baseline
+  elsa:
+    <<: *baseline.elsa
+    learning_rate: 1e-4
+    num_epochs: 40
+    patience: 15
+    weight_decay: 5e-4          # ↑ Strong regularization
+
+  sae:
+    <<: *baseline.sae
+    learning_rate: 1e-4
+    l1_coef: 5e-4               # ↑ Stronger L1
+    num_epochs: 80
+    patience: 15
+    min_delta: 0.0001

@@ -3,7 +3,7 @@
 Pipeline:
   1. Load trained SAE model and training data
   2. Extract neuron activation profiles
-  3. Label neurons using tag-based and/or LLM-based methods
+    3. Label neurons using tag-based, matrix-based, and/or LLM-based methods
   4. Create neuron embeddings and cluster similar neurons into superfeatures
   5. Generate co-activation data from correlation matrices
   6. Save all results to output directory
@@ -21,6 +21,9 @@ Usage
 
     # Only generate coactivation data
     python -m src.label --coactivation-only
+
+    # Run all non-LLM labeling options
+    python -m src.label --method non-llm
 """
 
 from __future__ import annotations
@@ -41,8 +44,332 @@ from src.interpret.neuron_labeling import (
     NeuronEmbedder,
     SuperfeatureGenerator,
 )
+from src.interpret.matrix_based_labeling import matrix_based_neuron_labeling
+from src.run_registry import write_latest_run_pointer
 
 logger = logging.getLogger(__name__)
+
+
+def _load_business_metadata_fallback(data_dir: Path) -> dict:
+    """Rebuild business metadata when the saved pickle is missing.
+
+    The training pipeline only writes business_metadata.pkl when the metadata
+    object is available in memory. Older runs or alternative training paths may
+    not have that file, but they still usually have the DB and mapping files.
+    """
+    item_map_path = data_dir / "item_map_after_kcore.pkl"
+    reviews_path = data_dir / "reviews_df.pkl"
+
+    if not item_map_path.exists() and not reviews_path.exists():
+        raise FileNotFoundError(
+            f"Could not rebuild business metadata: missing {item_map_path.name} and {reviews_path.name}"
+        )
+
+    item_ids = None
+    if item_map_path.exists():
+        with open(item_map_path, "rb") as f:
+            item_map = pickle.load(f)
+        item_ids = list(item_map.keys())
+        logger.info(
+            f"Rebuilding business metadata from {item_map_path.name} ({len(item_ids)} items)"
+        )
+    else:
+        with open(reviews_path, "rb") as f:
+            reviews_df = pickle.load(f)
+        item_ids = sorted(set(reviews_df["business_id"].dropna().astype(str)))
+        logger.info(
+            f"Rebuilding business metadata from {reviews_path.name} ({len(item_ids)} businesses)"
+        )
+
+    config_path = Path("configs/default.yaml")
+    if not config_path.exists():
+        raise FileNotFoundError(
+            "configs/default.yaml not found, cannot resolve database path for metadata fallback"
+        )
+
+    import yaml
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+
+    data_config = config.get("data", {})
+    db_path = Path(data_config.get("db_path", "yelp.duckdb"))
+    if not db_path.is_absolute():
+        db_path = (Path(__file__).resolve().parent.parent / db_path).resolve()
+
+    from src.data.yelp_loader import load_businesses
+
+    businesses_df = load_businesses(
+        db_path=db_path,
+        state_filter=data_config.get("state_filter"),
+        min_review_count=0,
+    )
+
+    businesses_df = businesses_df[
+        businesses_df["business_id"].astype(str).isin(item_ids)
+    ]
+
+    business_metadata = {}
+    for _, row in businesses_df.iterrows():
+        categories = []
+        if "categories" in row and row["categories"] is not None:
+            categories = [
+                c.strip() for c in str(row["categories"]).split(",") if c.strip()
+            ]
+
+        business_metadata[str(row["business_id"])] = {
+            "name": row.get("name", "Unknown"),
+            "city": row.get("city", "Unknown"),
+            "state": row.get("state", "Unknown"),
+            "categories": categories,
+            "stars": row.get("stars", None),
+            "review_count": row.get("review_count", None),
+        }
+
+    if not business_metadata:
+        raise RuntimeError(
+            "Failed to reconstruct business metadata from DuckDB business table"
+        )
+
+    logger.info(
+        f"✓ Reconstructed business metadata for {len(business_metadata)} businesses from database"
+    )
+    return business_metadata
+
+
+def _load_experiment_manifest(experiment_dir: Path) -> dict:
+    manifest_path = experiment_dir / "manifest.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"Experiment manifest not found: {manifest_path}")
+
+    with manifest_path.open("r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    if not isinstance(manifest, dict):
+        raise ValueError(f"Invalid experiment manifest: {manifest_path}")
+
+    return manifest
+
+
+def _find_latest_experiment_dir() -> Optional[Path]:
+    pointer_path = Path("outputs") / "LATEST_EXPERIMENT.txt"
+    if pointer_path.exists():
+        try:
+            candidate = Path(pointer_path.read_text(encoding="utf-8").strip())
+            if candidate.exists() and (candidate / "manifest.json").exists():
+                return candidate
+        except Exception as e:
+            logger.warning(f"Failed to read LATEST_EXPERIMENT.txt: {e}")
+
+    experiments_base = Path("outputs") / "experiments"
+    if not experiments_base.exists():
+        return None
+
+    experiment_dirs = [
+        d
+        for d in experiments_base.iterdir()
+        if d.is_dir() and (d / "manifest.json").exists()
+    ]
+    if not experiment_dirs:
+        return None
+
+    return sorted(experiment_dirs, key=lambda d: d.name)[-1]
+
+
+def _label_experiment_runs(
+    experiment_dir: Path,
+    *,
+    method: str,
+    gemini_api_key: Optional[str],
+    similarity_threshold: float,
+    top_k: int,
+    skip_coactivation: bool,
+    coactivation_only: bool,
+) -> dict:
+    manifest = _load_experiment_manifest(experiment_dir)
+    runs = manifest.get("runs", [])
+    if not runs:
+        raise ValueError(f"No runs found in experiment manifest: {experiment_dir}")
+
+    logger.info("EXPERIMENT BATCH LABELING MODE")
+    logger.info("=" * 80)
+    logger.info(f"Experiment directory: {experiment_dir}")
+    logger.info(f"Run count: {len(runs)}")
+    logger.info("=" * 80)
+
+    batch_results = []
+    for idx, run in enumerate(runs, start=1):
+        run_dir = Path(run.get("run_dir", ""))
+        if not run_dir.exists():
+            logger.warning(f"Skipping missing run directory: {run_dir}")
+            continue
+
+        logger.info(f"[{idx}/{len(runs)}] Labeling run: {run_dir.name}")
+        result = label_neurons(
+            training_dir=run_dir,
+            method=method,
+            gemini_api_key=gemini_api_key,
+            similarity_threshold=similarity_threshold,
+            top_k=top_k,
+            skip_coactivation=skip_coactivation,
+            coactivation_only=coactivation_only,
+        )
+
+        batch_results.append(
+            {
+                "run_name": run.get("run_name"),
+                "run_dir": str(run_dir),
+                "result": {
+                    key: str(value) if isinstance(value, Path) else value
+                    for key, value in result.items()
+                },
+            }
+        )
+
+    label_manifest = {
+        "experiment_id": manifest.get("experiment_id"),
+        "experiment_dir": str(experiment_dir),
+        "created": manifest.get("created"),
+        "source_config": manifest.get("source_config"),
+        "base_config": manifest.get("base_config"),
+        "method": method,
+        "skip_coactivation": skip_coactivation,
+        "coactivation_only": coactivation_only,
+        "runs": batch_results,
+    }
+
+    label_manifest_path = experiment_dir / "labeling_manifest.json"
+    with label_manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(label_manifest, f, indent=2)
+
+    logger.info(f"✓ Saved batch labeling manifest: {label_manifest_path}")
+    return {
+        "mode": "experiment_batch",
+        "experiment_dir": str(experiment_dir),
+        "labeling_manifest": label_manifest_path,
+        "runs_labeled": len(batch_results),
+    }
+
+
+def _normalize_categories(categories) -> list[str]:
+    if not categories:
+        return []
+
+    if isinstance(categories, str):
+        categories = [part.strip() for part in categories.split(",")]
+
+    if not isinstance(categories, (list, tuple, set)):
+        return []
+
+    normalized = []
+    for category in categories:
+        category_text = str(category).strip()
+        if category_text:
+            normalized.append(category_text)
+    return normalized
+
+
+def _build_neuron_category_metadata(
+    neuron_profiles: dict,
+    business_metadata: dict,
+    top_k: int = 10,
+) -> dict:
+    """Build per-neuron category metadata for the interpretability UI."""
+
+    metadata = {}
+
+    for neuron_idx, profile in neuron_profiles.items():
+        max_items = profile.get("max_activating", {}).get("items", [])[:top_k]
+        category_weights: dict[str, list[float]] = {}
+        top_items = []
+        activation_values = []
+
+        for business_id, activation in max_items:
+            business_key = str(business_id)
+            business_info = business_metadata.get(business_key, {})
+            categories = _normalize_categories(business_info.get("categories", []))
+
+            activation_value = float(activation)
+            activation_values.append(activation_value)
+
+            top_items.append(
+                {
+                    "business_id": business_key,
+                    "item_id": business_key,
+                    "name": str(business_info.get("name", "Unknown")),
+                    "activation": activation_value,
+                    "categories": categories,
+                    "city": str(business_info.get("city", "Unknown")),
+                    "state": str(business_info.get("state", "Unknown")),
+                    "stars": (
+                        float(business_info["stars"])
+                        if business_info.get("stars") is not None
+                        else None
+                    ),
+                    "review_count": (
+                        int(business_info["review_count"])
+                        if business_info.get("review_count") is not None
+                        else None
+                    ),
+                }
+            )
+
+            for category in categories:
+                category_weights.setdefault(category, []).append(activation_value)
+
+        metadata[str(neuron_idx)] = {
+            "neuron_id": int(neuron_idx),
+            "top_items": top_items,
+            "category_weights": category_weights,
+            "top_categories": sorted(
+                category_weights.keys(),
+                key=lambda category: len(category_weights[category]),
+                reverse=True,
+            ),
+            "max_activation": max(activation_values) if activation_values else 0.0,
+            "mean_activation": (
+                sum(activation_values) / len(activation_values)
+                if activation_values
+                else 0.0
+            ),
+            "num_examples": len(top_items),
+        }
+
+    return metadata
+
+
+def _build_precomputed_wordcloud_payloads(category_metadata: dict) -> dict[str, dict]:
+    """Build simple wordcloud payloads for the optional UI cache."""
+    payloads = {}
+
+    for neuron_id, metadata in category_metadata.items():
+        frequencies: dict[str, int] = {}
+
+        for category, activations in metadata.get("category_weights", {}).items():
+            if not activations:
+                continue
+
+            weight = max(
+                1,
+                int(len(activations) * (sum(activations) / len(activations)) * 100),
+            )
+            frequencies[category] = weight
+
+        if not frequencies:
+            continue
+
+        words = []
+        for word, count in frequencies.items():
+            words.extend([word] * count)
+
+        payloads[str(neuron_id)] = {
+            "text": " ".join(words),
+            "freq": list(frequencies.values()),
+            "words": list(frequencies.keys()),
+            "word_count": len(frequencies),
+        }
+
+    return payloads
 
 
 def is_training_complete(training_dir: Path) -> bool:
@@ -195,13 +522,14 @@ def find_model_files(training_dir: Path) -> tuple:
     # Find business metadata
     business_metadata_path = data_dir / "business_metadata.pkl"
     if not business_metadata_path.exists():
-        raise FileNotFoundError(
-            f"Business metadata not found: {business_metadata_path}"
+        logger.warning(
+            f"Business metadata not found at {business_metadata_path}; will rebuild from database if needed"
         )
 
     logger.info(f"✓ Found SAE model: {sae_model.name}")
     logger.info(f"✓ Found data directory: {data_dir}")
-    logger.info(f"✓ Found business metadata")
+    if business_metadata_path.exists():
+        logger.info("✓ Found business metadata")
 
     return sae_model, data_dir, business_metadata_path
 
@@ -226,9 +554,15 @@ def load_sae_model(model_path: Path, config: dict) -> tuple:
     except ImportError:
         raise ImportError("Could not import SAE model from src.models")
 
-    hidden_dim = config.get("hidden_dim", 256)
-    k = config.get("k", 32)
-    latent_dim = config.get("latent_dim", 128)
+    elsa_config = config.get("elsa", {})
+    sae_config = config.get("sae", {})
+
+    latent_dim = config.get("latent_dim", elsa_config.get("latent_dim", 128))
+    hidden_dim = config.get(
+        "hidden_dim",
+        sae_config.get("hidden_dim") or (sae_config.get("width_ratio", 2) * latent_dim),
+    )
+    k = config.get("k", sae_config.get("k", 32))
 
     model = TopKSAE(latent_dim, hidden_dim, k)
     model.load_state_dict(torch.load(model_path, map_location="cpu"))
@@ -305,7 +639,34 @@ def extract_neuron_profiles(
     return profiles
 
 
-def generate_coactivations(training_dir: Path) -> None:
+def _load_neuron_labels_for_coactivation(training_dir: Path) -> dict[int, str]:
+    """Load the selected neuron labels used to annotate coactivation outputs."""
+    labels_path = training_dir / "neuron_interpretations" / "neuron_labels.json"
+    if not labels_path.exists():
+        raise FileNotFoundError(
+            f"Missing neuron labels artifact required for coactivation generation: {labels_path}"
+        )
+
+    with labels_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    labels = payload.get("neuron_labels")
+    if not isinstance(labels, dict) or not labels:
+        raise RuntimeError(
+            f"Invalid neuron labels artifact for coactivation generation: {labels_path}"
+        )
+
+    return {int(neuron_id): str(label) for neuron_id, label in labels.items()}
+
+
+def _require_neuron_label(neuron_labels: dict[int, str], neuron_id: int) -> str:
+    label = neuron_labels.get(int(neuron_id))
+    if not label:
+        raise KeyError(f"Missing label for neuron {neuron_id} in coactivation data")
+    return label
+
+
+def generate_coactivations(training_dir: Path, neuron_labels: dict[int, str]) -> None:
     """Generate coactivation data from sparse activations.
 
     Parameters
@@ -372,6 +733,7 @@ def generate_coactivations(training_dir: Path) -> None:
                         highly_coactivated.append(
                             {
                                 "neuron_id": int(idx),
+                                "label": _require_neuron_label(neuron_labels, int(idx)),
                                 "correlation": float(corr_val),
                             }
                         )
@@ -385,12 +747,14 @@ def generate_coactivations(training_dir: Path) -> None:
                         rarely_coactivated.append(
                             {
                                 "neuron_id": int(idx),
+                                "label": _require_neuron_label(neuron_labels, int(idx)),
                                 "correlation": float(corr_val),
                             }
                         )
 
             coactivation_data[str(i)] = {
                 "neuron_id": i,
+                "label": _require_neuron_label(neuron_labels, i),
                 "highly_coactivated": highly_coactivated,
                 "rarely_coactivated": rarely_coactivated,
             }
@@ -471,7 +835,8 @@ def label_neurons(
         logger.info("COACTIVATION-ONLY MODE")
         logger.info("=" * 80)
 
-        generate_coactivations(training_dir)
+        neuron_labels = _load_neuron_labels_for_coactivation(training_dir)
+        generate_coactivations(training_dir, neuron_labels)
 
         return {
             "mode": "coactivation_only",
@@ -489,14 +854,28 @@ def label_neurons(
     # Load data
     logger.info("Loading data...")
 
-    with open(data_path / "processed_train.pkl", "rb") as f:
-        X_train = pickle.load(f)
+    item2index_path = data_path / "item2index.pkl"
+    if item2index_path.exists():
+        with open(item2index_path, "rb") as f:
+            item2index = pickle.load(f)
+        logger.info(f"  Loaded item2index from {item2index_path.name}")
+    else:
+        fallback_item_map = data_path / "item_map_after_kcore.pkl"
+        if not fallback_item_map.exists():
+            raise FileNotFoundError(
+                f"Neither {item2index_path.name} nor {fallback_item_map.name} was found in {data_path}"
+            )
+        with open(fallback_item_map, "rb") as f:
+            item2index = pickle.load(f)
+        logger.info(
+            f"  Loaded item2index from fallback mapping {fallback_item_map.name}"
+        )
 
-    with open(data_path / "item2index.pkl", "rb") as f:
-        item2index = pickle.load(f)
-
-    with open(business_metadata_path, "rb") as f:
-        business_metadata = pickle.load(f)
+    if business_metadata_path is not None and business_metadata_path.exists():
+        with open(business_metadata_path, "rb") as f:
+            business_metadata = pickle.load(f)
+    else:
+        business_metadata = _load_business_metadata_fallback(data_path)
 
     logger.info(f"  Items: {len(item2index)}")
     logger.info(f"  Metadata entries: {len(business_metadata)}")
@@ -509,12 +888,16 @@ def label_neurons(
         with open(config_path) as f:
             config = yaml.safe_load(f)
         sae_config = config.get("sae", {})
+        elsa_config = config.get("elsa", {})
     else:
-        sae_config = {"hidden_dim": 256, "k": 32, "latent_dim": 128}
+        sae_config = {"width_ratio": 2, "k": 32}
+        elsa_config = {"latent_dim": 128}
 
     # Compute sparse activations
     logger.info("Computing sparse activations...")
-    num_neurons = sae_config.get("k", 32)
+    num_neurons = sae_config.get("hidden_dim") or (
+        sae_config.get("width_ratio", 2) * elsa_config.get("latent_dim", 128)
+    )
     sparse_activations = torch.rand(len(item2index), num_neurons)
 
     # Extract profiles
@@ -529,7 +912,7 @@ def label_neurons(
     # Label neurons
     all_labels = {}
 
-    if method in ["tag-based", "both"]:
+    if method in ["tag-based", "non-llm", "both"]:
         logger.info("=" * 80)
         logger.info("PHASE 1: TAG-BASED LABELING")
         logger.info("=" * 80)
@@ -544,9 +927,32 @@ def label_neurons(
         except Exception as e:
             logger.error(f"Tag-based labeling failed: {e}")
 
+    if method in ["matrix-based", "non-llm"]:
+        logger.info("=" * 80)
+        logger.info("PHASE 2: MATRIX-BASED LABELING")
+        logger.info("=" * 80)
+        try:
+            index_to_business_id = {
+                index: business_id for business_id, index in item2index.items()
+            }
+            labels, analysis_results = matrix_based_neuron_labeling(
+                business_metadata=business_metadata,
+                item_index_to_business_id=index_to_business_id,
+                neuron_profiles=neuron_profiles,
+                sparse_activations=sparse_activations,
+            )
+            all_labels["matrix-based"] = labels
+
+            logger.info(f"✓ Labeled {len(labels)} neurons")
+            logger.info(f"  Tags extracted: {analysis_results.get('num_tags', 'N/A')}")
+            for nid, label in list(labels.items())[:5]:
+                logger.info(f"  Neuron {nid}: {label}")
+        except Exception as e:
+            logger.error(f"Matrix-based labeling failed: {e}")
+
     if method in ["llm-based", "both"]:
         logger.info("=" * 80)
-        logger.info("PHASE 2: LLM-BASED LABELING")
+        logger.info("PHASE 3: LLM-BASED LABELING")
         logger.info("=" * 80)
         try:
             labeler = LLMBasedLabeler(api_key=gemini_api_key)
@@ -629,6 +1035,20 @@ def label_neurons(
         output_files[f"labels_{method_name}"] = output_file
         logger.info(f"✓ Saved {method_name} labels: {output_file}")
 
+    labels_json_path = output_dir / "neuron_labels.json"
+    with labels_json_path.open("w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "selected_method": selected_method,
+                "neuron_labels": selected_labels,
+                "methods": all_labels,
+            },
+            f,
+            indent=2,
+        )
+    output_files["labels_json"] = labels_json_path
+    logger.info(f"✓ Saved labels JSON: {labels_json_path}")
+
     # Save embeddings
     if embeddings is not None:
         output_file = output_dir / "neuron_embeddings.pt"
@@ -666,12 +1086,45 @@ def label_neurons(
     output_files["summary"] = output_file
     logger.info(f"✓ Saved summary: {output_file}")
 
+    # Save interpretability metadata for the Streamlit UI
+    logger.info("Saving interpretability metadata...")
+    category_metadata = _build_neuron_category_metadata(
+        neuron_profiles=neuron_profiles,
+        business_metadata=business_metadata,
+        top_k=top_k,
+    )
+
+    category_metadata_path = training_dir / "neuron_category_metadata.json"
+    with category_metadata_path.open("w", encoding="utf-8") as f:
+        json.dump(category_metadata, f, indent=2)
+    output_files["category_metadata"] = category_metadata_path
+    logger.info(f"✓ Saved category metadata: {category_metadata_path}")
+
+    precomputed_cache_dir = training_dir / "precomputed_ui_cache" / "neuron_wordclouds"
+    precomputed_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    wordcloud_payloads = _build_precomputed_wordcloud_payloads(category_metadata)
+    for neuron_id, payload in wordcloud_payloads.items():
+        output_file = precomputed_cache_dir / f"neuron_{neuron_id}.json"
+        with output_file.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    wordclouds_path = precomputed_cache_dir / "wordclouds.json"
+    with wordclouds_path.open("w", encoding="utf-8") as f:
+        json.dump(wordcloud_payloads, f, indent=2)
+
+    output_files["wordcloud_cache"] = wordclouds_path
+    logger.info(
+        f"✓ Saved precomputed wordcloud cache: {wordclouds_path} ({len(wordcloud_payloads)} neurons)"
+    )
+
     # Generate coactivation data
     if not skip_coactivation:
-        generate_coactivations(training_dir)
+        generate_coactivations(training_dir, selected_labels)
         output_files["coactivation"] = training_dir / "neuron_coactivation.json"
 
     output_files["output_dir"] = output_dir
+    write_latest_run_pointer(training_dir)
     return output_files
 
 
@@ -683,6 +1136,7 @@ def main():
         "  1. FULL (default): Labels + embeddings + superfeatures + coactivations\n"
         "  2. NO COACTIVATION: Labels + embeddings + superfeatures (skip coactivation)\n"
         "  3. COACTIVATION ONLY: Just generate coactivation data (skip all labeling)\n"
+        "  4. NON-LLM: Tag-based + matrix-based labels without Gemini\n"
         "\nEXAMPLES:\n"
         "  # Full: auto-detect latest model and generate everything\n"
         "  python -m src.label\n"
@@ -693,7 +1147,11 @@ def main():
         "\n  # Only coactivation (skip all labeling)\n"
         "  python -m src.label --coactivation-only\n"
         "\n  # Tag-based labeling only\n"
-        "  python -m src.label --method tag-based",
+        "  python -m src.label --method tag-based\n"
+        "\n  # Matrix-based labeling only\n"
+        "  python -m src.label --method matrix-based\n"
+        "\n  # All non-LLM labeling methods\n"
+        "  python -m src.label --method non-llm",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -703,6 +1161,12 @@ def main():
         type=Path,
         default=None,
         help="Training output directory (default: auto-detect latest run)",
+    )
+    parser.add_argument(
+        "--experiment-dir",
+        type=Path,
+        default=None,
+        help="Experiment directory containing manifest.json (labels every run in the experiment)",
     )
 
     # Optional overrides
@@ -729,9 +1193,9 @@ def main():
     parser.add_argument(
         "--method",
         type=str,
-        choices=["tag-based", "llm-based", "both"],
+        choices=["tag-based", "matrix-based", "llm-based", "non-llm", "both"],
         default="both",
-        help="Labeling method to use (default: both)",
+        help="Labeling method to use (default: both; non-llm runs tag-based + matrix-based)",
     )
     parser.add_argument(
         "--gemini-api-key",
@@ -767,6 +1231,8 @@ def main():
     # Validate conflicting options
     if args.skip_coactivation and args.coactivation_only:
         parser.error("Cannot use --skip-coactivation and --coactivation-only together")
+    if args.training_dir and args.experiment_dir:
+        parser.error("Cannot use --training-dir and --experiment-dir together")
 
     # Setup logging
     from src.utils import setup_logger
@@ -778,20 +1244,66 @@ def main():
     print("=" * 80)
 
     # Call main labeling function
-    results = label_neurons(
-        training_dir=args.training_dir,
-        model_path=args.model_path,
-        data_path=args.data_path,
-        business_metadata_path=args.business_metadata,
-        method=args.method,
-        gemini_api_key=args.gemini_api_key,
-        similarity_threshold=args.similarity_threshold,
-        top_k=args.top_k,
-        skip_coactivation=args.skip_coactivation,
-        coactivation_only=args.coactivation_only,
-    )
+    if args.experiment_dir:
+        results = _label_experiment_runs(
+            args.experiment_dir,
+            method=args.method,
+            gemini_api_key=args.gemini_api_key,
+            similarity_threshold=args.similarity_threshold,
+            top_k=args.top_k,
+            skip_coactivation=args.skip_coactivation,
+            coactivation_only=args.coactivation_only,
+        )
+    elif args.training_dir is None:
+        latest_experiment_dir = _find_latest_experiment_dir()
+        if latest_experiment_dir:
+            logger.info(
+                f"Detected latest experiment directory, labeling all runs: {latest_experiment_dir}"
+            )
+            results = _label_experiment_runs(
+                latest_experiment_dir,
+                method=args.method,
+                gemini_api_key=args.gemini_api_key,
+                similarity_threshold=args.similarity_threshold,
+                top_k=args.top_k,
+                skip_coactivation=args.skip_coactivation,
+                coactivation_only=args.coactivation_only,
+            )
+        else:
+            results = label_neurons(
+                training_dir=args.training_dir,
+                model_path=args.model_path,
+                data_path=args.data_path,
+                business_metadata_path=args.business_metadata,
+                method=args.method,
+                gemini_api_key=args.gemini_api_key,
+                similarity_threshold=args.similarity_threshold,
+                top_k=args.top_k,
+                skip_coactivation=args.skip_coactivation,
+                coactivation_only=args.coactivation_only,
+            )
+    else:
+        results = label_neurons(
+            training_dir=args.training_dir,
+            model_path=args.model_path,
+            data_path=args.data_path,
+            business_metadata_path=args.business_metadata,
+            method=args.method,
+            gemini_api_key=args.gemini_api_key,
+            similarity_threshold=args.similarity_threshold,
+            top_k=args.top_k,
+            skip_coactivation=args.skip_coactivation,
+            coactivation_only=args.coactivation_only,
+        )
 
-    if args.coactivation_only:
+    if results.get("mode") == "experiment_batch":
+        print("\n" + "=" * 80)
+        print("✓ EXPERIMENT BATCH LABELING COMPLETE")
+        print("=" * 80)
+        print(f"Experiment directory: {results.get('experiment_dir', 'N/A')}")
+        print(f"Runs labeled: {results.get('runs_labeled', 0)}")
+        print(f"Batch manifest: {results.get('labeling_manifest', 'N/A')}")
+    elif args.coactivation_only:
         print("\n" + "=" * 80)
         print("✓ COACTIVATION GENERATION COMPLETE")
         print("=" * 80)

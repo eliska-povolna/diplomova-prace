@@ -44,6 +44,44 @@ project_root = Path(__file__).resolve().parent.parent
 logger = logging.getLogger(__name__)
 
 
+def _apply_kcore_filtering_to_reviews(
+    reviews,
+    *,
+    k: int = 5,
+    max_iterations: int = 10,
+):
+    """Iteratively keep only user-item pairs that satisfy k-core filtering."""
+    filtered = reviews[["user_id", "business_id"]].dropna().drop_duplicates()
+
+    for iteration in range(max_iterations):
+        old_count = len(filtered)
+
+        user_counts = filtered["user_id"].value_counts()
+        item_counts = filtered["business_id"].value_counts()
+
+        keep_users = set(user_counts[user_counts >= k].index)
+        keep_items = set(item_counts[item_counts >= k].index)
+
+        filtered = filtered[
+            filtered["user_id"].isin(keep_users)
+            & filtered["business_id"].isin(keep_items)
+        ].drop_duplicates()
+
+        logger.info(
+            "5-core (k=%d, iter=%d): %d interactions (removed %d)",
+            k,
+            iteration + 1,
+            len(filtered),
+            old_count - len(filtered),
+        )
+
+        if len(filtered) == old_count:
+            logger.info("5-core filtering converged after %d iterations", iteration + 1)
+            break
+
+    return filtered.reset_index(drop=True)
+
+
 def _get_db_path_from_config(config: dict) -> str:
     """Return DuckDB path with unified key precedence.
 
@@ -123,21 +161,33 @@ def build_csr_matrices(config: dict, preprocess_dir: Path) -> bool:
     try:
         db_path = _get_db_path_from_config(config)
 
-        # Load reviews (ALL data, NO filtering - filtering happens at training time)
+        # Load positive reviews only (stars >= 4.0)
         logger.info("\nLoading reviews from database...")
         reviews = load_reviews(
             db_path=db_path,
-            pos_threshold=config["data"]["pos_threshold"],
+            pos_threshold=4.0,
             year_min=config["data"].get("year_min"),
             year_max=config["data"].get("year_max"),
         )
 
-        logger.info(f"✓ Loaded {len(reviews):,} reviews")
+        logger.info(f"✓ Loaded {len(reviews):,} positive reviews (stars >= 4.0)")
         logger.info(
             f"  User-item pairs: {reviews[['user_id', 'business_id']].drop_duplicates().shape[0]:,}"
         )
 
-        # Load businesses (ALL states, no filtering in preprocessing)
+        logger.info("\nApplying 5-core filtering (k=5)...")
+        reviews = _apply_kcore_filtering_to_reviews(reviews, k=5)
+
+        if reviews.empty:
+            logger.error("No interactions remain after 5-core filtering")
+            return False
+
+        logger.info(f"✓ Retained {len(reviews):,} interactions after 5-core filtering")
+        logger.info(
+            f"  Remaining users: {reviews['user_id'].nunique():,}, items: {reviews['business_id'].nunique():,}"
+        )
+
+        # Load businesses for the items that survived 5-core filtering
         logger.info("\nLoading businesses from database...")
         businesses = load_businesses(
             db_path=db_path,
@@ -145,7 +195,9 @@ def build_csr_matrices(config: dict, preprocess_dir: Path) -> bool:
             min_review_count=0,  # NO business-level filtering
         )
 
-        logger.info(f"✓ Loaded {len(businesses):,} businesses")
+        businesses = businesses[businesses["business_id"].isin(reviews["business_id"])]
+
+        logger.info(f"✓ Loaded {len(businesses):,} businesses after 5-core filtering")
         logger.info(f"  States: {businesses['state'].nunique()} unique")
 
         # Build CSR matrix
@@ -174,7 +226,9 @@ def build_csr_matrices(config: dict, preprocess_dir: Path) -> bool:
             "density_percent": float(
                 100.0 * dataset.csr.nnz / (dataset.csr.shape[0] * dataset.csr.shape[1])
             ),
-            "note": "Universal mappings (no filtering). Filtering happens at training time.",
+            "k_core": 5,
+            "pos_threshold": 4.0,
+            "note": "Positive interactions (stars >= 4.0) with iterative 5-core filtering.",
         }
 
         metadata_path = preprocess_dir / "preprocessing_info.json"

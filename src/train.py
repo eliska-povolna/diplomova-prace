@@ -16,15 +16,21 @@ Usage
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import os
 import pickle
+import subprocess
+import sys
 import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
+import yaml
 import torch
 import torch.optim as optim
 from scipy.sparse import csr_matrix
@@ -40,12 +46,361 @@ from src.data.preprocessing import (
 from src.data.yelp_loader import load_businesses, load_reviews
 from src.models.collaborative_filtering import ELSA, NMSELoss
 from src.models.sparse_autoencoder import TopKSAE
-from src.run_registry import RunRegistry, create_run_id
+from src.run_registry import RunRegistry, create_run_id, write_latest_run_pointer
 from src.ui.services.secrets_helper import get_cloud_storage_bucket
 from src.utils import CheckpointManager, Config, load_config, setup_logger
-from src.utils.evaluation import evaluate_recommendations, print_evaluation_report
+from src.utils.evaluation import (
+    build_holdout_split_sparse,
+    compare_model_performance,
+    compute_coverage,
+    compute_entropy,
+    evaluate_recommendations_batched,
+    benchmark_inference,
+    print_evaluation_report,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _load_yaml_dict(path: str | Path) -> dict:
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML config must be a dictionary: {path}")
+    return data
+
+
+def _deep_merge_dict(base: dict, override: dict) -> dict:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _expand_sweep_dict(mapping: dict) -> list[dict]:
+    """Expand a dict with list-valued leaves into a cartesian product of variants."""
+
+    def _expand_node(node):
+        if isinstance(node, dict):
+            variants = [{}]
+            for key, value in node.items():
+                child_variants = _expand_node(value)
+                next_variants = []
+                for current in variants:
+                    for child in child_variants:
+                        combined = copy.deepcopy(current)
+                        combined[key] = copy.deepcopy(child)
+                        next_variants.append(combined)
+                variants = next_variants
+            return variants
+
+        if isinstance(node, list):
+            return [copy.deepcopy(item) for item in node]
+
+        return [copy.deepcopy(node)]
+
+    return _expand_node(mapping)
+
+
+def _write_experiment_pointer(experiment_dir: Path) -> Path:
+    pointer_path = Path.cwd() / "outputs" / "LATEST_EXPERIMENT.txt"
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+    pointer_path.write_text(str(experiment_dir), encoding="utf-8")
+    logger.info(
+        f"Latest experiment pointer updated: {pointer_path} -> {experiment_dir}"
+    )
+    return pointer_path
+
+
+def _save_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+
+
+def _upload_experiment_manifest_to_cloud(
+    experiment_dir: Path, experiment_id: str
+) -> bool:
+    """Upload experiment sweep metadata so the UI can discover it from GCS."""
+    try:
+        gcs_bucket_name = get_cloud_storage_bucket()
+        if not gcs_bucket_name:
+            logger.info("GCS_BUCKET_NAME not set, skipping experiment manifest upload")
+            return True
+
+        from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+        cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
+        manifest_path = experiment_dir / "manifest.json"
+        if manifest_path.exists():
+            cloud_storage.upload_json(
+                manifest_path,
+                f"experiments/{experiment_id}/manifest.json",
+                metadata={"timestamp": experiment_id, "type": "experiment_manifest"},
+            )
+
+        latest_pointer = Path.cwd() / "outputs" / "LATEST_EXPERIMENT.txt"
+        if latest_pointer.exists():
+            blob = cloud_storage.bucket.blob("experiments/LATEST_EXPERIMENT.txt")
+            blob.upload_from_filename(str(latest_pointer), content_type="text/plain")
+
+        logger.info(f"✅ Uploaded experiment manifest to GCS: {experiment_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to upload experiment manifest to GCS: {e}")
+        return False
+
+
+def _run_experiment_sweep(args: argparse.Namespace) -> None:
+    """Run multiple training jobs from an experiments YAML file."""
+
+    project_root = Path(__file__).resolve().parent.parent
+    experiment_config = _load_yaml_dict(args.config)
+    if "experiments" not in experiment_config:
+        raise ValueError(
+            f"{args.config} does not contain an 'experiments' list; use normal training mode instead."
+        )
+
+    base_config = _load_yaml_dict(args.base_config)
+    experiments = experiment_config.get("experiments", [])
+    if not experiments:
+        logger.warning("No experiments defined in experiments file")
+        return
+
+    output_base = Path(base_config.get("output", {}).get("base_dir", "outputs"))
+    experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_dir = output_base / "experiments" / experiment_id
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    _write_experiment_pointer(experiment_dir)
+
+    manifest: dict = {
+        "experiment_id": experiment_id,
+        "created": datetime.now().isoformat(),
+        "source_config": str(Path(args.config).resolve()),
+        "base_config": str(Path(args.base_config).resolve()),
+        "runs": [],
+    }
+
+    logger.info("=" * 60)
+    logger.info("EXPERIMENT SWEEP MODE")
+    logger.info(f"Experiment ID: {experiment_id}")
+    logger.info(f"Experiments config: {args.config}")
+    logger.info(f"Base config: {args.base_config}")
+    logger.info("=" * 60)
+
+    total_runs = 0
+    for experiment in experiments:
+        experiment_name = experiment.get("name", "unnamed_experiment")
+        experiment_desc = experiment.get("description", "")
+        sweep_source = {
+            key: value
+            for key, value in experiment.items()
+            if key not in {"name", "description"}
+        }
+        variants = _expand_sweep_dict(sweep_source)
+
+        logger.info(
+            f"Experiment '{experiment_name}' -> {len(variants)} run(s): {experiment_desc}"
+        )
+
+        for variant_idx, variant in enumerate(variants, start=1):
+            total_runs += 1
+            resolved_config = _deep_merge_dict(base_config, variant)
+            resolved_config["experiment"] = {
+                "experiment_id": experiment_id,
+                "experiment_name": experiment_name,
+                "experiment_description": experiment_desc,
+                "variant_index": variant_idx,
+                "variant_count": len(variants),
+            }
+
+            run_name = f"{experiment_name}_run{variant_idx:03d}"
+            run_config_path = experiment_dir / f"{run_name}.yaml"
+            _save_yaml(run_config_path, resolved_config)
+
+            logger.info("-" * 60)
+            logger.info(
+                f"[{total_runs}] Running {run_name} (variant {variant_idx}/{len(variants)})"
+            )
+            logger.info("Resolved config saved to: %s", run_config_path)
+
+            command = [
+                sys.executable,
+                "-m",
+                "src.train",
+                "--config",
+                str(run_config_path),
+            ]
+            if args.skip_preprocessing:
+                command.append("--skip-preprocessing")
+            if args.skip_elsa:
+                command.append("--skip-elsa")
+            if args.skip_sae:
+                command.append("--skip-sae")
+            if args.elsa_checkpoint:
+                command.extend(["--elsa-checkpoint", args.elsa_checkpoint])
+            if args.sae_checkpoint:
+                command.extend(["--sae-checkpoint", args.sae_checkpoint])
+
+            result = subprocess.run(command, cwd=project_root)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Experiment run failed: {run_name} (exit code {result.returncode})"
+                )
+
+            latest_run_path = Path.cwd() / "outputs" / "LATEST_RUN.txt"
+            if latest_run_path.exists():
+                run_dir = Path(latest_run_path.read_text(encoding="utf-8").strip())
+            else:
+                run_dir = Path("outputs")
+
+            summary_path = run_dir / "summary.json"
+            summary = None
+            if summary_path.exists():
+                try:
+                    with summary_path.open("r", encoding="utf-8") as f:
+                        summary = json.load(f)
+                except Exception as exc:
+                    logger.warning(f"Could not load summary for {run_name}: {exc}")
+
+            manifest["runs"].append(
+                {
+                    "run_name": run_name,
+                    "experiment_name": experiment_name,
+                    "variant_index": variant_idx,
+                    "run_dir": str(run_dir),
+                    "config_path": str(run_config_path),
+                    "summary_path": str(summary_path),
+                    "summary": summary,
+                    "parameters": variant,
+                }
+            )
+
+    manifest_path = experiment_dir / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    logger.info(f"Saved experiment manifest: {manifest_path}")
+    _upload_experiment_manifest_to_cloud(experiment_dir, experiment_id)
+    logger.info(f"Total experiment runs completed: {total_runs}")
+
+
+def _build_business_metadata_from_db(
+    db_path: str | Path,
+    item_map_after_kcore: dict,
+    state_filter: str | None = None,
+) -> dict:
+    """Build business metadata for the items that survived k-core filtering."""
+    businesses = load_businesses(
+        db_path=db_path,
+        state_filter=state_filter,
+        min_review_count=0,
+    )
+
+    item_ids = {str(business_id) for business_id in item_map_after_kcore.keys()}
+    businesses = businesses[businesses["business_id"].astype(str).isin(item_ids)]
+
+    business_metadata = {}
+    for _, row in businesses.iterrows():
+        categories = []
+        if "categories" in row and row["categories"] is not None:
+            categories = [
+                category.strip()
+                for category in str(row["categories"]).split(",")
+                if category.strip()
+            ]
+
+        business_metadata[str(row["business_id"])] = {
+            "name": row.get("name", "Unknown"),
+            "city": row.get("city", "Unknown"),
+            "state": row.get("state", "Unknown"),
+            "categories": categories,
+            "stars": row.get("stars", None),
+            "review_count": row.get("review_count", None),
+        }
+
+    return business_metadata
+
+
+def _score_elsa_batch(elsa_model: ELSA, batch: np.ndarray, device: str) -> np.ndarray:
+    batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        scores = elsa_model.decode(elsa_model.encode(batch_tensor)).cpu().numpy()
+    scores = scores - batch
+    scores[batch > 0] = -np.inf
+    return scores
+
+
+def _score_sae_batch(
+    elsa_model: ELSA,
+    sae_model: TopKSAE,
+    batch: np.ndarray,
+    device: str,
+) -> np.ndarray:
+    batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        scores = (
+            elsa_model.decode(
+                sae_model.decode(sae_model.encode(elsa_model.encode(batch_tensor)))
+            )
+            .cpu()
+            .numpy()
+        )
+    scores = scores - batch
+    scores[batch > 0] = -np.inf
+    return scores
+
+
+def _compute_auxiliary_metrics(
+    elsa_model: ELSA,
+    sae_model: TopKSAE,
+    X_input_csr,
+    *,
+    device: str,
+    batch_size: int,
+    top_k: int,
+) -> tuple[float, float, dict[str, float]]:
+    n_items = X_input_csr.shape[1]
+    item_counts = np.zeros(n_items, dtype=np.int64)
+    total_recommendations = 0
+    latency_sample_scores: list[np.ndarray] = []
+    collected_latency_users = 0
+    target_latency_users = min(100, X_input_csr.shape[0])
+
+    for start in range(0, X_input_csr.shape[0], batch_size):
+        end = min(start + batch_size, X_input_csr.shape[0])
+        batch = X_input_csr[start:end].toarray().astype(np.float32)
+        scores = _score_sae_batch(elsa_model, sae_model, batch, device)
+
+        top_items = np.argsort(-scores, axis=1)[:, :top_k]
+        for row in top_items:
+            item_counts[row] += 1
+        total_recommendations += top_items.size
+
+        if collected_latency_users < target_latency_users:
+            take = min(scores.shape[0], target_latency_users - collected_latency_users)
+            latency_sample_scores.append(scores[:take])
+            collected_latency_users += take
+
+    coverage = float(np.count_nonzero(item_counts) / n_items) if n_items > 0 else 0.0
+
+    if total_recommendations > 0 and n_items > 1:
+        probs = item_counts[item_counts > 0] / total_recommendations
+        entropy = float(-np.sum(probs * np.log(probs)) / np.log(n_items))
+    else:
+        entropy = 0.0
+
+    latency_metrics = {"mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0}
+    if latency_sample_scores:
+        latency_metrics = benchmark_inference(
+            np.vstack(latency_sample_scores),
+            n_samples=min(100, collected_latency_users),
+        )
+
+    return coverage, entropy, latency_metrics
 
 
 def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
@@ -72,6 +427,20 @@ def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
 
         gcs_prefix = f"models/{timestamp}"
 
+        def _upload_file(
+            local_file: Path, gcs_path: str, content_type: Optional[str] = None
+        ) -> None:
+            if not local_file.exists():
+                return
+            blob = cloud_storage.bucket.blob(gcs_path)
+            if content_type:
+                blob.upload_from_filename(str(local_file), content_type=content_type)
+            else:
+                blob.upload_from_filename(str(local_file))
+            logger.info(
+                f"✅ Uploaded {local_file.name} → gs://{gcs_bucket_name}/{gcs_path}"
+            )
+
         # Upload summary.json
         summary_path = output_dir / "summary.json"
         if summary_path.exists():
@@ -80,6 +449,12 @@ def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
                 f"{gcs_prefix}/summary.json",
                 metadata={"timestamp": timestamp, "type": "training_summary"},
             )
+
+        # Upload resolved config for experiment comparison / ablations
+        config_path = output_dir / "resolved_config.yaml"
+        if config_path.exists():
+            blob = cloud_storage.bucket.blob(f"{gcs_prefix}/resolved_config.yaml")
+            blob.upload_from_filename(str(config_path), content_type="text/yaml")
 
         # Upload training_results.json
         results_path = output_dir / "training_results.json"
@@ -92,11 +467,74 @@ def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
 
         # Upload ranking metrics report (text)
         report_path = output_dir / "ranking_metrics_report.txt"
-        if report_path.exists():
-            blob = cloud_storage.bucket.blob(f"{gcs_prefix}/ranking_metrics_report.txt")
-            blob.upload_from_filename(str(report_path), content_type="text/plain")
-            logger.info(
-                f"✅ Uploaded ranking metrics report → gs://{gcs_bucket_name}/{gcs_prefix}/ranking_metrics_report.txt"
+        _upload_file(
+            report_path, f"{gcs_prefix}/ranking_metrics_report.txt", "text/plain"
+        )
+
+        # Upload model checkpoints so the Streamlit Cloud UI can load inference models
+        checkpoints_dir = output_dir / "checkpoints"
+        if checkpoints_dir.exists():
+            for checkpoint_file in checkpoints_dir.glob("*.pt"):
+                _upload_file(
+                    checkpoint_file,
+                    f"{gcs_prefix}/checkpoints/{checkpoint_file.name}",
+                    "application/octet-stream",
+                )
+
+        # Upload interpretability artifacts used by the UI
+        interpretations_dir = output_dir / "neuron_interpretations"
+        if interpretations_dir.exists():
+            for artifact_file in interpretations_dir.glob("*"):
+                if artifact_file.is_file():
+                    content_type = (
+                        "application/json"
+                        if artifact_file.suffix.lower() == ".json"
+                        else "application/octet-stream"
+                    )
+                    _upload_file(
+                        artifact_file,
+                        f"{gcs_prefix}/neuron_interpretations/{artifact_file.name}",
+                        content_type,
+                    )
+
+        _upload_file(
+            output_dir / "neuron_category_metadata.json",
+            f"{gcs_prefix}/neuron_category_metadata.json",
+            "application/json",
+        )
+        _upload_file(
+            output_dir / "neuron_coactivation.json",
+            f"{gcs_prefix}/neuron_coactivation.json",
+            "application/json",
+        )
+
+        precomputed_cache_dir = (
+            output_dir / "precomputed_ui_cache" / "neuron_wordclouds"
+        )
+        if precomputed_cache_dir.exists():
+            for cache_file in precomputed_cache_dir.glob("*"):
+                if cache_file.is_file():
+                    content_type = (
+                        "application/json"
+                        if cache_file.suffix.lower() == ".json"
+                        else "application/octet-stream"
+                    )
+                    _upload_file(
+                        cache_file,
+                        f"{gcs_prefix}/precomputed_ui_cache/neuron_wordclouds/{cache_file.name}",
+                        content_type,
+                    )
+
+        # Small pipeline metadata useful for cloud diagnostics
+        for metadata_file in [
+            output_dir / "business_metadata.pkl",
+            output_dir / "item_map_after_kcore.pkl",
+            output_dir / "reviews_df.pkl",
+        ]:
+            _upload_file(
+                metadata_file,
+                f"{gcs_prefix}/{metadata_file.name}",
+                "application/octet-stream",
             )
 
         logger.info(
@@ -292,7 +730,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         default="configs/default.yaml",
-        help="Path to YAML config file (default: configs/default.yaml)",
+        help="Path to YAML config file (default: configs/default.yaml). "
+        "If the file contains a top-level 'experiments' list, train.py switches to sweep mode.",
+    )
+    parser.add_argument(
+        "--base-config",
+        default="configs/default.yaml",
+        help="Base config used when --config points to an experiments YAML file.",
     )
     parser.add_argument(
         "--skip-preprocessing",
@@ -470,9 +914,9 @@ def train_elsa(
     model = ELSA(n_items, latent_dim=elsa_cfg["latent_dim"]).to(device)
     optimizer = optim.Adam(
         model.parameters(),
-        lr=elsa_cfg["learning_rate"],
+        lr=float(elsa_cfg["learning_rate"]),
         betas=(0.9, 0.99),
-        weight_decay=elsa_cfg["weight_decay"],
+        weight_decay=float(elsa_cfg.get("weight_decay", 0.0)),
     )
     criterion = NMSELoss()
 
@@ -621,12 +1065,12 @@ def train_sae(
         input_dim=elsa_cfg["latent_dim"],
         hidden_dim=hidden_dim,
         k=sae_cfg["k"],
-        l1_coef=sae_cfg["l1_coef"],
+        l1_coef=float(sae_cfg["l1_coef"]),
     ).to(device)
 
     optimizer = optim.Adam(
         sae.parameters(),
-        lr=sae_cfg["learning_rate"],
+        lr=float(sae_cfg["learning_rate"]),
         betas=(0.9, 0.99),
         weight_decay=0.0,
     )
@@ -667,7 +1111,7 @@ def train_sae(
 
             rec_loss = cosine_recon_loss(recon, z_batch)
             l1_loss = h_sparse.abs().mean()
-            loss = rec_loss + sae_cfg["l1_coef"] * l1_loss
+            loss = rec_loss + float(sae_cfg["l1_coef"]) * l1_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(sae.parameters(), 1.0)
@@ -733,7 +1177,7 @@ def train_sae(
         )
 
         # Early stopping
-        if (best_val_loss - val_recon_loss) > sae_cfg["min_delta"]:
+        if (best_val_loss - val_recon_loss) > float(sae_cfg.get("min_delta", 0.0)):
             best_val_loss = val_recon_loss
             patience_counter = 0
             epoch_started = epoch
@@ -789,6 +1233,11 @@ def main() -> None:
     """Main training entry point."""
     args = parse_args()
 
+    raw_config = _load_yaml_dict(args.config)
+    if "experiments" in raw_config:
+        _run_experiment_sweep(args)
+        return
+
     # Load config
     config = load_config(args.config)
 
@@ -814,6 +1263,11 @@ def main() -> None:
         level=getattr(logging, output_cfg["log_level"]),
     )
     logger.info(f"Output directory: {output_dir}")
+
+    # Save resolved config for downstream comparison / UI selectors
+    resolved_config_path = output_dir / "resolved_config.yaml"
+    _save_yaml(resolved_config_path, config.to_dict())
+    logger.info(f"Saved resolved config to: {resolved_config_path}")
 
     # Checkpoint manager
     checkpoint_dir = output_dir / "checkpoints"
@@ -1078,6 +1532,10 @@ def main() -> None:
             # Sparsity analysis
             active_neurons = (h_test != 0).sum(dim=1).float().mean().item()
 
+        sparse_activations_path = output_dir / "h_sparse_test.pt"
+        torch.save(h_test.cpu(), sparse_activations_path)
+        logger.info(f"Saved sparse test activations to {sparse_activations_path}")
+
         # Compute ranking metrics (NDCG, Recall, MRR, etc.)
         logger.info("Computing ranking metrics...")
         evaluation_start = time.time()
@@ -1100,69 +1558,47 @@ def main() -> None:
             )
 
         with torch.no_grad():
-            # === ELSA ALONE EVALUATION ===
-            logger.info("\nEvaluating ELSA alone on test set...")
-            X_test_elsa_pred = elsa_model.decode(Z_test)  # (n_test_users, n_items)
-            X_test_elsa_pred_np = X_test_elsa_pred.cpu().numpy()
+            # Build a sparse holdout ranking split: masked input vs held-out target items.
+            holdout_ratio = config.get("evaluation", {}).get("holdout_ratio", 0.2)
+            min_interactions = config.get("evaluation", {}).get("min_interactions", 5)
+            X_eval_input_csr, X_eval_target_csr = build_holdout_split_sparse(
+                X_test_csr,
+                holdout_ratio=holdout_ratio,
+                min_interactions=min_interactions,
+                seed=config["data"]["seed"],
+            )
+
             logger.info(
-                f"ELSA predictions - min: {X_test_elsa_pred_np.min():.6f}, max: {X_test_elsa_pred_np.max():.6f}, mean: {X_test_elsa_pred_np.mean():.6f}"
+                "Evaluating ranking on held-out test items (per-user item holdout, masked input)"
+            )
+
+            # === ELSA ALONE EVALUATION ===
+            logger.info("\nEvaluating ELSA-only on held-out test items...")
+            ranking_metrics_elsa, n_eval_users = evaluate_recommendations_batched(
+                X_eval_input_csr,
+                X_eval_target_csr,
+                lambda batch: _score_elsa_batch(elsa_model, batch, device),
+                ks=[5, 10, 20],
+                batch_size=256,
             )
 
             # === SAE+ELSA EVALUATION ===
-            logger.info("\nEvaluating SAE+ELSA on test set...")
-            # Z_test is already encoded by ELSA. Now encode through SAE.
-            h_test_sparse = sae_model.encode(Z_test)  # SAE encoder with sparsity
-            z_test_sae_decoded = sae_model.decode(h_test_sparse)  # SAE decoder
-            # z_test_sae_decoded is in latent space. Decode with ELSA to get items.
-            X_test_sae_pred = elsa_model.decode(z_test_sae_decoded)
-            X_test_sae_pred_np = X_test_sae_pred.cpu().numpy()
-            logger.info(
-                f"SAE+ELSA predictions - min: {X_test_sae_pred_np.min():.6f}, max: {X_test_sae_pred_np.max():.6f}, mean: {X_test_sae_pred_np.mean():.6f}"
+            logger.info("\nEvaluating SAE+ELSA on held-out test items...")
+            ranking_metrics_sae, _ = evaluate_recommendations_batched(
+                X_eval_input_csr,
+                X_eval_target_csr,
+                lambda batch: _score_sae_batch(elsa_model, sae_model, batch, device),
+                ks=[5, 10, 20],
+                batch_size=256,
             )
 
-            # Compare ELSA vs SAE predictions
-            diff = np.abs(X_test_elsa_pred_np - X_test_sae_pred_np)
-            logger.info(
-                f"Prediction difference - min: {diff.min():.6f}, max: {diff.max():.6f}, mean: {diff.mean():.6f}"
-            )
-            pct_changed = (
-                (diff / (np.abs(X_test_elsa_pred_np) + 1e-6) > 0.5).sum()
-                / diff.size
-                * 100
-            )
-            logger.info(f"Percentage of predictions changed >50%: {pct_changed:.1f}%")
-
-        # Evaluate both models
-        logger.info("Computing metrics for ELSA alone...")
-        ranking_metrics_elsa = evaluate_recommendations(
-            X_test_csr, X_test_elsa_pred_np, ks=[5, 10, 20]
-        )
-
-        logger.info("Computing metrics for SAE+ELSA...")
-        ranking_metrics_sae = evaluate_recommendations(
-            X_test_csr, X_test_sae_pred_np, ks=[5, 10, 20]
-        )
-
-        # Generate recommendations for diversity metrics (using SAE+ELSA predictions)
-        from src.utils.evaluation import (
-            generate_recommendations,
-            compute_coverage,
-            compute_entropy,
-            benchmark_inference,
-            compare_model_performance,
-        )
-
-        all_recommendations = generate_recommendations(
-            X_test_csr, X_test_sae_pred_np, k=20
-        )
-
-        # Compute diversity and coverage metrics
-        coverage = compute_coverage(all_recommendations, n_items=X_test_csr.shape[1])
-        entropy = compute_entropy(all_recommendations, n_items=X_test_csr.shape[1])
-
-        # Benchmark inference latency
-        latency_metrics = benchmark_inference(
-            X_test_sae_pred_np, n_samples=min(100, X_test_csr.shape[0])
+        coverage, entropy, latency_metrics = _compute_auxiliary_metrics(
+            elsa_model,
+            sae_model,
+            X_eval_input_csr,
+            device=device,
+            batch_size=256,
+            top_k=20,
         )
 
         # Add these to SAE+ELSA ranking metrics
@@ -1177,8 +1613,12 @@ def main() -> None:
         logger.info("\n" + comparison_report)
 
         # Print detailed reports
-        logger.info("\n" + print_evaluation_report(ranking_metrics_elsa))
-        logger.info("\n" + print_evaluation_report(ranking_metrics_sae))
+        logger.info(
+            "\nELSA-only metrics:\n" + print_evaluation_report(ranking_metrics_elsa)
+        )
+        logger.info(
+            "\nSAE+ELSA metrics:\n" + print_evaluation_report(ranking_metrics_sae)
+        )
 
         # Use SAE+ELSA metrics as primary ranking_metrics for saving
         ranking_metrics = ranking_metrics_sae
@@ -1236,8 +1676,8 @@ def main() -> None:
                 "test_total_neurons": test_sparsity["total_neurons"],
                 "test_sparsity_ratio": test_sparsity["sparsity_ratio"],
             },
-            "ranking_metrics_elsa": ranking_metrics_elsa,  # ⭐ ELSA alone
-            "ranking_metrics_sae": ranking_metrics_sae,  # ⭐ SAE+ELSA
+            "ranking_metrics_elsa": ranking_metrics_elsa,  # ELSA-only on holdout
+            "ranking_metrics_sae": ranking_metrics_sae,  # SAE+ELSA on holdout
             "ranking_metrics": ranking_metrics,  # Primary (same as ranking_metrics_sae)
             "model_sizes": model_sizes,
             "training": {
@@ -1248,6 +1688,13 @@ def main() -> None:
                 "evaluation_time_sec": evaluation_time,
             },
             "output_dir": str(output_dir),
+            "evaluation_protocol": {
+                "split": "per-user holdout",
+                "holdout_ratio": holdout_ratio,
+                "min_interactions": min_interactions,
+                "metric_input": "masked user history",
+                "metric_target": "held-out interactions",
+            },
         }
 
         summary_path = output_dir / "summary.json"
@@ -1260,6 +1707,13 @@ def main() -> None:
         data_dir.mkdir(exist_ok=True, parents=True)
 
         try:
+            # Save the processed training CSR used by the model pipeline
+            with open(data_dir / "processed_train.pkl", "wb") as f:
+                pickle.dump(X_train_csr, f)
+            logger.info(
+                f"✅ Saved processed_train to {data_dir / 'processed_train.pkl'}"
+            )
+
             # Save filtered reviews DataFrame
             with open(data_dir / "reviews_df.pkl", "wb") as f:
                 pickle.dump(reviews, f)
@@ -1274,13 +1728,19 @@ def main() -> None:
                 f"✅ Saved item_map_after_kcore ({len(item_map_after_kcore)} items) to {data_dir / 'item_map_after_kcore.pkl'}"
             )
 
-            # Save business metadata (if available)
-            if "business_metadata" in locals():
-                with open(data_dir / "business_metadata.pkl", "wb") as f:
-                    pickle.dump(business_metadata, f)
-                logger.info(
-                    f"✅ Saved business_metadata to {data_dir / 'business_metadata.pkl'}"
+            # Save business metadata for neuron labeling and UI interpretation
+            if "business_metadata" not in locals():
+                business_metadata = _build_business_metadata_from_db(
+                    db_path=db_path,
+                    item_map_after_kcore=item_map_after_kcore,
+                    state_filter=config["data"].get("state_filter"),
                 )
+
+            with open(data_dir / "business_metadata.pkl", "wb") as f:
+                pickle.dump(business_metadata, f)
+            logger.info(
+                f"✅ Saved business_metadata to {data_dir / 'business_metadata.pkl'}"
+            )
         except Exception as e:
             logger.error(f"Failed to save data for neuron labeling: {e}")
             logger.warning("Continuing without saved data (neuron labeling may fail)")
@@ -1337,6 +1797,7 @@ def main() -> None:
             "final_output_dir": str(output_dir),
         }
         registry.update_run_status(run_id, "train", "completed", final_metrics)
+        write_latest_run_pointer(output_dir)
         logger.info(f"✓ Run {run_id} registered as completed")
 
     except Exception as e:

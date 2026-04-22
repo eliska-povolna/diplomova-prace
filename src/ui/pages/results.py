@@ -12,6 +12,73 @@ import plotly.express as px
 logger = logging.getLogger(__name__)
 
 
+def _run_label(run: dict) -> str:
+    run_name = run.get("run_name", "run")
+    summary = run.get("summary") or {}
+    ranking_metrics = summary.get("ranking_metrics", {})
+    recall = ranking_metrics.get("recall", {}).get("@20")
+    ndcg = ranking_metrics.get("ndcg", {}).get("@20")
+    size_mb = summary.get("model_sizes", {}).get("total_mb")
+
+    parts = [run_name]
+    if recall is not None:
+        parts.append(f"R@20={recall:.3f}")
+    if ndcg is not None:
+        parts.append(f"NDCG@20={ndcg:.3f}")
+    if size_mb is not None:
+        parts.append(f"{size_mb:.2f}MB")
+    return " | ".join(parts)
+
+
+def _show_experiment_overview(runs: list[dict]) -> None:
+    rows = []
+    for run in runs:
+        summary = run.get("summary") or {}
+        ranking_metrics = summary.get("ranking_metrics", {})
+        params = run.get("parameters", {})
+        sae_params = params.get("sae", {}) if isinstance(params, dict) else {}
+        elsa_params = params.get("elsa", {}) if isinstance(params, dict) else {}
+
+        rows.append(
+            {
+                "Run": run.get("run_name", "run"),
+                "Experiment": run.get("experiment_name", ""),
+                "latent_dim": elsa_params.get("latent_dim"),
+                "width_ratio": sae_params.get("width_ratio"),
+                "k": sae_params.get("k"),
+                "l1_coef": sae_params.get("l1_coef"),
+                "Recall@20": ranking_metrics.get("recall", {}).get("@20"),
+                "NDCG@20": ranking_metrics.get("ndcg", {}).get("@20"),
+                "Model Size MB": summary.get("model_sizes", {}).get("total_mb"),
+            }
+        )
+
+    if not rows:
+        st.info("No experiment runs available for comparison.")
+        return
+
+    df = pd.DataFrame(rows)
+    st.dataframe(df, use_container_width=True)
+
+    scatter_df = df.dropna(subset=["Model Size MB", "Recall@20"])
+    if len(scatter_df) >= 2:
+        fig = px.scatter(
+            scatter_df,
+            x="Model Size MB",
+            y="Recall@20",
+            color="Experiment" if scatter_df["Experiment"].nunique() > 1 else None,
+            hover_name="Run",
+            size="NDCG@20" if scatter_df["NDCG@20"].notna().any() else None,
+            title="Experiment Comparison: Quality vs Size",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+
+def _single_summary(results: dict) -> dict:
+    summary = dict(results)
+    return summary
+
+
 def show():
     """Display results page."""
     st.title("📊 Model Evaluation Results")
@@ -23,41 +90,54 @@ def show():
     """
     )
 
-    # Try to load results from latest run
     try:
-        results_dir = Path(__file__).parent.parent.parent.parent / "outputs"
+        config = st.session_state.get("config")
+        training_results = st.session_state.get("training_results")
 
-        # Find latest run directory
-        if not results_dir.exists():
-            st.warning("No outputs directory found. Using placeholder metrics.")
-            show_placeholder_results()
-            return
+        if not training_results and config:
+            from src.ui.cache import load_training_results
 
-        run_dirs = sorted(
-            [d for d in results_dir.glob("*") if d.is_dir()],
-            key=lambda x: x.name,
-            reverse=True,
-        )
+            training_results = load_training_results(
+                config, st.session_state.get("selected_result_run_dir")
+            )
 
-        if not run_dirs:
-            st.warning("No training runs found. Using placeholder metrics.")
-            show_placeholder_results()
-            return
+        if training_results and training_results.get("runs"):
+            runs = training_results["runs"]
+            experiment = training_results.get("experiment", {})
+            source = training_results.get("source") or "cached results"
+            st.info(f"Showing experiment results from: `{source}`")
 
-        latest_run = run_dirs[0]
-        st.info(f"Showing results from: `{latest_run.name}`")
+            selected_index = st.selectbox(
+                "Model / run",
+                options=list(range(len(runs))),
+                format_func=lambda idx: _run_label(runs[idx]),
+                key="results_run_selector",
+            )
+            selected_run = runs[selected_index]
+            st.session_state.selected_result_run_dir = selected_run.get("run_dir")
+            if selected_run.get("experiment_dir"):
+                st.session_state.selected_result_experiment_dir = selected_run.get(
+                    "experiment_dir"
+                )
+            selected_summary = _single_summary(selected_run.get("summary") or {})
+            selected_summary["experiment_runs"] = runs
+            selected_summary["experiment"] = experiment
 
-        # Load results JSON (try summary.json first, then training_results.json)
-        results_file = latest_run / "summary.json"
-        if not results_file.exists():
-            results_file = latest_run / "training_results.json"
+            st.caption(
+                f"Selected run directory: `{selected_run.get('run_dir', 'N/A')}`"
+            )
 
-        if results_file.exists():
-            with open(results_file) as f:
-                results = json.load(f)
-            show_actual_results(results)
+            if len(runs) > 1:
+                with st.expander("Experiment overview", expanded=True):
+                    _show_experiment_overview(runs)
+
+            show_actual_results(selected_summary)
+        elif training_results and training_results.get("summary"):
+            source = training_results.get("source") or "cached results"
+            st.info(f"Showing results from: `{source}`")
+            show_actual_results(training_results["summary"])
         else:
-            st.warning("No results file found. Using placeholder data.")
+            st.warning("No training results available. Using placeholder metrics.")
             show_placeholder_results()
 
     except Exception as e:
@@ -354,7 +434,12 @@ def show_actual_results(results: dict):
         """
         )
 
-        if "ablations" in results:
+        experiment_runs = results.get("experiment_runs", [])
+
+        if experiment_runs:
+            st.markdown("#### Experiment runs")
+            _show_experiment_overview(experiment_runs)
+        elif "ablations" in results:
             ablations_df = pd.DataFrame(results["ablations"])
 
             # Plot: Quality vs Sparsity
@@ -379,13 +464,11 @@ def show_actual_results(results: dict):
                 """
             ℹ️ **Ablation data not available yet**
             
-            To generate ablation studies, train SAE models with different k values:
+            To generate ablation studies, run the experiment sweep config:
             ```bash
-            for k in 16 32 64 128 256; do
-              python src/train.py --config configs/default.yaml --sae-k=$k
-            done
+            python -m src.train --config configs/experiments.yaml
             ```
-            Results will appear in the outputs/ directory.
+            Results are loaded from the latest run artifacts, with local outputs/ used only as an offline fallback.
             """
             )
 

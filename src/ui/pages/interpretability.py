@@ -92,6 +92,26 @@ def show():
         st.error("❌ Labeling service not initialized")
         return
 
+    available_methods = getattr(labels_service, "available_methods", [])
+    if available_methods:
+        default_method = getattr(
+            labels_service, "selected_method", available_methods[0]
+        )
+        if default_method not in available_methods:
+            default_method = available_methods[0]
+
+        selected_method = st.selectbox(
+            "Label source",
+            options=available_methods,
+            index=available_methods.index(default_method),
+            key="interpretability_label_method",
+        )
+
+        if hasattr(labels_service, "set_method"):
+            labels_service.set_method(selected_method)
+
+        st.caption(f"Showing labels from `{selected_method}`")
+
     if not wordcloud_service:
         st.warning(
             "⚠️ Wordcloud service not available - labels will display without visualizations"
@@ -392,7 +412,7 @@ def show():
                 )
 
                 if fig is not None:
-                    st.pyplot(fig, use_container_width=True)
+                    st.pyplot(fig, width="stretch")
                 else:
                     st.info("No wordcloud data available")
             except Exception as e:

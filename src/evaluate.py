@@ -16,18 +16,27 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import pickle
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from src.data.preprocessing import build_csr
-from src.data.yelp_loader import load_reviews
-from src.models.collaborative_filtering import ELSA, ndcg_at_k, recall_at_k
+from src.data.preprocessing import apply_kcore_filtering, build_csr
+from src.data.yelp_loader import load_businesses, load_reviews
+from src.models.collaborative_filtering import ELSA
 from src.models.sae_cf_model import ELSASAEModel
 from src.models.sparse_autoencoder import TopKSAE
 from src.run_registry import RunRegistry
 from src.utils import CheckpointManager, setup_logger
+from src.utils.evaluation import (
+    benchmark_inference,
+    build_holdout_split_sparse,
+    compare_model_performance,
+    compute_coverage,
+    evaluate_recommendations_batched,
+    print_evaluation_report,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,63 +100,78 @@ def resolve_checkpoint_dir(checkpoint_arg: str | None) -> Path:
     return checkpoint_dir
 
 
-def compute_metrics(
-    scores: np.ndarray,
-    gt_mask: np.ndarray,
-    k_values: list[int],
-) -> dict[str, float]:
-    """Compute Recall@K, NDCG@K, HR@K for ranking metrics.
+def _score_elsa_batch(elsa: ELSA, batch: np.ndarray, device: str) -> np.ndarray:
+    """Score a dense user batch with ELSA and convert to residual scores."""
+    batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        scores = elsa(batch_tensor).cpu().numpy()
+    scores = scores - batch
+    scores[batch > 0] = -np.inf
+    return scores
 
-    Parameters
-    ----------
-    scores : np.ndarray
-        Predicted scores of shape (n_users, n_items).
-    gt_mask : np.ndarray
-        Ground truth binary matrix of shape (n_users, n_items).
-    k_values : list[int]
-        List of k values to compute metrics for.
 
-    Returns
-    -------
-    dict[str, float]
-        Dictionary of computed metrics.
-    """
-    metrics = {}
+def _score_sae_batch(model: ELSASAEModel, batch: np.ndarray, device: str) -> np.ndarray:
+    """Score a dense user batch with the combined SAE+ELSA model."""
+    batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        scores = model.recommend(batch_tensor).cpu().numpy()
+    scores = scores - batch
+    scores[batch > 0] = -np.inf
+    return scores
 
-    for k in k_values:
-        # Get top-k items for each user
-        top_indices = np.argsort(-scores, axis=1)[:, :k]
 
-        # Hit rate: users with at least one relevant item in top-k
-        hits = gt_mask[np.arange(gt_mask.shape[0])[:, None], top_indices].sum(axis=1)
-        hr = (hits > 0).mean()
-        metrics[f"HR@{k}"] = float(hr)
+def _compute_auxiliary_metrics(
+    model: ELSASAEModel,
+    X_input_csr,
+    X_target_csr,
+    *,
+    device: str,
+    batch_size: int,
+    top_k: int,
+) -> tuple[float, float, dict[str, float]]:
+    """Compute coverage, entropy, and a latency benchmark without densifying the full matrix."""
+    n_items = X_target_csr.shape[1]
+    item_counts = np.zeros(n_items, dtype=np.int64)
+    total_recommendations = 0
+    latency_sample_scores: list[np.ndarray] = []
+    collected_latency_users = 0
+    target_latency_users = min(100, X_input_csr.shape[0])
 
-        # Recall@k
-        recalls = []
-        for i in range(scores.shape[0]):
-            y_true = gt_mask[i]
-            y_pred = top_indices[i]
-            if y_true.sum() > 0:
-                rec = recall_at_k(y_true, y_pred, k=k)
-                recalls.append(rec)
+    for start in range(0, X_input_csr.shape[0], batch_size):
+        end = min(start + batch_size, X_input_csr.shape[0])
+        batch = X_input_csr[start:end].toarray().astype(np.float32)
+        scores = _score_sae_batch(model, batch, device)
 
-        if recalls:
-            metrics[f"Recall@{k}"] = float(np.nanmean(recalls))
-        else:
-            metrics[f"Recall@{k}"] = 0.0
+        top_items = np.argsort(-scores, axis=1)[:, :top_k]
+        for row in top_items:
+            item_counts[row] += 1
+        total_recommendations += top_items.size
 
-        # NDCG@k
-        ndcgs = []
-        for i in range(scores.shape[0]):
-            y_true = gt_mask[i]
-            y_pred = top_indices[i]
-            ndcg = ndcg_at_k(y_true, y_pred, k=k)
-            ndcgs.append(ndcg)
+        if collected_latency_users < target_latency_users:
+            take = min(scores.shape[0], target_latency_users - collected_latency_users)
+            latency_sample_scores.append(scores[:take])
+            collected_latency_users += take
 
-        metrics[f"NDCG@{k}"] = float(np.nanmean(ndcgs))
+    coverage = float(np.count_nonzero(item_counts) / n_items) if n_items > 0 else 0.0
 
-    return metrics
+    if total_recommendations > 0:
+        probs = item_counts[item_counts > 0] / total_recommendations
+        entropy = (
+            float(-np.sum(probs * np.log(probs)) / np.log(n_items))
+            if n_items > 1
+            else 0.0
+        )
+    else:
+        entropy = 0.0
+
+    latency_metrics = {"mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0}
+    if latency_sample_scores:
+        latency_metrics = benchmark_inference(
+            np.vstack(latency_sample_scores),
+            n_samples=min(100, collected_latency_users),
+        )
+
+    return coverage, entropy, latency_metrics
 
 
 def main() -> None:
@@ -181,6 +205,11 @@ def main() -> None:
     registry.register_run(run_id, "evaluate", config={}, status="pending")
 
     device = config["evaluation"]["device"]
+    if device == "cuda" and not torch.cuda.is_available():
+        logger.warning(
+            "CUDA was requested by the saved config, but this PyTorch build does not have CUDA. Falling back to CPU."
+        )
+        device = "cpu"
     logger.info(f"Using device: {device}")
 
     try:
@@ -189,16 +218,43 @@ def main() -> None:
         logger.info(f"LOADING {args.split.upper()} DATA")
         logger.info("=" * 60)
 
-        reviews = load_reviews(
-            db_path=config["data"]["db_path"],
-            pos_threshold=config["data"]["pos_threshold"],
-        )
-        logger.info(f"Loaded {len(reviews)} reviews")
+        data_dir = output_dir / "data"
+        reviews_path = data_dir / "reviews_df.pkl"
+
+        if reviews_path.exists():
+            logger.info(
+                f"Loading filtered reviews from training artefact: {reviews_path}"
+            )
+            with reviews_path.open("rb") as f:
+                reviews = pickle.load(f)
+            logger.info(f"Loaded {len(reviews)} reviews from saved training data")
+        else:
+            reviews = load_reviews(
+                db_path=config["data"]["db_path"],
+                pos_threshold=config["data"]["pos_threshold"],
+                year_min=config["data"].get("year_min"),
+                year_max=config["data"].get("year_max"),
+            )
+
+            state_filter = config["data"].get("state_filter")
+            if state_filter:
+                businesses = load_businesses(
+                    db_path=config["data"]["db_path"],
+                    state_filter=state_filter,
+                    min_review_count=config["data"].get("min_review_count", 5),
+                )
+                business_ids = set(businesses["business_id"].values)
+                logger.info(
+                    f"Filtering by state {state_filter}: {len(business_ids)} businesses"
+                )
+                reviews = reviews[reviews["business_id"].isin(business_ids)]
+
+            logger.info(f"Loaded {len(reviews)} reviews after filtering")
 
         # Build CSR matrix
         logger.info("Building CSR matrix...")
         dataset = build_csr(reviews)
-        X_csr = dataset.csr
+        X_csr = apply_kcore_filtering(dataset.csr, k=5)
         logger.info(f"Built CSR: {X_csr.shape[0]} users × {X_csr.shape[1]} items")
 
         # Get appropriate split
@@ -224,11 +280,8 @@ def main() -> None:
             )
             X_split_csr = X_train_csr[val_idx]
 
-        X_split = torch.tensor(X_split_csr.toarray(), dtype=torch.float32)
-        gt_mask = X_split_csr.toarray().astype(bool)
-
         logger.info(
-            f"Evaluation set: {X_split.shape[0]} users × {X_split.shape[1]} items"
+            f"Evaluation set: {X_split_csr.shape[0]} users × {X_split_csr.shape[1]} items"
         )
 
         # Load models
@@ -253,7 +306,7 @@ def main() -> None:
             input_dim=config["elsa"]["latent_dim"],
             hidden_dim=config["sae"]["width_ratio"] * config["elsa"]["latent_dim"],
             k=config["sae"]["k"],
-            l1_coef=config["sae"]["l1_coef"],
+            l1_coef=float(config["sae"]["l1_coef"]),
         ).to(device)
 
         sae_info = checkpoint_mgr.load(sae, checkpoint_name=sae_name, device=device)
@@ -265,7 +318,7 @@ def main() -> None:
             latent_dim=config["elsa"]["latent_dim"],
             sae_hidden_dim=config["sae"]["width_ratio"] * config["elsa"]["latent_dim"],
             k=config["sae"]["k"],
-            l1_coef=config["sae"]["l1_coef"],
+            l1_coef=float(config["sae"]["l1_coef"]),
         ).to(device)
 
         # Copy loaded weights
@@ -275,35 +328,83 @@ def main() -> None:
 
         # Evaluate
         logger.info("=" * 60)
-        logger.info("COMPUTING METRICS")
+        logger.info("COMPUTING HOLDOUT METRICS")
         logger.info("=" * 60)
 
-        all_scores = []
+        holdout_ratio = config.get("evaluation", {}).get("holdout_ratio", 0.2)
+        min_interactions = config.get("evaluation", {}).get("min_interactions", 5)
 
-        with torch.no_grad():
-            for i in range(0, X_split.shape[0], args.batch_size):
-                x_batch = X_split[i : i + args.batch_size].to(device)
-                scores = model.recommend(x_batch)
-                all_scores.append(scores.cpu().numpy())
+        X_eval_input_csr, X_eval_target_csr = build_holdout_split_sparse(
+            X_split_csr,
+            holdout_ratio=holdout_ratio,
+            min_interactions=min_interactions,
+            seed=config["data"]["seed"],
+        )
 
-        all_scores = np.vstack(all_scores)
-        logger.info(f"Computed scores for {all_scores.shape[0]} users")
+        logger.info(
+            "Evaluating on per-user holdout split: masked input vs held-out target items"
+        )
 
-        # Compute metrics
-        metrics = compute_metrics(all_scores, gt_mask, args.k_values)
+        # ELSA-only baseline
+        logger.info("Evaluating ELSA-only baseline...")
+        metrics_elsa, n_eval_users = evaluate_recommendations_batched(
+            X_eval_input_csr,
+            X_eval_target_csr,
+            lambda batch: _score_elsa_batch(elsa, batch, device),
+            ks=args.k_values,
+            batch_size=args.batch_size,
+        )
+
+        # SAE+ELSA model
+        logger.info("Evaluating SAE+ELSA model...")
+        metrics_sae, _ = evaluate_recommendations_batched(
+            X_eval_input_csr,
+            X_eval_target_csr,
+            lambda batch: _score_sae_batch(model, batch, device),
+            ks=args.k_values,
+            batch_size=args.batch_size,
+        )
+
+        # Compare models with explicit labels
+        comparison_report = compare_model_performance(metrics_elsa, metrics_sae)
 
         # Log results
         logger.info("=" * 60)
-        logger.info(f"RESULTS ON {args.split.upper()} SET")
+        logger.info(f"RESULTS ON {args.split.upper()} SET (MASKED HOLDOUT)")
         logger.info("=" * 60)
 
-        for key, value in sorted(metrics.items()):
-            logger.info(f"{key}: {value:.4f}")
+        logger.info("\nELSA-only metrics:\n" + print_evaluation_report(metrics_elsa))
+        logger.info("\nSAE+ELSA metrics:\n" + print_evaluation_report(metrics_sae))
+        logger.info("\n" + comparison_report)
+
+        # Additional diversity and latency metrics for the SAE+ELSA model
+        coverage, entropy, latency_metrics = _compute_auxiliary_metrics(
+            model,
+            X_eval_input_csr,
+            X_eval_target_csr,
+            device=device,
+            batch_size=args.batch_size,
+            top_k=max(args.k_values),
+        )
+        metrics_sae["coverage"] = coverage
+        metrics_sae["entropy"] = entropy
+        metrics_sae["latency"] = latency_metrics
 
         # Save results
         results = {
             "split": args.split,
-            "metrics": metrics,
+            "evaluation_protocol": {
+                "split": "per-user holdout",
+                "holdout_ratio": holdout_ratio,
+                "min_interactions": min_interactions,
+                "metric_input": "masked user history",
+                "metric_target": "held-out interactions",
+            },
+            "metrics_by_model": {
+                "elsa_only": metrics_elsa,
+                "sae_plus_elsa": metrics_sae,
+            },
+            "metrics": metrics_sae,
             "config": config,
         }
 
@@ -316,8 +417,18 @@ def main() -> None:
         # Register evaluation as completed
         eval_metadata = {
             "split": args.split,
-            "n_users_evaluated": all_scores.shape[0] if "all_scores" in locals() else 0,
-            **{str(k).replace("@", "_at_"): float(v) for k, v in metrics.items()},
+            "n_users_evaluated": n_eval_users,
+            "model": "SAE+ELSA",
+            **{
+                f"elsa_only_{str(k).replace('@', '_at_')}": float(v)
+                for k, v in metrics_elsa.items()
+                if isinstance(v, (int, float, np.floating))
+            },
+            **{
+                f"sae_plus_elsa_{str(k).replace('@', '_at_')}": float(v)
+                for k, v in metrics_sae.items()
+                if isinstance(v, (int, float, np.floating))
+            },
         }
         registry.update_run_status(run_id, "evaluate", "completed", eval_metadata)
         logger.info(f"✓ Run {run_id} registered as evaluated")

@@ -155,6 +155,13 @@ scores = sae.decode(z_steered)
 - Lazy loading (only downloaded when viewed)
 - ~98% of businesses have at least one photo
 
+### Current Data & Cache Flow
+
+- `src/ui/services/data_service.py` loads POI metadata lazily and falls back from Cloud SQL to local DuckDB.
+- The service keeps model indices aligned with `item2index.pkl` from training, so recommendation and interpretation views refer to the same items.
+- `src/precompute_ui_cache.py` can generate cached word clouds, neuron statistics, and test user embeddings under `outputs/<run_id>/precomputed_ui_cache/`.
+- The UI reads the latest completed run’s outputs, not arbitrary intermediate files.
+
 #### Performance Targets
 
 - **Encoding latency**: ~0.15s per user
@@ -204,7 +211,8 @@ NEURON_LABELS_PATH = "outputs/neuron_labels.json"
 **"POI data not loading"**:
 1. Verify DuckDB path: `duckdb_path`
 2. Check Parquet files exist in `parquet_dir`
-3. Run: `duckdb yelp.duckdb "SELECT COUNT(*) FROM read_parquet('...')"`
+3. Confirm Cloud SQL secrets are present if you expect the remote backend
+4. Run: `duckdb yelp.duckdb "SELECT COUNT(*) FROM read_parquet('...')"`
 
 **"Photos not displaying"**:
 1. Confirm `yelp_academic_dataset_business.json` has `photos` field

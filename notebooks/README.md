@@ -8,6 +8,7 @@ Run in order after executing the command-line pipeline stages:
 
 | Notebook | Prerequisites | Purpose |
 |---|---|---|
+| `00_preprocessing.ipynb` | DuckDB database initialized | Build the CSR interaction matrix and ID mappings |
 | `01_data_exploration.ipynb` | DuckDB database initialized | Explore Yelp dataset: statistics, geographic distribution, interaction sparsity |
 | `02_training.ipynb` | Data preprocessed (`python -m src.preprocess_data`) | Train ELSA + TopK SAE models with interactive monitoring |
 | `03_neuron_labeling_demo.ipynb` | Models trained (`python -m src.label`) | Interpret and visualize learned neuron features interactively |

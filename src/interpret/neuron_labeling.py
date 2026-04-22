@@ -38,6 +38,12 @@ except ImportError:
         "google-generativeai not installed. Install with: pip install google-generativeai"
     )
 
+from src.utils.gemini_models import select_gemini_model
+from src.interpret.prompts import (
+    NEURON_LABEL_SYSTEM_PROMPT,
+    SUPERFEATURE_SYSTEM_PROMPT,
+)
+
 try:
     from sentence_transformers import SentenceTransformer
 
@@ -204,7 +210,7 @@ class LLMBasedLabeler(NeuronLabeler):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-1.5-flash",
+        model_name: Optional[str] = None,
         temperature: float = 0.3,
         max_retries: int = 3,
         rate_limit_delay: float = 1.0,
@@ -234,7 +240,8 @@ class LLMBasedLabeler(NeuronLabeler):
             )
 
         genai.configure(api_key=api_key)
-        logger.info(f"Gemini API configured. Model: {model_name}")
+        self.model_name = select_gemini_model(genai, model_name)
+        logger.info(f"Gemini API configured. Model: {self.model_name}")
 
     def _format_max_activating(
         self,
@@ -296,21 +303,6 @@ class LLMBasedLabeler(NeuronLabeler):
     ) -> Optional[str]:
         """Interpret a single neuron using Gemini."""
 
-        system_prompt = """You are a meticulous recommender systems researcher analyzing neurons in a Point-of-Interest (POI) recommendation model. Your task is to determine what semantic concept or behavior this neuron represents.
-
-INPUT: Two sets of POIs:
-1. Max Activating Examples: POIs that strongly activate this neuron
-2. Zero Activating Examples: POIs that don't activate this neuron
-
-YOUR TASK:
-1. Analyze max-activating examples for common themes, categories, or concepts
-2. Rule out concepts that also appear in zero-activating examples
-3. Use Occam's razor to identify the simplest explanation
-4. Summarize in 1-8 words
-
-OUTPUT FORMAT: LABEL: <your_label>
-Return ONLY the label, nothing else."""
-
         user_message = f"""
 Max-activating examples:
 {max_examples_text}
@@ -323,7 +315,7 @@ Zero-activating examples:
             try:
                 model = genai.GenerativeModel(
                     model_name=self.model_name,
-                    system_instruction=system_prompt,
+                    system_instruction=NEURON_LABEL_SYSTEM_PROMPT,
                 )
 
                 response = model.generate_content(
@@ -489,7 +481,7 @@ class SuperfeatureGenerator:
         self,
         similarity_threshold: float = 0.7,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-1.5-flash",
+        model_name: Optional[str] = None,
     ):
         self.similarity_threshold = similarity_threshold
 
@@ -507,7 +499,7 @@ class SuperfeatureGenerator:
             raise ValueError("Gemini API key not found")
 
         genai.configure(api_key=api_key)
-        self.model_name = model_name
+        self.model_name = select_gemini_model(genai, model_name)
 
     def cluster_neurons(
         self,
@@ -574,18 +566,13 @@ class SuperfeatureGenerator:
         if len(similar_labels) < 2:
             return None
 
-        system_prompt = """You are a recommender systems expert. Given a group of related semantic labels, find an abstract overarching concept that represents them.
-
-OUTPUT FORMAT: SUPERLABEL: <label>
-Return ONLY the super-label (1-5 words), nothing else."""
-
         label_list = "- " + "\n- ".join(similar_labels)
         user_message = f"Labels to synthesize:\n{label_list}"
 
         try:
             model = genai.GenerativeModel(
                 model_name=self.model_name,
-                system_instruction=system_prompt,
+                system_instruction=SUPERFEATURE_SYSTEM_PROMPT,
             )
 
             response = model.generate_content(

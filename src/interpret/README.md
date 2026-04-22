@@ -11,7 +11,22 @@ This module provides tools for interpreting and labeling neurons in sparse autoe
 | **`activations.py`** | Low-level activation extraction and analysis utilities |
 | **`neuron_interpreter.py`** | High-level LLM-based neuron interpretation (uses Google Gemini) |
 | **`neuron_labeling.py`** | Tag-based neuron labeling from business categories |
-| **`USAGE_GUIDE.md`** | Complete usage examples and patterns |
+
+## Current Workflow
+
+- Labeling runs from the latest complete training output by default.
+- `python -m src.label` uses Google Gemini via `GOOGLE_API_KEY` for LLM labels.
+- Batch labeling and co-activation generation are the current supported paths.
+- `GITHUB_TOKEN` is not used for current labeling.
+- Label outputs are written under `outputs/<run_id>/neuron_interpretations/`.
+
+## Current Outputs
+
+- `neuron_labels.json` or equivalent label mapping files for each neuron.
+- `neuron_embeddings.pkl` / embedding cache for semantic comparison.
+- `similarity_matrix.pkl` for label similarity and clustering.
+- `superfeatures.json` for grouped feature families.
+- `coactivation_matrix.json` for neuron co-activation analysis.
 
 ## Quick Start
 
@@ -139,7 +154,7 @@ Labeled neuron profiles (with tags and interpretations)
 
 ## Examples
 
-See [USAGE_GUIDE.md](USAGE_GUIDE.md) for complete working examples from the notebooks.
+See [notebooks/03_neuron_labeling_demo.ipynb](../../notebooks/03_neuron_labeling_demo.ipynb) for working examples from the notebook workflow.
 
 ## Notes
 

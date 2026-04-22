@@ -1,0 +1,237 @@
+{
+  "version": "1.0",
+  "created": "2026-04-21T10:01:15.543300",
+  "runs": {
+    "20260421_100115": {
+      "created": "2026-04-21T10:01:15.543342",
+      "stages": {
+        "train": {
+          "status": "pending",
+          "timestamp": "2026-04-21T10:01:15.543352",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "20260421_171037": {
+      "created": "2026-04-21T17:10:37.557369",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-21T17:10:37.557396",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "'parquet_dir'"
+          },
+          "completed": "2026-04-21T17:10:37.594912"
+        }
+      }
+    },
+    "20260421_175704": {
+      "created": "2026-04-21T17:57:04.989696",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-21T17:57:04.989720",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "Catalog Error: Table with name yelp_review does not exist!\nDid you mean \"pg_views\"?\n\nLINE 6:             FROM yelp_review\n                         ^"
+          },
+          "completed": "2026-04-21T17:57:05.197627"
+        }
+      }
+    },
+    "20260421_180503": {
+      "created": "2026-04-21T18:05:03.257860",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-21T18:05:03.257886",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "Required Yelp tables are missing in DuckDB. Checked ['yelp_review', 'reviews', 'review'] in C:\\Users\\elisk\\Desktop\\2024-25\\Diplomka\\Yelp-JSON\\yelp.duckdb. Found tables: ['business']. Run: python -m src.setup_database --json-dir <path-to-yelp-json>"
+          },
+          "completed": "2026-04-21T18:05:03.519209"
+        }
+      }
+    },
+    "20260421_184723": {
+      "created": "2026-04-21T18:47:23.427571",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-21T18:47:23.427593",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "'n_epochs'"
+          },
+          "completed": "2026-04-21T19:09:44.095760"
+        }
+      }
+    },
+    "20260421_192558": {
+      "created": "2026-04-21T19:25:58.140955",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-21T19:25:58.140986",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260421_192558"
+          },
+          "completed": "2026-04-21T19:58:01.188416"
+        }
+      }
+    },
+    "20260421_210829": {
+      "created": "2026-04-21T21:08:29.988310",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-21T21:08:29.988338",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260421_210829"
+          },
+          "completed": "2026-04-21T22:02:12.983202"
+        },
+        "evaluate": {
+          "status": "completed",
+          "timestamp": "2026-04-21T22:35:07.504688",
+          "config": {},
+          "metadata": {
+            "split": "test",
+            "n_users_evaluated": 7465,
+            "model": "SAE+ELSA",
+            "sae_plus_elsa_coverage": 0.9334010787149222,
+            "sae_plus_elsa_entropy": 0.7983315666399382
+          },
+          "completed": "2026-04-21T22:36:27.487813"
+        }
+      }
+    },
+    "20260421_234210": {
+      "created": "2026-04-21T23:42:10.849061",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-21T23:42:10.849091",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260421_234210"
+          },
+          "completed": "2026-04-22T00:19:43.731742"
+        },
+        "evaluate": {
+          "status": "completed",
+          "timestamp": "2026-04-22T11:34:53.844710",
+          "config": {},
+          "metadata": {
+            "split": "test",
+            "n_users_evaluated": 7465,
+            "model": "SAE+ELSA",
+            "sae_plus_elsa_coverage": 0.9286328460877042,
+            "sae_plus_elsa_entropy": 0.7960258928651449
+          },
+          "completed": "2026-04-22T11:37:24.146287"
+        }
+      }
+    },
+    "20260422_173833": {
+      "created": "2026-04-22T17:38:33.150470",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-22T17:38:33.150484",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "'<=' not supported between instances of 'float' and 'str'"
+          },
+          "completed": "2026-04-22T17:39:00.831714"
+        }
+      }
+    },
+    "20260422_174837": {
+      "created": "2026-04-22T17:48:37.313351",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-22T17:48:37.313376",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "'<=' not supported between instances of 'float' and 'str'"
+          },
+          "completed": "2026-04-22T18:09:18.253971"
+        }
+      }
+    },
+    "20260422_185357": {
+      "created": "2026-04-22T18:53:57.394884",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-22T18:53:57.394896",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "only integer tensors of a single element can be converted to an index"
+          },
+          "completed": "2026-04-22T19:18:07.889178"
+        }
+      }
+    },
+    "20260422_201532": {
+      "created": "2026-04-22T20:15:32.774333",
+      "stages": {
+        "train": {
+          "status": "pending",
+          "timestamp": "2026-04-22T20:15:32.774360",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "20260422_204614": {
+      "created": "2026-04-22T20:46:14.689563",
+      "stages": {
+        "train": {
+          "status": "pending",
+          "timestamp": "2026-04-22T20:46:14.689585",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {}
+        }
+      }
+    }
+  }
+}

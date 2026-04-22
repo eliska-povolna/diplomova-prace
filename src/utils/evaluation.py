@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, List, Tuple
 import logging
+from scipy import sparse
 
 logger = logging.getLogger(__name__)
 
@@ -301,10 +302,150 @@ def evaluate_recommendations(
     Dict[str, Dict[str, float]]
         Ranking metrics for each K
     """
-    # Convert sparse to dense for metric computation
-    X_test_dense = X_test_csr.toarray()
+    # Convert sparse input to dense for metric computation if needed
+    if hasattr(X_test_csr, "toarray"):
+        X_test_dense = X_test_csr.toarray()
+    else:
+        X_test_dense = np.asarray(X_test_csr)
 
     return compute_metrics_batch(X_test_dense, model_predictions, ks)
+
+
+def build_holdout_split(
+    X_csr,
+    *,
+    holdout_ratio: float = 0.2,
+    min_interactions: int = 5,
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create a per-user holdout split for ranking evaluation.
+
+    For each user, a fraction of non-zero items is moved from the input matrix
+    into the target matrix. The model is scored on the masked input, and the
+    held-out items form the ground truth for ranking metrics.
+    """
+    X_dense = X_csr.toarray().astype(np.float32)
+    X_input = X_dense.copy()
+    X_target = np.zeros_like(X_dense)
+
+    for user_idx in range(X_dense.shape[0]):
+        nonzero_items = np.where(X_dense[user_idx] > 0)[0]
+        if len(nonzero_items) < min_interactions:
+            continue
+
+        rng = np.random.default_rng(seed + user_idx)
+        n_holdout = max(1, int(len(nonzero_items) * holdout_ratio))
+        holdout_items = rng.choice(nonzero_items, size=n_holdout, replace=False)
+
+        X_input[user_idx, holdout_items] = 0.0
+        X_target[user_idx, holdout_items] = X_dense[user_idx, holdout_items]
+
+    return X_input, X_target
+
+
+def build_holdout_split_sparse(
+    X_csr,
+    *,
+    holdout_ratio: float = 0.2,
+    min_interactions: int = 5,
+    seed: int = 42,
+) -> tuple[sparse.csr_matrix, sparse.csr_matrix]:
+    """Create a sparse per-user holdout split for large-scale ranking evaluation.
+
+    This is the memory-safe variant of :func:`build_holdout_split`. It keeps the
+    masked input and the held-out target as sparse matrices so evaluation can be
+    performed batch by batch without densifying the full dataset.
+    """
+    X_input = X_csr.tolil(copy=True)
+    X_target = sparse.lil_matrix(X_csr.shape, dtype=np.float32)
+
+    for user_idx in range(X_csr.shape[0]):
+        row_start = X_csr.indptr[user_idx]
+        row_end = X_csr.indptr[user_idx + 1]
+        nonzero_items = X_csr.indices[row_start:row_end]
+
+        if len(nonzero_items) < min_interactions:
+            continue
+
+        rng = np.random.default_rng(seed + user_idx)
+        n_holdout = max(1, int(len(nonzero_items) * holdout_ratio))
+        holdout_items = rng.choice(nonzero_items, size=n_holdout, replace=False)
+
+        X_input[user_idx, holdout_items] = 0.0
+        X_target[user_idx, holdout_items] = 1.0
+
+    return X_input.tocsr(), X_target.tocsr()
+
+
+def evaluate_recommendations_batched(
+    X_input_csr,
+    X_target_csr,
+    score_fn,
+    ks: List[int] = [5, 10, 20],
+    batch_size: int = 256,
+) -> tuple[Dict[str, Dict[str, float]], int]:
+    """Evaluate ranking metrics on a sparse holdout split in batches.
+
+    Parameters
+    ----------
+    X_input_csr : scipy.sparse.csr_matrix
+        Masked user history used as model input.
+    X_target_csr : scipy.sparse.csr_matrix
+        Held-out ground truth interactions.
+    score_fn : Callable[[np.ndarray], np.ndarray]
+        Function that maps a dense user batch to a dense score matrix.
+    ks : List[int]
+        Cutoff values to evaluate.
+    batch_size : int
+        Number of users to score per batch.
+
+    Returns
+    -------
+    tuple[Dict[str, Dict[str, float]], int]
+        Averaged metrics and the number of evaluated users.
+    """
+    totals = {
+        "ndcg": {f"@{k}": 0.0 for k in ks},
+        "recall": {f"@{k}": 0.0 for k in ks},
+        "precision": {f"@{k}": 0.0 for k in ks},
+        "mrr": {f"@{k}": 0.0 for k in ks},
+        "hr": {f"@{k}": 0.0 for k in ks},
+        "map": {f"@{k}": 0.0 for k in ks},
+    }
+    evaluated_users = 0
+
+    n_users = X_input_csr.shape[0]
+    for start in range(0, n_users, batch_size):
+        end = min(start + batch_size, n_users)
+        input_batch = X_input_csr[start:end].toarray().astype(np.float32)
+        target_batch = X_target_csr[start:end].toarray().astype(np.float32)
+
+        batch_user_mask = target_batch.sum(axis=1) > 0
+        batch_evaluated = int(batch_user_mask.sum())
+        if batch_evaluated == 0:
+            continue
+
+        score_batch = score_fn(input_batch)
+        batch_metrics = compute_metrics_batch(target_batch, score_batch, ks)
+
+        for metric_name, metric_values in batch_metrics.items():
+            for k_str, value in metric_values.items():
+                if not np.isnan(value):
+                    totals[metric_name][k_str] += float(value) * batch_evaluated
+
+        evaluated_users += batch_evaluated
+
+    averaged = {
+        metric_name: {
+            k_str: (
+                float(total / evaluated_users) if evaluated_users > 0 else float("nan")
+            )
+            for k_str, total in metric_values.items()
+        }
+        for metric_name, metric_values in totals.items()
+    }
+
+    return averaged, evaluated_users
 
 
 def print_evaluation_report(metrics: Dict[str, Dict[str, float]]) -> str:

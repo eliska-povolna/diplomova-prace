@@ -1,13 +1,22 @@
-# Interpretable POI Recommender System with Sparse Autoencoders
+# Explainable and Steerable POI Recommendations
 
 > **Diploma thesis** — Eliška Povolná, 2025/2026
 
+Modern recommender systems can be accurate while still being hard to inspect or influence. This project combines a collaborative-filtering model (**ELSA**) with a **Sparse Autoencoder (SAE)** so user preferences become sparse, readable features that can be interpreted and steered. The data source is the Yelp academic dataset, loaded into **DuckDB** locally or **CloudSQL** when using a cloud backend.
 
-Modern recommender systems achieve high accuracy through complex latent representations, but these are often opaque and hard for users to influence. This project integrates **Sparse Autoencoders (SAE)** into a collaborative-filtering architecture (**ELSA**) to transform dense latent vectors into **interpretable, user-controllable preference representations** — applied to **Points of Interest (POI)** recommendation using **Yelp** data.
+## What Is This?
 
-The resulting model learns sparse, semantically meaningful features that serve as interactive "knobs" — users can directly steer recommendations by adjusting their preference profile, rather than treating the system as a black box.
+This repository contains the full pipeline for an interpretable POI recommender system:
 
----
+- It loads Yelp JSON into a database.
+- It preprocesses user-item interactions into a CSR matrix.
+- It trains ELSA to learn dense latent user representations.
+- It trains a TopK SAE to turn those dense latents into sparse features.
+- It labels those features so they can be inspected and steered in the UI.
+- It evaluates ranking quality and model behavior on held-out data.
+- It exposes the results in a Streamlit dashboard.
+
+The main idea is simple: instead of keeping recommendations inside an opaque latent vector, the SAE turns them into a set of features that can be named, inspected, and adjusted.
 
 ## Contents
 
@@ -16,16 +25,13 @@ The resulting model learns sparse, semantically meaningful features that serve a
 - [Core Algorithms](#core-algorithms) — ELSA and Sparse Autoencoders explained
 - [Pipeline: Step-by-Step](#pipeline-step-by-step) — Database setup through evaluation
 - [Data: Yelp Dataset](#data-yelp-dataset) — Structure and download
-- [Getting Started](#getting-started) — Developer setup guide
 - [Configuration & Customization](#configuration--customization) — Hyperparameters
 - [Evaluation Metrics](#evaluation-metrics) — What is measured and how to interpret results
 - [Interpretability & Steering](#interpretability--steering) — Feature labeling and interactive control
 - [Interactive Dashboard](#interactive-dashboard) — Using the Streamlit UI
 - [Notebooks for Exploration](#notebooks-for-exploration) — Analysis and visualization
 - [Deployment](#deployment) — Local, Streamlit Cloud, and GCP options
-- [License & Citation](#license--citation)
-
----
+- [References](#references)
 
 ## Quick Start
 
@@ -38,7 +44,7 @@ Open the live demo (no setup required):
 
 ```bash
 # 1. Clone and setup
-git clone https://github.com/eliska-povolna/Diplomov-pr-ce.git
+git clone https://github.com/eliska-povolna/diplomova-prace.git
 cd Diplomov-pr-ce
 python -m venv .venv
 source .venv/bin/activate                          # Windows: .venv\Scripts\activate
@@ -73,17 +79,17 @@ python -m src.preprocess_data --config configs/default.yaml
 # Train models (ELSA + TopK SAE)
 python -m src.train --config configs/default.yaml
 
-# Label neurons for interpretability (auto-detects latest checkpoint)
+# Label neurons for interpretability (auto-detects the latest complete run)
 python -m src.label
 
-# Evaluate on test set (auto-detects latest checkpoint)
+# Evaluate on test set (auto-detects the latest complete run)
 python -m src.evaluate
 
 # View results in interactive dashboard
 streamlit run src/ui/main.py
 ```
 
-Output is saved to `outputs/YYYYMMDD_HHMMSS/` with models, metrics, and interpretations.
+Locally, output is saved to `outputs/YYYYMMDD_HHMMSS/` with models, metrics, and interpretations. On Streamlit Cloud, those artifacts are uploaded to GCS and loaded from there instead of relying on a local `outputs/` directory.
 
 **Note:** See [Configuration & Secrets](#configuration--secrets) for required setup.
 
@@ -262,10 +268,16 @@ Build CSR matrix and ID mappings:
 python -m src.preprocess_data --config configs/default.yaml
 ```
 
+If you have not run database setup yet, you can combine both steps:
+
+```bash
+python -m src.preprocess_data --config configs/default.yaml --setup-database --json-dir ~/Downloads/yelp_dataset
+```
+
 **What it does:**
-- Loads user-item interactions from DuckDB
-- Filters by state and review count (configurable in config)
-- Builds user→item interaction CSR matrix
+- Loads positive user-item interactions from DuckDB with `stars >= 4.0`
+- Applies iterative 5-core filtering so every user and item has at least 5 interactions
+- Builds the filtered user→item interaction CSR matrix
 - Creates ID mappings: user_id ↔ index, business_id ↔ index
 - Splits into train/val/test sets (80/10/10)
 
@@ -281,9 +293,9 @@ data:
 ```
 
 **Output:**
-- `data/preprocessed_yelp/processed_train.npz` (CSR matrix)
-- `data/preprocessed_yelp/user2index.pkl` (user ID mapping)
-- `data/preprocessed_yelp/item2index.pkl` (business ID mapping)
+- `data/preprocessed_yelp/processed_train.npz` (5-core filtered CSR matrix)
+- `data/preprocessed_yelp/user2index.pkl` (filtered user ID mapping)
+- `data/preprocessed_yelp/item2index.pkl` (filtered business ID mapping)
 
 ### Stage 2: Train
 
@@ -318,9 +330,12 @@ sae:
 ```
 
 **Output:**
-- `outputs/YYYYMMDD_HHMMSS/checkpoints/` — Trained models
-- `outputs/YYYYMMDD_HHMMSS/metrics/` — Training logs
-- `outputs/YYYYMMDD_HHMMSS/summary.json` — Training config + results
+- Locally, the pipeline writes to `outputs/YYYYMMDD_HHMMSS/`.
+- In cloud runs, the same artifacts are uploaded to GCS automatically when `GCS_BUCKET_NAME` is configured.
+- `checkpoints/` — Trained models
+- `metrics/` — Training logs
+- `summary.json` — Training config + results
+- `precomputed_ui_cache/` — Optional UI cache for word clouds, neuron stats, and test user embeddings
 
 **Expected duration:** 5-30 minutes (depends on data size and hardware)
 
@@ -333,22 +348,28 @@ python -m src.label
 ```
 
 **What it does:**
-- Loads trained SAE from latest checkpoint (auto-detected)
-- For each neuron, extracts its activation patterns
-- Generates semantic labels using:
-  - **Tag-based**: Categories from businesses with high activation
-  - **LLM-based**: Sends patterns to LLM (Gemini or GitHub Models)
-- Stores labels and neuron embeddings
+- Loads the latest complete training run automatically unless you pass `--training-dir`
+- Supports label generation with tag-based, matrix-based, and/or LLM-based methods
+- Supports `--method non-llm`, `--skip-coactivation`, and `--coactivation-only`
+- Generates neuron labels, neuron embeddings, co-activation data, and interpretability metadata
 
-**Optional LLM APIs (auto-detects which is available):**
-- `GOOGLE_API_KEY` in `.env` (for Google Gemini)
-- `GITHUB_TOKEN` in `.env` (for GitHub Models / GPT-4o)
+**Labeling methods:**
+- **Tag-based**: looks at the businesses that activate a neuron most strongly, then turns their category tags into a short, human-readable summary. This is the fastest and most deterministic option.
+- **Matrix-based**: builds a tag-neuron association matrix from the activation data and ranks the tags that best characterize each neuron. This is useful when you want a more systematic, data-driven label than simple tag aggregation.
+- **LLM-based**: sends the strongest examples and their categories to Google Gemini, which returns a semantic label in plain language. This usually produces the most natural descriptions, but it depends on the API key and is slower than the other methods. The prompt templates live in [src/interpret/prompts.py](src/interpret/prompts.py#L3) for neuron labels and [src/interpret/prompts.py](src/interpret/prompts.py#L17) for superfeature labels.
+
+**Optional LLM API:**
+- `GOOGLE_API_KEY` in `.env` or `.streamlit/secrets.toml` (for Gemini-based neuron labeling)
 
 **Output:**
-- `outputs/YYYYMMDD_HHMMSS/neuron_interpretations/`
-  - `labels_tag-based.pkl` — Dictionary of neuron → tags
-  - `labels_llm-based.pkl` — Dictionary of neuron → LLM description
-  - `neuron_embeddings.pt` — Embedding vectors for each neuron
+- Locally, the artifacts are written under `outputs/YYYYMMDD_HHMMSS/neuron_interpretations/`.
+- In cloud runs, they are uploaded to GCS automatically so Streamlit Cloud can load them.
+- `neuron_labels.json` — Selected labels and per-method labels
+- `labels_tag-based.pkl` — Dictionary of neuron → tags
+- `labels_llm-based.pkl` — Dictionary of neuron → LLM description
+- `neuron_embeddings.pt` — Embedding vectors for each neuron
+- `neuron_category_metadata.json` — Per-neuron category metadata for the UI
+- `neuron_coactivation.json` — Co-activation correlations and labels
 
 ### Stage 4: Evaluate
 
@@ -358,7 +379,7 @@ Compute ranking and model quality metrics on test set:
 python -m src.evaluate
 ```
 
-This auto-detects the latest checkpoint and evaluates on the test set.
+This auto-detects the latest complete run and evaluates on the test set.
 
 **What it computes:**
 - **Ranking metrics** @ K=5, 10, 20:
@@ -415,9 +436,8 @@ The Yelp Academic Dataset contains:
 ### Data Filtering
 
 The preprocessing step filters data by:
-- **State**: Default "PA" (Pennsylvania). Set to `null` in config for all states.
-- **Review count**: Keep users with ≥ 20 reviews (configurable)
-- **Rating threshold**: Stars ≥ 4.0 = positive feedback (configurable)
+- **5-core filtering**: Keep only users and items that have at least 5 interactions, applied iteratively until convergence.
+- **Rating threshold**: Stars ≥ 4.0 are treated as positive interactions.
 
 This reduces the full dataset to a manageable subset for faster training.
 
@@ -425,44 +445,26 @@ This reduces the full dataset to a manageable subset for faster training.
 
 ## Configuration & Secrets
 
-### Prerequisites
+Use the quick-start commands above to clone the repo, install dependencies, and initialize the database. This section only covers the secret files and what each part of the system reads.
 
-- Python 3.10+
-- ~10GB free disk space (for data + models)
-- GPU optional (training works on CPU, but slower)
+### Secrets Templates
 
-### Environment Setup
+Copy these templates before running the UI or training scripts locally:
 
-1. **Clone and setup:**
-   ```bash
-   git clone https://github.com/eliska-povolna/Diplomov-pr-ce.git
-   cd Diplomov-pr-ce
-   python -m venv .venv
-   source .venv/bin/activate           # Linux/Mac
-   # or
-   .venv\Scripts\activate              # Windows
-   ```
+```bash
+cp .env.example .env
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
 
-2. **Install dependencies:**
-   ```bash
-   pip install -r src/requirements.txt
-   ```
+- **`.env`**: For training scripts and utilities
+- **`.streamlit/secrets.toml`**: For the Streamlit UI
+- Both templates are gitignored so you can keep local credentials out of the repo
 
-3. **Configure secrets** — Copy templates and add your credentials:
-   ```bash
-   cp .env.example .env
-   cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-   ```
-   - **`.env`**: For training scripts (GOOGLE_API_KEY, GITHUB_TOKEN optional, Cloud SQL credentials optional)
-   - **`.streamlit/secrets.toml`**: For Streamlit UI (same variables as .env)
-   - Both are automatically excluded from git for security
+### Setup Reminder
 
-4. **Download and setup Yelp data:**
-   ```bash
-   # Download from https://www.yelp.com/dataset (JSON format)
-   python -m src.setup_database --json-dir ~/Downloads/yelp_dataset
-   ```
-   This creates `yelp.duckdb` (~5-10 minutes for full dataset).
+- Make sure the Yelp JSON files are available before running `src.setup_database`
+- The local database file is `yelp.duckdb`
+- If you use CloudSQL or Streamlit Cloud, configure the corresponding secrets before starting the app
 
 ---
 
@@ -570,6 +572,18 @@ Results include **ELSA-only** (baseline) vs **SAE+ELSA** (sparse):
 
 See the **Evaluation Analysis Notebook** (`notebooks/04_evaluation_analysis.ipynb`) for visualizations, metric comparisons, and deeper interpretation.
 
+### Outputs & Artifacts
+
+GCS is the source of truth for cloud runs. Local `outputs/<run_id>/` is the offline mirror and fallback.
+
+- `summary.json` records the run config and train/test metrics.
+- `evaluation_test.json` stores ranking and quality metrics for the test split.
+- `checkpoints/` stores the best ELSA and SAE weights.
+- `neuron_interpretations/` stores labels, co-activation data, and embeddings.
+- `precomputed_ui_cache/` stores cached UI assets.
+
+These artifacts are uploaded automatically during the pipeline when `GCS_BUCKET_NAME` is configured.
+
 ---
 
 ## Interpretability & Steering
@@ -579,14 +593,24 @@ See the **Evaluation Analysis Notebook** (`notebooks/04_evaluation_analysis.ipyn
 Each SAE neuron is labeled to identify what "feature" it represents:
 
 #### Tag-Based Labeling
-- For each neuron, find businesses with highest activation
-- Extract categories (tags) from those businesses
-- Aggregate: neuron ≈ "coffee_shops + casual" (most common tags)
+- For each neuron, find the businesses with the highest activation scores
+- Extract the Yelp categories attached to those businesses
+- Aggregate the most frequent tags into a compact label such as "coffee_shops + casual"
+- Best when you want a fast, reproducible label without any API calls
+
+#### Matrix-Based Labeling
+- Build a neuron-by-tag association matrix from the activation patterns
+- Rank tags by how strongly they co-occur with each neuron across the dataset
+- Produce labels from the strongest tag associations rather than only the top examples
+- Best when you want a more global, dataset-level view of what a neuron represents
 
 #### LLM-Based Labeling
-- Send activation patterns to Google Gemini API
-- Prompt: "These are the top business categories for this neuron: ... What does this neuron represent?"
-- Result: Human-readable label (e.g., "user likes casual dining and outdoor seating")
+- Send the strongest activating businesses and their categories to Google Gemini
+- Ask the model to summarize the pattern in natural language
+- Result: More descriptive labels such as "casual dining with outdoor seating" or "coffee and breakfast spots"
+- Best when you want the clearest human-readable interpretation and can afford the extra API step
+- Prompt template: [neuron label prompt](src/interpret/prompts.py#L3)
+- Superfeature prompt: [superfeature synthesis prompt](src/interpret/prompts.py#L17)
 
 **See:** `src/interpret/neuron_labeling.py`
 
@@ -664,9 +688,10 @@ Interactive Jupyter notebooks for analysis and visualization:
 
 | Notebook | Purpose |
 |----------|---------|
+| `00_preprocessing.ipynb` | Build the CSR interaction matrix and ID mappings |
 | `01_data_exploration.ipynb` | Explore Yelp data distribution, user/item statistics |
-| `02_coactivation_analysis.ipynb` | Analyze co-activation patterns between neurons |
-| `03_neuron_interpretability.ipynb` | Browse neuron labels and feature semantics |
+| `02_training.ipynb` | Train ELSA and SAE models interactively |
+| `03_neuron_labeling_demo.ipynb` | Browse neuron labels and feature semantics |
 | `04_evaluation_analysis.ipynb` | Detailed metrics analysis and comparison |
 
 **To run:**
@@ -686,18 +711,7 @@ jupyter notebook notebooks/
 
 ### Local Development
 
-```bash
-# Setup (one-time)
-python -m venv .venv
-source .venv/bin/activate
-pip install -r src/requirements.txt
-cp .env.example .env
-cp .streamlit/secrets.toml.example .streamlit/secrets.toml
-python -m src.setup_database --json-dir ~/Downloads/yelp_dataset
-
-# Run UI
-streamlit run src/ui/main.py
-```
+Use the Quick Start steps for local setup, then run the Streamlit app with `streamlit run src/ui/main.py`.
 
 ### Streamlit Cloud
 
@@ -738,23 +752,22 @@ export GOOGLE_CLOUD_PROJECT=my-project
 
 Models auto-upload to GCS when configured.
 
+### Current Data Layout
+
+- Local development uses DuckDB as the default database.
+- Cloud deployments use the same logical schema through CloudSQL.
+- The active state filter, review-count filter, model dimensions, and evaluation settings all come from `configs/default.yaml`.
+- Notebook, labeling, and UI outputs are read from the latest completed run in GCS first, with local `outputs/` used only as an offline fallback.
+
 ---
 
-## License & Citation
+## References
 
-License: See [LICENSE](LICENSE)
+License: See [LICENSE](LICENSE).
 
-**Citation (thesis):**
-```bibtex
-@thesis{povolna2026,
-  title={Interpretable POI Recommender System with Sparse Autoencoders},
-  author={Povolná, Eliška},
-  year={2026},
-  school={Charles University}
-}
-```
+- Spišák, M. et al. (2024). *From Knots to Knobs: Towards Steerable Collaborative Filtering Using Sparse Autoencoders.*
+- Wang, J. et al. (2024). *Understanding Internal Representations of Recommendation Models with Sparse Autoencoders (RecSAE).*
+- Vančura, V. et al. (2022). *Scalable Linear Shallow Autoencoder for Collaborative Filtering (ELSA).*
+- Bostandjiev, S. et al. (2012). *TasteWeights: a visual interactive hybrid recommender system.*
 
-**Key Papers:**
-- Sparse Autoencoders: [Sharkey et al., 2022](https://arxiv.org/abs/2309.08600)
-- ELSA: Collaborative filtering with linear autoencoders
-- TopK SAE: Sparse feature decomposition with activation patterns
+Cite this thesis: Povolná, E. (2026). *Explainable and Steerable POI Recommendations.* Thesis, Charles University.

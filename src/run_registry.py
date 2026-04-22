@@ -193,6 +193,31 @@ def create_run_id() -> str:
     return datetime.now().strftime("%Y%m%d_%H%M%S")
 
 
+def write_latest_run_pointer(run_dir: Path, outputs_dir: Optional[Path] = None) -> Path:
+    """Write outputs/LATEST_RUN.txt so the UI can find the newest run.
+
+    The pointer should reference the run root directory, not a subdirectory like
+    neuron_interpretations/.
+    """
+    run_dir = Path(run_dir)
+    if outputs_dir is None:
+        outputs_dir = Path.cwd() / "outputs"
+    else:
+        outputs_dir = Path(outputs_dir)
+
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    latest_run_path = outputs_dir / "LATEST_RUN.txt"
+
+    if run_dir.name:
+        pointer = Path("outputs") / run_dir.name
+    else:
+        pointer = run_dir
+
+    latest_run_path.write_text(str(pointer), encoding="utf-8")
+    logger.info(f"Latest run pointer updated: {latest_run_path} -> {pointer}")
+    return latest_run_path
+
+
 if __name__ == "__main__":
     # Example usage
     registry = RunRegistry()
