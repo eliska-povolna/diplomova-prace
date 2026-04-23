@@ -751,13 +751,13 @@ def load_data_service(config: Dict):
         if HAS_STREAMLIT:
             if not hasattr(st.session_state, "_startup_diagnostics"):
                 st.session_state._startup_diagnostics = {}
-            st.session_state._startup_diagnostics["backend"] = (
-                f"DuckDB ({service.num_pois} POIs)"
-            )
+            st.session_state._startup_diagnostics[
+                "backend"
+            ] = f"DuckDB ({service.num_pois} POIs)"
             if local_photos_path:
-                st.session_state._startup_diagnostics["photos"] = (
-                    f"Local ({local_photos_path})"
-                )
+                st.session_state._startup_diagnostics[
+                    "photos"
+                ] = f"Local ({local_photos_path})"
         logger.info(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
         if local_photos_path:
             logger.info(f"📷 Local photos enabled: {local_photos_path}")
