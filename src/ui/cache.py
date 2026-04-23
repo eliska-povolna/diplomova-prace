@@ -559,7 +559,7 @@ def load_inference_service(
     labels = load_labeling_service(config, selected_output_dir=selected_output_dir)
 
     # Load data service to pass to inference service
-    data_service = load_data_service(config)
+    data_service = load_data_service(config, selected_output_dir=selected_output_dir)
 
     service = InferenceService(
         elsa_ckpt, sae_ckpt, config, labels=labels, data_service=data_service
@@ -573,7 +573,10 @@ def load_inference_service(
 
 
 @st_cache_resource
-def load_data_service(config: Dict):
+def load_data_service(
+    config: Dict,
+    selected_output_dir: Optional[str] = None,
+):
     """
     Load POI data once per session.
 
@@ -602,10 +605,22 @@ def load_data_service(config: Dict):
     # 4. Hardcoded path for backward compatibility
     item2index_path = None
     item2index_candidates = []
+    active_run_dir = Path(selected_output_dir) if selected_output_dir else None
+
+    if active_run_dir and active_run_dir.exists():
+        for candidate in [
+            active_run_dir / "mappings" / "item2index.pkl",
+            active_run_dir / "mappings" / "business2index_universal.pkl",
+        ]:
+            item2index_candidates.append(candidate)
+            if candidate.exists():
+                item2index_path = candidate
+                logger.info("✅ Using mapping from selected run: %s", item2index_path)
+                break
 
     # Strategy 1A: Find latest FILTERED mapping (post-k-core) - PRIORITIZE THIS
     outputs_base = Path(__file__).parent.parent.parent / "outputs"
-    if outputs_base.exists():
+    if not item2index_path and outputs_base.exists():
         # List timestamp directories, sorted newest first
         timestamp_dirs = sorted(
             [d for d in outputs_base.iterdir() if d.is_dir() and len(d.name) == 15],
@@ -723,6 +738,7 @@ def load_data_service(config: Dict):
             config=config,
             item2index_path=item2index_path,
             local_photos_dir=local_photos_path,
+            active_run_dir=active_run_dir,
         )
     except FileNotFoundError as e:
         error_msg = (

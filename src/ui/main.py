@@ -113,7 +113,7 @@ try:
         inference = load_inference_service(config, selected_output_dir)
 
     with st.spinner("Loading POI data..."):
-        data = load_data_service(config)
+        data = load_data_service(config, selected_output_dir=selected_output_dir)
 
     with st.spinner("Initializing labeling service..."):
         labels = load_labeling_service(config, selected_output_dir=selected_output_dir)

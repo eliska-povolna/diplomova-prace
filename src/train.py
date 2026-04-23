@@ -530,11 +530,18 @@ def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
             output_dir / "business_metadata.pkl",
             output_dir / "item_map_after_kcore.pkl",
             output_dir / "reviews_df.pkl",
+            output_dir / "data" / "train_user_ids.json",
+            output_dir / "data" / "test_user_ids.json",
+            output_dir / "data" / "test_users_top50.json",
         ]:
             _upload_file(
                 metadata_file,
-                f"{gcs_prefix}/{metadata_file.name}",
-                "application/octet-stream",
+                f"{gcs_prefix}/data/{metadata_file.name}"
+                if metadata_file.parent.name == "data"
+                else f"{gcs_prefix}/{metadata_file.name}",
+                "application/json"
+                if metadata_file.suffix.lower() == ".json"
+                else "application/octet-stream",
             )
 
         logger.info(
@@ -556,6 +563,7 @@ def precompute_user_csr_matrices(
     output_dir: Path,
     upload_to_cloud: bool = True,
     top_n_users: int = 50,
+    allowed_user_ids: Optional[list[str]] = None,
 ):
     """
     Precompute CSR matrices for top-N users (for Streamlit app).
@@ -570,6 +578,8 @@ def precompute_user_csr_matrices(
         output_dir: Training output directory for saving results
         upload_to_cloud: Whether to upload to Cloud Storage
         top_n_users: Number of top users to precompute (default: 50)
+        allowed_user_ids: Optional allowlist of users to consider. If provided,
+            ranking is done only within this subset.
 
     Returns:
         Dict of {user_id: csr_matrix}
@@ -585,9 +595,17 @@ def precompute_user_csr_matrices(
 
     n_items = len(item_map_after_kcore)
 
+    candidate_reviews = reviews_df
+    if allowed_user_ids is not None:
+        allowed_user_ids = list(dict.fromkeys(allowed_user_ids))
+        candidate_reviews = reviews_df[reviews_df["user_id"].isin(allowed_user_ids)]
+        logger.info(
+            f"Restricting user CSR precompute to {len(allowed_user_ids)} allowed users"
+        )
+
     # Find top N users by interaction count
     user_interaction_counts = (
-        reviews_df.groupby("user_id").size().sort_values(ascending=False)
+        candidate_reviews.groupby("user_id").size().sort_values(ascending=False)
     )
     top_users = user_interaction_counts.head(top_n_users).index.tolist()
 
@@ -599,7 +617,7 @@ def precompute_user_csr_matrices(
     )
 
     # Filter reviews to only top users
-    reviews_filtered = reviews_df[reviews_df["user_id"].isin(top_users)]
+    reviews_filtered = candidate_reviews[candidate_reviews["user_id"].isin(top_users)]
     all_users = reviews_filtered["user_id"].unique()
 
     logger.info(f"Building CSR matrices for {len(all_users)} users, {n_items} items...")
@@ -672,14 +690,60 @@ def precompute_user_csr_matrices(
             from src.ui.services.cloud_storage_helper import CloudStorageHelper
 
             cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
-            gcs_path = f"metadata/user_csr_matrices.pkl"
-            blob = cloud_storage.bucket.blob(gcs_path)
-            blob.upload_from_filename(str(local_path))
-            logger.info(f"✅ Uploaded to gs://{gcs_bucket_name}/{gcs_path}")
+            gcs_paths = [f"models/{output_dir.name}/precomputed/user_csr_matrices.pkl"]
+            if allowed_user_ids is None:
+                gcs_paths.append("metadata/user_csr_matrices.pkl")
+
+            for gcs_path in gcs_paths:
+                blob = cloud_storage.bucket.blob(gcs_path)
+                blob.upload_from_filename(str(local_path))
+                logger.info(f"âś… Uploaded to gs://{gcs_bucket_name}/{gcs_path}")
         except Exception as e:
             logger.warning(f"⚠️ Cloud upload failed (app will use local file): {e}")
 
     return user_matrices
+
+
+def persist_test_user_artifacts(
+    output_dir: Path,
+    reviews_df,
+    train_user_ids: list[str],
+    test_user_ids: list[str],
+    *,
+    top_k: int = 50,
+) -> dict[str, Path]:
+    """Persist run-scoped train/test user artifacts for the UI."""
+    data_dir = output_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    train_ids_path = data_dir / "train_user_ids.json"
+    test_ids_path = data_dir / "test_user_ids.json"
+    top_users_path = data_dir / "test_users_top50.json"
+
+    interaction_counts = (
+        reviews_df[reviews_df["user_id"].isin(test_user_ids)]
+        .groupby("user_id")
+        .size()
+        .sort_values(ascending=False)
+    )
+
+    top_users = [
+        {"id": str(user_id), "interactions": int(count)}
+        for user_id, count in interaction_counts.head(top_k).items()
+    ]
+
+    train_ids_path.write_text(json.dumps([str(uid) for uid in train_user_ids], indent=2))
+    test_ids_path.write_text(json.dumps([str(uid) for uid in test_user_ids], indent=2))
+    top_users_path.write_text(json.dumps(top_users, indent=2))
+
+    logger.info("Saved train/test user artifacts to %s", data_dir)
+    logger.info("Saved %d ranked test users for UI", len(top_users))
+
+    return {
+        "train_user_ids": train_ids_path,
+        "test_user_ids": test_ids_path,
+        "test_users_top50": top_users_path,
+    }
 
 
 class SparseDataset(Dataset):
@@ -1432,6 +1496,16 @@ def main() -> None:
             f"✓ Saved item2index_filtered (model space): {len(item_map_after_kcore)} items"
         )
 
+        reviews_in_model_space = reviews[
+            reviews["business_id"].isin(item_map_after_kcore.keys())
+        ][["user_id", "business_id"]].drop_duplicates()
+        final_user_ids = list(dict.fromkeys(reviews_in_model_space["user_id"].tolist()))
+        if len(final_user_ids) != X_csr.shape[0]:
+            raise RuntimeError(
+                "Could not reconstruct final k-core user ordering: "
+                f"{len(final_user_ids)} user IDs vs CSR rows {X_csr.shape[0]}"
+            )
+
         # Train/test split
         n_users = X_csr.shape[0]
         user_indices = np.arange(n_users)
@@ -1453,6 +1527,8 @@ def main() -> None:
 
         X_train_csr = X_csr[train_users]
         X_test_csr = X_csr[test_users]
+        train_user_ids = [str(final_user_ids[idx]) for idx in train_users]
+        test_user_ids = [str(final_user_ids[idx]) for idx in test_users]
 
         # Create datasets that handle sparse matrices efficiently
         X_train_dataset = SparseDataset(X_train_csr)
@@ -1640,6 +1716,14 @@ def main() -> None:
             sae_model, Z_test, device, batch_size=256
         )
 
+        test_user_artifacts = persist_test_user_artifacts(
+            output_dir,
+            reviews,
+            train_user_ids,
+            test_user_ids,
+            top_k=50,
+        )
+
         # Save comprehensive summary
         summary = {
             "timestamp": datetime.now().isoformat(),
@@ -1688,6 +1772,9 @@ def main() -> None:
                 "evaluation_time_sec": evaluation_time,
             },
             "output_dir": str(output_dir),
+            "artifacts": {
+                key: str(path) for key, path in test_user_artifacts.items()
+            },
             "evaluation_protocol": {
                 "split": "per-user holdout",
                 "holdout_ratio": holdout_ratio,
@@ -1755,6 +1842,7 @@ def main() -> None:
                 output_dir,
                 upload_to_cloud=True,
                 top_n_users=50,
+                allowed_user_ids=test_user_ids,
             )
         except Exception as e:
             logger.error(f"User matrix precomputation failed: {e}")

@@ -69,6 +69,7 @@ class DataService:
         config: Optional[Dict] = None,
         item2index_path: Optional[Path] = None,
         local_photos_dir: Optional[Path] = None,
+        active_run_dir: Optional[Path] = None,
     ):
         """
         Initialize DataService.
@@ -87,6 +88,7 @@ class DataService:
         self.config = config or {}
         self.state_filter = self.config.get("state_filter")
         self.local_photos_dir = Path(local_photos_dir) if local_photos_dir else None
+        self.active_run_dir = Path(active_run_dir) if active_run_dir else None
         self.backend_type = "unknown"
         self.engine = None  # For Cloud SQL
 
@@ -901,8 +903,17 @@ class DataService:
         Get top N test users for dropdown selector.
 
         Filters to users with interactions in the current state_filter.
-        Loads from precomputed cache if available for fast startup.
+        Prefers the active run's saved test-user artifacts. Falls back to legacy
+        broad caches/database queries only for older runs that do not have them.
         """
+        run_users = _self._load_run_test_users(limit=limit)
+        if run_users:
+            logger.info(
+                "✅ Loaded %d real test users from active run artifacts",
+                len(run_users),
+            )
+            return run_users
+
         # Try loading from precomputed cache first
         project_root = Path(__file__).parent.parent.parent
         cache_dir = project_root / "data" / "ui_cache"
@@ -1008,6 +1019,61 @@ class DataService:
                 f"get_test_users failed (expected if using Streamlit Cloud without local data): {e}"
             )
             return []
+
+    def _load_run_test_users(self, limit: int = 50) -> List[Dict]:
+        """Load real held-out test users for the active run."""
+        if not self.active_run_dir:
+            return []
+
+        if getattr(self, "cloud_storage_helper", None) and len(self.active_run_dir.name) == 15:
+            gcs_path = f"models/{self.active_run_dir.name}/data/test_users_top50.json"
+            try:
+                users = self.cloud_storage_helper.read_json(gcs_path)
+                if isinstance(users, list):
+                    logger.info(
+                        "Loaded real test users from GCS artifact: %s", gcs_path
+                    )
+                    return users[:limit]
+            except Exception as e:
+                logger.debug("Could not load run-scoped test users from cloud: %s", e)
+
+        top_users_path = self.active_run_dir / "data" / "test_users_top50.json"
+        if top_users_path.exists():
+            try:
+                with open(top_users_path, "r", encoding="utf-8") as f:
+                    users = json.load(f)
+                if isinstance(users, list):
+                    return users[:limit]
+            except Exception as e:
+                logger.warning("Failed to load %s: %s", top_users_path, e)
+
+        test_ids_path = self.active_run_dir / "data" / "test_user_ids.json"
+        reviews_path = self.active_run_dir / "data" / "reviews_df.pkl"
+        if test_ids_path.exists() and reviews_path.exists():
+            try:
+                with open(test_ids_path, "r", encoding="utf-8") as f:
+                    test_user_ids = json.load(f)
+                with open(reviews_path, "rb") as f:
+                    reviews_df = pickle.load(f)
+
+                counts = (
+                    reviews_df[reviews_df["user_id"].isin(test_user_ids)]
+                    .groupby("user_id")
+                    .size()
+                    .sort_values(ascending=False)
+                )
+                return [
+                    {"id": str(user_id), "interactions": int(count)}
+                    for user_id, count in counts.head(limit).items()
+                ]
+            except Exception as e:
+                logger.warning(
+                    "Failed to derive run-scoped test users from %s: %s",
+                    self.active_run_dir,
+                    e,
+                )
+
+        return []
 
     @cache_data
     def get_user_interactions(_self, user_id: str, min_stars: float = 4.0) -> List[int]:
@@ -1199,14 +1265,43 @@ class DataService:
         Load precomputed CSR matrices for all users.
 
         Load priority:
-        1. Cloud Storage: metadata/user_csr_matrices.pkl
-        2. Local: data/user_csr_matrices.pkl
-        3. Return empty dict if neither available
+        1. Active run local: outputs/<run_id>/precomputed/user_csr_matrices.pkl
+        2. Active run cloud: models/<run_id>/precomputed/user_csr_matrices.pkl
+        3. Legacy Cloud Storage: metadata/user_csr_matrices.pkl
+        4. Legacy local: data/user_csr_matrices.pkl
+        5. Return empty dict if none available
 
         Returns:
             Dict[user_id, csr_matrix] or empty dict if not found
         """
-        # Try cloud first
+        if self.active_run_dir:
+            if getattr(self, "cloud_storage_helper", None) and len(self.active_run_dir.name) == 15:
+                cloud_run_path = (
+                    f"models/{self.active_run_dir.name}/precomputed/user_csr_matrices.pkl"
+                )
+                try:
+                    matrices = self.cloud_storage_helper.read_pickle(cloud_run_path)
+                    if matrices:
+                        logger.info(
+                            f"✅ Loaded precomputed user matrices from active run cloud ({len(matrices)} users)"
+                        )
+                        return matrices
+                except Exception as e:
+                    logger.debug(f"Could not load active-run matrices from cloud: {e}")
+
+            run_local_path = self.active_run_dir / "precomputed" / "user_csr_matrices.pkl"
+            if run_local_path.exists():
+                try:
+                    with open(run_local_path, "rb") as f:
+                        matrices = pickle.load(f)
+                    logger.info(
+                        f"✅ Loaded precomputed user matrices from active run ({len(matrices)} users)"
+                    )
+                    return matrices
+                except Exception as e:
+                    logger.debug(f"Could not load active-run matrices from local: {e}")
+
+        # Try legacy cloud path
         cloud_path = "metadata/user_csr_matrices.pkl"
         try:
             if getattr(self, "cloud_storage_helper", None):

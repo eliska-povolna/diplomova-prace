@@ -224,8 +224,813 @@
       "created": "2026-04-22T20:46:14.689563",
       "stages": {
         "train": {
-          "status": "pending",
+          "status": "completed",
           "timestamp": "2026-04-22T20:46:14.689585",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260422_204614"
+          },
+          "completed": "2026-04-22T21:23:32.775272"
+        }
+      }
+    },
+    "20260422_212421": {
+      "created": "2026-04-22T21:24:21.814695",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-22T21:24:21.814709",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260422_212421"
+          },
+          "completed": "2026-04-22T22:01:58.415377"
+        }
+      }
+    },
+    "20260422_220217": {
+      "created": "2026-04-22T22:02:17.340876",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-22T22:02:17.340886",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260422_220217"
+          },
+          "completed": "2026-04-22T22:35:34.970944"
+        }
+      }
+    },
+    "20260422_223624": {
+      "created": "2026-04-22T22:36:24.339408",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-22T22:36:24.339418",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260422_223624"
+          },
+          "completed": "2026-04-22T23:09:08.830207"
+        }
+      }
+    },
+    "20260422_230921": {
+      "created": "2026-04-22T23:09:21.368969",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-22T23:09:21.368979",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260422_230921"
+          },
+          "completed": "2026-04-22T23:42:42.745989"
+        }
+      }
+    },
+    "20260422_234258": {
+      "created": "2026-04-22T23:42:58.598516",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-22T23:42:58.598527",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260422_234258"
+          },
+          "completed": "2026-04-23T00:09:49.583596"
+        }
+      }
+    },
+    "20260423_001001": {
+      "created": "2026-04-23T00:10:01.178808",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T00:10:01.178817",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_001001"
+          },
+          "completed": "2026-04-23T00:37:29.591895"
+        }
+      }
+    },
+    "20260423_003744": {
+      "created": "2026-04-23T00:37:44.899215",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T00:37:44.899225",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_003744"
+          },
+          "completed": "2026-04-23T01:04:26.513927"
+        }
+      }
+    },
+    "20260423_010442": {
+      "created": "2026-04-23T01:04:42.324278",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T01:04:42.324286",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_010442"
+          },
+          "completed": "2026-04-23T01:31:42.271994"
+        }
+      }
+    },
+    "20260423_013153": {
+      "created": "2026-04-23T01:31:53.797601",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T01:31:53.797613",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_013153"
+          },
+          "completed": "2026-04-23T01:54:18.465584"
+        }
+      }
+    },
+    "20260423_015432": {
+      "created": "2026-04-23T01:54:32.336685",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T01:54:32.336695",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_015432"
+          },
+          "completed": "2026-04-23T02:16:56.061627"
+        }
+      }
+    },
+    "20260423_021715": {
+      "created": "2026-04-23T02:17:15.992978",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T02:17:15.992989",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_021715"
+          },
+          "completed": "2026-04-23T02:38:54.792323"
+        }
+      }
+    },
+    "20260423_023906": {
+      "created": "2026-04-23T02:39:06.183982",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T02:39:06.183991",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_023906"
+          },
+          "completed": "2026-04-23T03:01:06.337630"
+        }
+      }
+    },
+    "20260423_030118": {
+      "created": "2026-04-23T03:01:18.922388",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T03:01:18.922398",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_030118"
+          },
+          "completed": "2026-04-23T03:23:11.490007"
+        }
+      }
+    },
+    "20260423_032325": {
+      "created": "2026-04-23T03:23:25.907796",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T03:23:25.907804",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_032325"
+          },
+          "completed": "2026-04-23T03:44:42.732118"
+        }
+      }
+    },
+    "20260423_034453": {
+      "created": "2026-04-23T03:44:53.934657",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T03:44:53.934669",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_034453"
+          },
+          "completed": "2026-04-23T04:06:37.362166"
+        }
+      }
+    },
+    "20260423_040649": {
+      "created": "2026-04-23T04:06:49.650787",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T04:06:49.650797",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 75,
+            "final_output_dir": "outputs\\20260423_040649"
+          },
+          "completed": "2026-04-23T04:28:31.003347"
+        }
+      }
+    },
+    "20260423_042847": {
+      "created": "2026-04-23T04:28:47.290206",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T04:28:47.290218",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_042847"
+          },
+          "completed": "2026-04-23T04:49:14.235338"
+        }
+      }
+    },
+    "20260423_044927": {
+      "created": "2026-04-23T04:49:27.747451",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T04:49:27.747461",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_044927"
+          },
+          "completed": "2026-04-23T05:10:42.147037"
+        }
+      }
+    },
+    "20260423_051054": {
+      "created": "2026-04-23T05:10:54.191175",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T05:10:54.191183",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_051054"
+          },
+          "completed": "2026-04-23T05:31:56.571260"
+        }
+      }
+    },
+    "20260423_053214": {
+      "created": "2026-04-23T05:32:14.937412",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T05:32:14.937421",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_053214"
+          },
+          "completed": "2026-04-23T05:59:36.666403"
+        }
+      }
+    },
+    "20260423_055948": {
+      "created": "2026-04-23T05:59:48.168308",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T05:59:48.168321",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_055948"
+          },
+          "completed": "2026-04-23T06:27:12.175579"
+        }
+      }
+    },
+    "20260423_062723": {
+      "created": "2026-04-23T06:27:23.170242",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T06:27:23.170254",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_062723"
+          },
+          "completed": "2026-04-23T06:54:58.824007"
+        }
+      }
+    },
+    "20260423_065515": {
+      "created": "2026-04-23T06:55:15.274966",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T06:55:15.274977",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 150,
+            "final_output_dir": "outputs\\20260423_065515"
+          },
+          "completed": "2026-04-23T07:28:51.369253"
+        }
+      }
+    },
+    "20260423_072904": {
+      "created": "2026-04-23T07:29:04.838869",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T07:29:04.838909",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 150,
+            "final_output_dir": "outputs\\20260423_072904"
+          },
+          "completed": "2026-04-23T08:02:54.534413"
+        }
+      }
+    },
+    "20260423_080310": {
+      "created": "2026-04-23T08:03:10.512149",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T08:03:10.512158",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 150,
+            "final_output_dir": "outputs\\20260423_080310"
+          },
+          "completed": "2026-04-23T08:36:57.008325"
+        }
+      }
+    },
+    "20260423_083708": {
+      "created": "2026-04-23T08:37:08.581662",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T08:37:08.581674",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_083708"
+          },
+          "completed": "2026-04-23T09:03:02.093198"
+        }
+      }
+    },
+    "20260423_090319": {
+      "created": "2026-04-23T09:03:19.145172",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T09:03:19.145183",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_090319"
+          },
+          "completed": "2026-04-23T09:27:42.260206"
+        }
+      }
+    },
+    "20260423_092756": {
+      "created": "2026-04-23T09:27:56.145155",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T09:27:56.145164",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_092756"
+          },
+          "completed": "2026-04-23T09:57:19.370474"
+        }
+      }
+    },
+    "20260423_095744": {
+      "created": "2026-04-23T09:57:44.508662",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T09:57:44.508676",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_095744"
+          },
+          "completed": "2026-04-23T10:41:29.530419"
+        }
+      }
+    },
+    "20260423_104159": {
+      "created": "2026-04-23T10:41:59.045302",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T10:41:59.045317",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 30,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_104159"
+          },
+          "completed": "2026-04-23T11:35:40.428294"
+        }
+      }
+    },
+    "20260423_113610": {
+      "created": "2026-04-23T11:36:10.218390",
+      "stages": {
+        "train": {
+          "status": "pending",
+          "timestamp": "2026-04-23T11:36:10.218400",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "20260423_123055": {
+      "created": "2026-04-23T12:30:55.766403",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T12:30:55.766433",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_123055"
+          },
+          "completed": "2026-04-23T14:40:37.500371"
+        }
+      }
+    },
+    "20260423_144153": {
+      "created": "2026-04-23T14:41:53.208074",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T14:41:53.208101",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_144153"
+          },
+          "completed": "2026-04-23T16:10:26.074218"
+        }
+      }
+    },
+    "20260423_161120": {
+      "created": "2026-04-23T16:11:20.806359",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T16:11:20.806382",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260423_161120"
+          },
+          "completed": "2026-04-23T16:52:05.339864"
+        }
+      }
+    },
+    "20260423_165238": {
+      "created": "2026-04-23T16:52:38.967126",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T16:52:38.967147",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_165238"
+          },
+          "completed": "2026-04-23T17:24:19.948133"
+        }
+      }
+    },
+    "20260423_172455": {
+      "created": "2026-04-23T17:24:55.951931",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T17:24:55.951943",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_172455"
+          },
+          "completed": "2026-04-23T17:47:17.256538"
+        }
+      }
+    },
+    "20260423_174804": {
+      "created": "2026-04-23T17:48:04.933447",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T17:48:04.933474",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_174804"
+          },
+          "completed": "2026-04-23T18:15:36.341437"
+        }
+      }
+    },
+    "20260423_181614": {
+      "created": "2026-04-23T18:16:14.555555",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T18:16:14.555585",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_181614"
+          },
+          "completed": "2026-04-23T18:39:20.659855"
+        }
+      }
+    },
+    "20260423_183946": {
+      "created": "2026-04-23T18:39:46.105850",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T18:39:46.105860",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_183946"
+          },
+          "completed": "2026-04-23T18:59:03.885631"
+        }
+      }
+    },
+    "20260423_185924": {
+      "created": "2026-04-23T18:59:24.935972",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T18:59:24.935986",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_185924"
+          },
+          "completed": "2026-04-23T19:31:27.805504"
+        }
+      }
+    },
+    "20260423_193246": {
+      "created": "2026-04-23T19:32:46.370226",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T19:32:46.370252",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_193246"
+          },
+          "completed": "2026-04-23T20:13:14.149652"
+        }
+      }
+    },
+    "20260423_201348": {
+      "created": "2026-04-23T20:13:48.298701",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T20:13:48.298719",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_201348"
+          },
+          "completed": "2026-04-23T20:54:45.205910"
+        }
+      }
+    },
+    "20260423_205640": {
+      "created": "2026-04-23T20:56:40.570924",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T20:56:40.570953",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_205640"
+          },
+          "completed": "2026-04-23T21:55:52.557174"
+        }
+      }
+    },
+    "20260423_215640": {
+      "created": "2026-04-23T21:56:40.834920",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-23T21:56:40.834939",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_215640"
+          },
+          "completed": "2026-04-23T22:24:31.359203"
+        }
+      }
+    },
+    "20260423_222635": {
+      "created": "2026-04-23T22:26:35.924398",
+      "stages": {
+        "train": {
+          "status": "pending",
+          "timestamp": "2026-04-23T22:26:35.924425",
           "config": {
             "skip_preprocessing": false
           },
