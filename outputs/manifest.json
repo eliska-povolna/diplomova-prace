@@ -1029,12 +1029,33 @@
       "created": "2026-04-23T22:26:35.924398",
       "stages": {
         "train": {
-          "status": "pending",
+          "status": "completed",
           "timestamp": "2026-04-23T22:26:35.924425",
           "config": {
             "skip_preprocessing": false
           },
-          "metadata": {}
+          "metadata": {
+            "elsa_epochs": 25,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260423_222635"
+          },
+          "completed": "2026-04-23T23:14:54.660074"
+        }
+      }
+    },
+    "20260423_231617": {
+      "created": "2026-04-23T23:16:17.172229",
+      "stages": {
+        "train": {
+          "status": "failed",
+          "timestamp": "2026-04-23T23:16:17.172256",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "error": "Could not reconstruct final k-core user ordering: 265216 user IDs vs CSR rows 37323"
+          },
+          "completed": "2026-04-23T23:16:54.418901"
         }
       }
     }

@@ -33,17 +33,15 @@ import numpy as np
 import yaml
 import torch
 import torch.optim as optim
-from scipy.sparse import csr_matrix
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
-from src.data.preprocessing import (
-    apply_kcore_filtering,
-    build_csr,
-    load_dataset,
-    save_dataset,
+from src.data.shared_preprocessing_cache import (
+    build_preprocessing_cache_key,
+    get_shared_preprocessing_cache_dir,
+    prepare_shared_preprocessing_cache,
+    shared_preprocessing_manifest_path,
 )
-from src.data.yelp_loader import load_businesses, load_reviews
 from src.models.collaborative_filtering import ELSA, NMSELoss
 from src.models.sparse_autoencoder import TopKSAE
 from src.run_registry import RunRegistry, create_run_id, write_latest_run_pointer
@@ -193,6 +191,7 @@ def _run_experiment_sweep(args: argparse.Namespace) -> None:
     logger.info("=" * 60)
 
     total_runs = 0
+    prepared_cache_keys: set[str] = set()
     for experiment in experiments:
         experiment_name = experiment.get("name", "unnamed_experiment")
         experiment_desc = experiment.get("description", "")
@@ -235,7 +234,8 @@ def _run_experiment_sweep(args: argparse.Namespace) -> None:
                 "--config",
                 str(run_config_path),
             ]
-            if args.skip_preprocessing:
+            cache_key = build_preprocessing_cache_key(resolved_config)
+            if args.skip_preprocessing or cache_key in prepared_cache_keys:
                 command.append("--skip-preprocessing")
             if args.skip_elsa:
                 command.append("--skip-elsa")
@@ -251,6 +251,7 @@ def _run_experiment_sweep(args: argparse.Namespace) -> None:
                 raise RuntimeError(
                     f"Experiment run failed: {run_name} (exit code {result.returncode})"
                 )
+            prepared_cache_keys.add(cache_key)
 
             latest_run_path = Path.cwd() / "outputs" / "LATEST_RUN.txt"
             if latest_run_path.exists():
@@ -774,8 +775,8 @@ def parse_args() -> argparse.Namespace:
     # Only train SAE (reuse existing ELSA + preprocessing)
     python -m src.train --config configs/default.yaml --skip-elsa
 
-    # Skip preprocessing, use cached data
-    python -m src.train --config configs/default.yaml --use-cached-preprocessing
+    # Skip preprocessing, require an existing shared preprocessing cache
+    python -m src.train --config configs/default.yaml --skip-preprocessing
 
     # Experiments: try different SAE hyperparams without retraining ELSA
     python -m src.train --config configs/default.yaml --skip-elsa --skip-preprocessing
@@ -785,7 +786,7 @@ def parse_args() -> argparse.Namespace:
         description="Train ELSA + TopK SAE POI recommender",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Component selection:\n"
-        "  --skip-preprocessing  Skip data loading/filtering (use cached data from last run)\n"
+        "  --skip-preprocessing  Require existing shared preprocessing cache; do not rebuild raw preprocessing\n"
         "  --skip-elsa           Skip ELSA training (reuse best checkpoint)\n"
         "  --skip-sae            Skip SAE training (reuse best checkpoint)\n"
         "\nFor grid search experiments, use --skip-elsa --skip-preprocessing to\n"
@@ -805,8 +806,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-preprocessing",
         action="store_true",
-        help="Skip data loading/filtering. Requires cached data from previous run. "
-        "Useful for quick SAE experiments without reloading large datasets.",
+        help="Require an existing shared preprocessing cache for this data configuration. "
+        "If the cache is missing or invalid, training fails instead of rebuilding preprocessing.",
     )
     parser.add_argument(
         "--skip-elsa",
@@ -1348,132 +1349,37 @@ def main() -> None:
         logger.info("=" * 60)
 
         db_path = config["data"]["db_path"]
-        cache_dir = output_dir / "_preprocessed_cache"
+        config_dict = config.to_dict()
+        shared_cache_dir = get_shared_preprocessing_cache_dir(config_dict)
+        preprocessing_cache_key = build_preprocessing_cache_key(config_dict)
 
         db_path_obj = Path(db_path)
         if not db_path_obj.exists():
             raise FileNotFoundError(f"DuckDB database not found: {db_path_obj}")
 
-        # ⭐ CHECK IF WE CAN SKIP PREPROCESSING AND LOAD FROM CACHE
-        if args.skip_preprocessing and cache_dir.exists():
-            logger.info("⏭️  --skip-preprocessing: Loading from cache...")
-            try:
-                cached_dataset = load_dataset(cache_dir)
-                X_csr = cached_dataset.csr
-                item_map_before_kcore = cached_dataset.item_map
-                logger.info(
-                    f"✓ Loaded cached CSR: {X_csr.shape[0]} users × {X_csr.shape[1]} items"
-                )
-
-                # Still need universal mappings for output
-                with open(cache_dir / "_universal_mappings.pkl", "rb") as f:
-                    universal_user_map, universal_business_map = pickle.load(f)
-
-                logger.info("✓ Loaded universal mappings from cache")
-                # Skip to k-core filtering and beyond
-                preprocessing_skipped = True
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load from cache: {e}. Rebuilding from scratch."
-                )
-                preprocessing_skipped = False
-        else:
-            preprocessing_skipped = False
-
-        # ⭐ ONLY RUN PREPROCESSING IF NOT SKIPPED
-        if not preprocessing_skipped:
-            # Load with all applicable filters from config
-            # ⭐ FIRST: Create UNIVERSAL mappings from ALL data BEFORE any filtering
-            # This ensures we have complete mappings for all possible items
-            logger.info("Creating universal item/business mappings...")
-            all_reviews = load_reviews(
-                db_path=db_path,
-                pos_threshold=config["data"]["pos_threshold"],
-                year_min=config["data"].get("year_min"),
-                year_max=config["data"].get("year_max"),
-            )
-
-            # Build universal mappings from all data
-            all_users = all_reviews["user_id"].unique()
-            all_businesses = all_reviews["business_id"].unique()
-
-            universal_user_map = {uid: idx for idx, uid in enumerate(all_users)}
-            universal_business_map = {
-                bid: idx for idx, bid in enumerate(all_businesses)
-            }
-
-            logger.info("Universal mappings created:")
-            logger.info(f"  Total unique users: {len(universal_user_map)}")
-            logger.info(f"  Total unique businesses: {len(universal_business_map)}")
-
-            # ⭐ NOW apply filtering on top of universal data
-            reviews = all_reviews.copy()
-
-            # Filter by state (if specified)
-            state_filter = config["data"].get("state_filter")
-            if state_filter:
-                businesses = load_businesses(
-                    db_path=db_path,
-                    state_filter=state_filter,
-                    min_review_count=config["data"].get("min_review_count", 5),
-                )
-                business_ids = set(businesses["business_id"].values)
-                logger.info(
-                    f"Filtering by state {state_filter}: {len(business_ids)} businesses"
-                )
-                reviews = reviews[reviews["business_id"].isin(business_ids)]
-
-            logger.info(f"Loaded {len(reviews)} reviews (after state filtering)")
-
-            # Build CSR matrix FROM FILTERED DATA
-            logger.info("Building CSR matrix from filtered data...")
-            dataset = build_csr(reviews)
-            X_csr = dataset.csr
-            item_map_before_kcore = (
-                dataset.item_map
-            )  # business_id -> index (before k-core)
+        if args.skip_preprocessing:
             logger.info(
-                f"Built CSR: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
-                f"{X_csr.nnz} interactions"
+                "--skip-preprocessing: loading shared preprocessing cache from %s",
+                shared_cache_dir,
             )
 
-            # Cache raw CSR + universal mappings for potential reuse
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            save_dataset(dataset, cache_dir)
-            with open(cache_dir / "_universal_mappings.pkl", "wb") as f:
-                pickle.dump((universal_user_map, universal_business_map), f)
-            logger.info(f"✓ Cached preprocessed data to {cache_dir}")
-
-        # Apply k-core filtering
-        logger.info("Applying k-core filtering (k=5)...")
-        X_csr = apply_kcore_filtering(X_csr, k=5)
-        logger.info(
-            f"After k-core: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
-            f"{X_csr.nnz} interactions"
+        preprocessing_payload, preprocessing_source, _ = prepare_shared_preprocessing_cache(
+            config_dict, require_existing=args.skip_preprocessing
         )
-
-        # ⭐ Build final item mapping AFTER k-core filtering
-        # The CSR matrix columns are renumbered after k-core, so we need to track
-        # which original items survived and create a new mapping for them.
-        # Create reverse mapping: index -> business_id (before k-core)
-        index_to_business_before = {
-            idx: bid for bid, idx in item_map_before_kcore.items()
-        }
-
-        # Get all items that are actually used (have non-zero entries) in the k-core filtered matrix
-        item_indices_used = set(
-            X_csr.nonzero()[1]
-        )  # Column indices of non-zero entries
-
-        # Build new mapping: business_id -> new_index (only items in k-core result)
-        items_after_kcore = sorted(item_indices_used)
-        item_map_after_kcore = {
-            index_to_business_before[old_idx]: new_idx
-            for new_idx, old_idx in enumerate(items_after_kcore)
-        }
+        preprocessing_manifest = preprocessing_payload["manifest"]
+        reviews = preprocessing_payload["reviews"]
+        X_csr = preprocessing_payload["final_dataset"].csr
+        item_map_after_kcore = preprocessing_payload["item_map_after_kcore"]
+        final_user_ids = preprocessing_payload["final_user_ids"]
+        universal_user_map = preprocessing_payload["universal_user_map"]
+        universal_business_map = preprocessing_payload["universal_business_map"]
+        item_count_before_kcore = preprocessing_manifest["counts"]["raw_n_items"]
 
         logger.info(
-            f"Item mapping: {len(item_map_before_kcore)} items → {len(item_map_after_kcore)} items (after k-core)"
+            "Using shared preprocessing dataset: %d users x %d items, %d interactions",
+            X_csr.shape[0],
+            X_csr.shape[1],
+            X_csr.nnz,
         )
 
         # Save universal mappings for downstream use (e.g., labeling notebook)
@@ -1487,22 +1393,17 @@ def main() -> None:
 
         logger.info(f"Universal mappings saved to {mappings_dir}")
 
-        # ⭐ IMPORTANT: Save FILTERED item mapping (after k-core)
-        # This is what the model actually uses! Model indices are 0 to (n_items-1) from the k-core filtered matrix
+        # Save FILTERED item mapping (after k-core)
         with open(mappings_dir / "item2index.pkl", "wb") as f:
             pickle.dump(item_map_after_kcore, f)
 
         logger.info(
-            f"✓ Saved item2index_filtered (model space): {len(item_map_after_kcore)} items"
+            f"Saved item2index_filtered (model space): {len(item_map_after_kcore)} items"
         )
 
-        reviews_in_model_space = reviews[
-            reviews["business_id"].isin(item_map_after_kcore.keys())
-        ][["user_id", "business_id"]].drop_duplicates()
-        final_user_ids = list(dict.fromkeys(reviews_in_model_space["user_id"].tolist()))
         if len(final_user_ids) != X_csr.shape[0]:
             raise RuntimeError(
-                "Could not reconstruct final k-core user ordering: "
+                "Shared preprocessing cache has inconsistent user ordering: "
                 f"{len(final_user_ids)} user IDs vs CSR rows {X_csr.shape[0]}"
             )
 
@@ -1731,7 +1632,7 @@ def main() -> None:
             "data": {
                 "n_users": int(n_users),
                 "n_items": int(X_csr.shape[1]),
-                "n_items_before_kcore": int(len(item_map_before_kcore)),
+                "n_items_before_kcore": int(item_count_before_kcore),
                 "n_interactions": int(X_csr.nnz),
                 "n_train_users": int(len(train_users)),
                 "n_test_users": int(len(test_users)),
@@ -1772,6 +1673,13 @@ def main() -> None:
                 "evaluation_time_sec": evaluation_time,
             },
             "output_dir": str(output_dir),
+            "preprocessing": {
+                "cache_key": preprocessing_cache_key,
+                "cache_dir": str(shared_cache_dir),
+                "source": preprocessing_source,
+                "manifest_path": str(shared_preprocessing_manifest_path(shared_cache_dir)),
+                "manifest": preprocessing_manifest,
+            },
             "artifacts": {
                 key: str(path) for key, path in test_user_artifacts.items()
             },
@@ -1897,3 +1805,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

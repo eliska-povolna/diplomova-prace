@@ -16,14 +16,15 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import pickle
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from src.data.preprocessing import apply_kcore_filtering, build_csr
-from src.data.yelp_loader import load_businesses, load_reviews
+from src.data.shared_preprocessing_cache import (
+    prepare_shared_preprocessing_cache,
+    shared_preprocessing_manifest_path,
+)
 from src.models.collaborative_filtering import ELSA
 from src.models.sae_cf_model import ELSASAEModel
 from src.models.sparse_autoencoder import TopKSAE
@@ -217,45 +218,17 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info(f"LOADING {args.split.upper()} DATA")
         logger.info("=" * 60)
-
-        data_dir = output_dir / "data"
-        reviews_path = data_dir / "reviews_df.pkl"
-
-        if reviews_path.exists():
-            logger.info(
-                f"Loading filtered reviews from training artefact: {reviews_path}"
-            )
-            with reviews_path.open("rb") as f:
-                reviews = pickle.load(f)
-            logger.info(f"Loaded {len(reviews)} reviews from saved training data")
-        else:
-            reviews = load_reviews(
-                db_path=config["data"]["db_path"],
-                pos_threshold=config["data"]["pos_threshold"],
-                year_min=config["data"].get("year_min"),
-                year_max=config["data"].get("year_max"),
-            )
-
-            state_filter = config["data"].get("state_filter")
-            if state_filter:
-                businesses = load_businesses(
-                    db_path=config["data"]["db_path"],
-                    state_filter=state_filter,
-                    min_review_count=config["data"].get("min_review_count", 5),
-                )
-                business_ids = set(businesses["business_id"].values)
-                logger.info(
-                    f"Filtering by state {state_filter}: {len(business_ids)} businesses"
-                )
-                reviews = reviews[reviews["business_id"].isin(business_ids)]
-
-            logger.info(f"Loaded {len(reviews)} reviews after filtering")
-
-        # Build CSR matrix
-        logger.info("Building CSR matrix...")
-        dataset = build_csr(reviews)
-        X_csr = apply_kcore_filtering(dataset.csr, k=5)
-        logger.info(f"Built CSR: {X_csr.shape[0]} users × {X_csr.shape[1]} items")
+        preprocessing_payload, preprocessing_source, shared_cache_dir = (
+            prepare_shared_preprocessing_cache(config, require_existing=False)
+        )
+        reviews = preprocessing_payload["reviews"]
+        X_csr = preprocessing_payload["final_dataset"].csr
+        logger.info(
+            "Using shared preprocessing cache (%s): %s",
+            preprocessing_source,
+            shared_cache_dir,
+        )
+        logger.info("Built CSR: %d users x %d items", X_csr.shape[0], X_csr.shape[1])
 
         # Get appropriate split
         from sklearn.model_selection import train_test_split
@@ -406,6 +379,13 @@ def main() -> None:
             },
             "metrics": metrics_sae,
             "config": config,
+            "preprocessing": {
+                "source": preprocessing_source,
+                "cache_dir": str(shared_cache_dir),
+                "manifest_path": str(
+                    shared_preprocessing_manifest_path(shared_cache_dir)
+                ),
+            },
         }
 
         results_path = output_dir / f"evaluation_{args.split}.json"
@@ -441,3 +421,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
