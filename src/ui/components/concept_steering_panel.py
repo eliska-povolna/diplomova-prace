@@ -216,6 +216,11 @@ and apply steering through the same hidden-space mechanism used for direct neuro
             session_state[f"poi_details_map_{selected_user}"] = data_service.get_poi_details_batch(
                 poi_indices
             )
+        session_state[f"live_demo::{selected_user}::steered_recommendations"] = recommendations
+        session_state[f"live_demo::{selected_user}::active_steering_config"] = steering_config
+        session_state[f"live_demo::{selected_user}::displayed_recommendations"] = recommendations
+        session_state[f"live_demo::{selected_user}::feature_chart_original"] = None
+        session_state[f"live_demo::{selected_user}::feature_chart_steered"] = None
         session_state.current_recommendations = recommendations
         session_state.steering_modified = True
         session_state.current_steering_config = steering_config

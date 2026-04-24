@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
+from src.data.run_artifacts import load_shared_preprocessing_payload_for_run
 
 # Conditional Streamlit import for caching
 try:
@@ -1049,12 +1050,20 @@ class DataService:
 
         test_ids_path = self.active_run_dir / "data" / "test_user_ids.json"
         reviews_path = self.active_run_dir / "data" / "reviews_df.pkl"
-        if test_ids_path.exists() and reviews_path.exists():
+        if test_ids_path.exists():
             try:
                 with open(test_ids_path, "r", encoding="utf-8") as f:
                     test_user_ids = json.load(f)
-                with open(reviews_path, "rb") as f:
-                    reviews_df = pickle.load(f)
+                if reviews_path.exists():
+                    with open(reviews_path, "rb") as f:
+                        reviews_df = pickle.load(f)
+                else:
+                    shared_payload = load_shared_preprocessing_payload_for_run(
+                        self.active_run_dir / "data"
+                    )
+                    if not shared_payload:
+                        raise FileNotFoundError("shared preprocessing payload unavailable")
+                    reviews_df = shared_payload["reviews"]
 
                 counts = (
                     reviews_df[reviews_df["user_id"].isin(test_user_ids)]

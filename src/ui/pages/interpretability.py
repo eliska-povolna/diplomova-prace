@@ -122,7 +122,7 @@ def show():
             else {}
         )
     else:
-        selected_method = getattr(labels_service, "selected_method", "default")
+        selected_method = getattr(labels_service, "selected_method", "weighted-category")
         superfeatures = {}
 
     if not wordcloud_service:

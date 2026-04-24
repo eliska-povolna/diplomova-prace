@@ -140,7 +140,10 @@ def load_reviews(
     Returns
     -------
     pd.DataFrame
-        Columns: ``user_id``, ``business_id``, ``ts`` (epoch ms), ``implicit``.
+        Includes the interaction columns needed for CSR construction together with
+        review metadata used later by interpretability components:
+        ``user_id``, ``business_id``, ``stars``, ``text``, ``useful``, ``date``,
+        ``ts`` (epoch ms), ``implicit``.
     """
     con = connect(db_path)
 
@@ -183,6 +186,10 @@ def load_reviews(
         query = f"""
             SELECT user_id,
                    business_id,
+                   TRY_CAST(stars AS DOUBLE) AS stars,
+                   COALESCE(text, '') AS text,
+                   COALESCE(TRY_CAST(useful AS INTEGER), 0) AS useful,
+                   date,
                    epoch_ms(CAST(date AS TIMESTAMP)) AS ts,
                    1 AS implicit
             FROM {review_table}

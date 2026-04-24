@@ -68,6 +68,67 @@ def _compute_data_hash(
         return ""
 
 
+def _demo_state_key(selected_user: str, suffix: str) -> str:
+    return f"live_demo::{selected_user}::{suffix}"
+
+
+def _set_demo_recommendation_state(
+    selected_user: str,
+    *,
+    base_recommendations: Optional[List[Dict]] = None,
+    steered_recommendations: Optional[List[Dict]] = None,
+    active_steering_config: Optional[Dict] = None,
+    poi_details_map: Optional[Dict] = None,
+) -> None:
+    if base_recommendations is not None:
+        st.session_state[_demo_state_key(selected_user, "base_recommendations")] = (
+            base_recommendations
+        )
+    if steered_recommendations is not None:
+        st.session_state[_demo_state_key(selected_user, "steered_recommendations")] = (
+            steered_recommendations
+        )
+
+    active_config = active_steering_config
+    if active_config is None:
+        active_config = st.session_state.get(
+            _demo_state_key(selected_user, "active_steering_config")
+        )
+
+    st.session_state[_demo_state_key(selected_user, "active_steering_config")] = (
+        active_config
+    )
+
+    displayed = (
+        steered_recommendations
+        if active_config and steered_recommendations is not None
+        else st.session_state.get(_demo_state_key(selected_user, "steered_recommendations"))
+        if active_config
+        else base_recommendations
+        if base_recommendations is not None
+        else st.session_state.get(_demo_state_key(selected_user, "base_recommendations"), [])
+    )
+    st.session_state[_demo_state_key(selected_user, "displayed_recommendations")] = (
+        displayed or []
+    )
+    st.session_state.current_recommendations = displayed or []
+    st.session_state.steering_modified = bool(active_config)
+
+    if poi_details_map is not None:
+        st.session_state[f"poi_details_map_{selected_user}"] = poi_details_map
+
+
+def _clear_demo_steering_state(selected_user: str) -> None:
+    base = st.session_state.get(_demo_state_key(selected_user, "base_recommendations"), [])
+    st.session_state[_demo_state_key(selected_user, "steered_recommendations")] = []
+    st.session_state[_demo_state_key(selected_user, "active_steering_config")] = None
+    st.session_state[_demo_state_key(selected_user, "displayed_recommendations")] = base
+    st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = None
+    st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
+    st.session_state.current_recommendations = base
+    st.session_state.steering_modified = False
+
+
 @st.fragment
 def _render_active_features_section(
     selected_user: str,
@@ -105,7 +166,16 @@ def _render_active_features_section(
         # Display only top num_features (read from session_state, doesn't trigger rerun)
         num_features = st.session_state.get("display_num_features", 9)
         if all_activations:
-            plot_feature_activations(all_activations[:num_features])
+            original_chart = st.session_state.get(
+                _demo_state_key(selected_user, "feature_chart_original")
+            )
+            steered_chart = st.session_state.get(
+                _demo_state_key(selected_user, "feature_chart_steered")
+            )
+            if original_chart and steered_chart:
+                plot_feature_activations(steered_chart[:num_features], original_activations=original_chart[:num_features])
+            else:
+                plot_feature_activations(all_activations[:num_features])
         else:
             st.info("No active features found")
 
@@ -271,10 +341,8 @@ def _render_steering_and_recommendations(
                             st.caption(f"📊 Current: {current_val:.2f}")
 
         st.divider()
-
         if steering_updates:
             try:
-                st.subheader("📊 Features: Original vs After Steering")
                 original_activations = inference.get_user_steering(selected_user)
                 original_features = [
                     {
@@ -286,96 +354,99 @@ def _render_steering_and_recommendations(
                 steered_activations = inference.get_steered_activations(
                     selected_user, steering_updates, k=len(top_features)
                 )
-                if steered_activations:
-                    plot_feature_activations(
-                        steered_activations, original_activations=original_features
-                    )
+                st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = original_features
+                st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = steered_activations
             except Exception as e:
                 logger.debug(f"Could not compute steered activations chart: {e}")
-
+        else:
+            st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = None
+            st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
         # COMPUTE RECOMMENDATIONS - only on steering change or first load
         try:
-            steering_cache_key = f"steering_{selected_user}"
+            steering_cache_key = _demo_state_key(selected_user, "neuron_steering")
             last_steering = st.session_state.get(steering_cache_key, {})
             steering_changed = steering_updates != last_steering
 
-            reco_cache_key = f"recommendations_all_{selected_user}"
+            base_cache_key = _demo_state_key(selected_user, "base_recommendations")
+            current_base = st.session_state.get(base_cache_key)
 
-            if steering_changed or reco_cache_key not in st.session_state:
-                logger.info(
-                    "Computing recommendations (steering changed or first load)"
-                )
+            if steering_changed or current_base is None:
+                logger.info("Computing recommendations (steering changed or first load)")
 
-                if selected_user not in inference.baseline_recommendations:
-                    logger.debug(f"Computing baseline for {selected_user}")
-                    inference.get_baseline_recommendations(selected_user, 50)
-
-                steering_config = None
-                if steering_updates:
-                    st.info(f"🎨 Steering applied: {len(steering_updates)} features")
-                    steering_config = {
-                        "type": "neuron",
-                        "neuron_values": steering_updates,
-                        "alpha": 0.3,
-                    }
-
-                logger.debug(f"Fetching recommendations for {selected_user}")
-
-                # Get valid item IDs from data service (filtered by current state)
                 valid_item_ids = data.get_valid_item_ids()
                 logger.debug(
                     f"State filtering: {len(valid_item_ids)} valid items available"
                 )
 
-                # Request top_k recommendations with state filter applied
-                # Inference service handles filtering internally
-                recommendations_with_delta = inference.get_recommendations_with_delta(
+                baseline_recommendations = inference.get_recommendations_with_delta(
                     selected_user,
-                    steering_config=steering_config,
+                    steering_config=None,
                     top_k=20,
                     valid_item_ids=valid_item_ids,
                 )
-                logger.debug(
-                    f"Inference returned {len(recommendations_with_delta)} recommendations"
-                )
 
-                # OPTIMIZATION: Batch lookup for POI details (single query instead of N queries)
-                # Extract all POI indices first
+                steering_config = None
+                recommendations_with_delta = baseline_recommendations
+                if steering_updates:
+                    st.info(f"Steering applied: {len(steering_updates)} features")
+                    steering_config = {
+                        "type": "neuron",
+                        "neuron_values": steering_updates,
+                        "alpha": 0.3,
+                    }
+                    recommendations_with_delta = inference.get_recommendations_with_delta(
+                        selected_user,
+                        steering_config=steering_config,
+                        top_k=20,
+                        valid_item_ids=valid_item_ids,
+                    )
+
                 poi_indices = [
                     r.get("item_id") or r.get("poi_idx")
                     for r in recommendations_with_delta
                 ]
-                # Batch lookup (returns dict of {poi_idx: details})
                 poi_details_map = data.get_poi_details_batch(poi_indices)
 
-                # Cache the POI details map to avoid re-fetching in card renderer
-                st.session_state[f"poi_details_map_{selected_user}"] = poi_details_map
-
-                # Filter recommendations to only valid POIs (those with resolved details)
                 valid_recommendations = []
                 for reco in recommendations_with_delta:
                     poi_idx = reco.get("item_id") or reco.get("poi_idx")
                     if poi_idx in poi_details_map:
                         valid_recommendations.append(reco)
 
-                # Cache ALL valid recommendations
-                st.session_state[reco_cache_key] = valid_recommendations
-                st.session_state[steering_cache_key] = steering_updates
+                valid_baseline = []
+                for reco in baseline_recommendations:
+                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
+                    if poi_idx in poi_details_map:
+                        valid_baseline.append(reco)
 
-                filtered_count = len(recommendations_with_delta) - len(
-                    valid_recommendations
+                st.session_state[steering_cache_key] = steering_updates
+                _set_demo_recommendation_state(
+                    selected_user,
+                    base_recommendations=valid_baseline,
+                    steered_recommendations=valid_recommendations if steering_config else [],
+                    active_steering_config=steering_config,
+                    poi_details_map=poi_details_map,
                 )
+
+                filtered_count = len(recommendations_with_delta) - len(valid_recommendations)
                 logger.info(
-                    f"Filtered recommendations: {len(recommendations_with_delta)} total → "
-                    f"{filtered_count} invalid → {len(valid_recommendations)} valid (cached)"
+                    f"Filtered recommendations: {len(recommendations_with_delta)} total -> "
+                    f"{filtered_count} invalid -> {len(valid_recommendations)} valid"
                 )
             else:
                 logger.debug("Using cached recommendations (steering unchanged)")
-
-            # Update session state with cached recommendations
-            reco_cache = st.session_state.get(reco_cache_key, [])
-            st.session_state.current_recommendations = reco_cache
-            st.session_state.steering_modified = len(steering_updates) > 0
+                _set_demo_recommendation_state(
+                    selected_user,
+                    active_steering_config=(
+                        {
+                            "type": "neuron",
+                            "neuron_values": steering_updates,
+                            "alpha": 0.3,
+                        }
+                        if steering_updates
+                        else None
+                    ),
+                )
 
         except Exception as e:
             st.error(f"Failed to generate recommendations: {e}")
@@ -542,7 +613,7 @@ def _render_map_section(
     """
     # Read from session_state so sidebar changes don't trigger map rerun
     show_history = st.session_state.get("show_history_checkbox", False)
-    if st.session_state.get("current_recommendations"):
+    if filtered_recommendations:
         info_section(
             "📍 Recommended Locations",
             "Interactive map showing recommended POI locations (colored markers). "
@@ -638,14 +709,11 @@ def _render_map_section(
                         "Map object returned None - recommendations may lack coordinates"
                     )
                 else:
-                    # Stable key for st_folium - changes only when recommendations count changes
-                    # (not on every rerun, which would rebuild map)
-                    poi_count = len(recommendations)
                     st_folium(
                         map_obj,
                         width=None,
                         height=500,
-                        key=f"folium_{selected_user}_{poi_count}",
+                        key=f"folium_{selected_user}_{data_hash[:12]}",
                     )
             except Exception as e:
                 logger.exception("Map rendering failed")
@@ -797,10 +865,9 @@ def show():
         st.divider()
 
         # Actions
-        if st.button("🔄 Reset Steering", use_container_width=True):
-            st.session_state.steering_modified = False
-            st.session_state.current_recommendations = []
-            st.session_state.baseline_recommendations = None
+        if st.button("Reset Steering", use_container_width=True):
+            if selected_user:
+                _clear_demo_steering_state(selected_user)
             st.rerun()
 
     # =====================================================================
@@ -810,7 +877,6 @@ def show():
         # Get/create user encoding
         user_already_encoded = (
             st.session_state.get("current_user_id") == selected_user
-            and st.session_state.get("current_recommendations")
             and selected_user in inference.user_latents
         )
 
@@ -935,25 +1001,11 @@ def show():
             data=data,
             activations=activations,
         )
-
-        # Now slice cached recommendations for display
-        all_recommendations = st.session_state.get(
-            "recommendations_all_{0}".format(selected_user), []
+        displayed_recommendations = st.session_state.get(
+            _demo_state_key(selected_user, "displayed_recommendations"),
+            [],
         )
-        filtered_recommendations = all_recommendations[:num_recommendations]
-
-        # Only update session_state if recommendations actually changed
-        # This prevents unnecessary fragment reruns when only display params changed
-        old_filtered = st.session_state.get("filtered_recommendations_to_display", [])
-        if len(old_filtered) != len(filtered_recommendations) or (
-            filtered_recommendations
-            and old_filtered
-            and old_filtered[0].get("item_id")
-            != filtered_recommendations[0].get("item_id")
-        ):
-            st.session_state[
-                "filtered_recommendations_to_display"
-            ] = filtered_recommendations
+        filtered_recommendations = displayed_recommendations[:num_recommendations]
 
         # Section 3: Map Visualization (ALWAYS renders instantly with recommendations)
         # ===================================================================
@@ -961,9 +1013,7 @@ def show():
             selected_user=selected_user,
             data=data,
             inference=inference,
-            filtered_recommendations=st.session_state.get(
-                "filtered_recommendations_to_display", []
-            ),
+            filtered_recommendations=filtered_recommendations,
             show_past_visits=show_history,
         )
 
@@ -976,9 +1026,7 @@ def show():
             card_width_px=card_width_px,
             show_scores=show_scores,
             photo_height_px=photo_height_px,
-            filtered_recommendations=st.session_state.get(
-                "filtered_recommendations_to_display", []
-            ),
+            filtered_recommendations=filtered_recommendations,
             poi_details_map=st.session_state.get(
                 f"poi_details_map_{selected_user}", {}
             ),
@@ -1637,3 +1685,8 @@ def get_feature_color(index: int) -> str:
         "darkpurple",
     ]
     return colors[index % len(colors)]
+
+
+
+
+

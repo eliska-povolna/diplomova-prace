@@ -935,37 +935,6 @@ def load_labeling_service(
     )
     return service
 
-    # Legacy unreachable block retained below during transition; UI uses saved artifacts only.
-    interpreter = None
-    from src.ui.services.secrets_helper import get_gemini_api_key
-    import os
-
-    has_gemini = bool(get_gemini_api_key())
-
-    if has_gemini:
-        # Legacy path; no longer used.
-        try:
-            # Legacy interpreter path removed; UI now reads saved artifacts only.
-
-            try:
-                interpreter = None
-                logger.info("✅ LLM interpreter available (Gemini API)")
-            except ValueError as e:
-                logger.debug(f"LLM interpreter not available: {e}")
-                interpreter = None
-        except ImportError as e:
-            logger.debug(f"Legacy interpreter path unavailable: {e}")
-            interpreter = None
-    else:
-        logger.debug("No GOOGLE_API_KEY configured. Using basic pre-computed labels.")
-
-    service = LabelingService(
-        labels_json_path=labels_path,
-        config=config,
-        data_service=data_service,
-    )
-    return service
-
 
 @st_cache_resource
 def load_wordcloud_service(

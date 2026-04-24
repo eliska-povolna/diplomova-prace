@@ -39,6 +39,7 @@ import numpy as np
 import torch
 import yaml
 
+from src.data.run_artifacts import load_shared_preprocessing_payload_for_run
 from src.interpret.neuron_labeling import (
     TagBasedLabeler,
     LLMBasedLabeler,
@@ -54,6 +55,16 @@ from src.ui.services.secrets_helper import get_cloud_storage_bucket
 logger = logging.getLogger(__name__)
 
 
+def _load_shared_payload_from_data_dir(data_dir: Path) -> dict | None:
+    payload = load_shared_preprocessing_payload_for_run(data_dir)
+    if payload:
+        logger.info(
+            "Resolved shared preprocessing cache for run data: %s",
+            data_dir,
+        )
+    return payload
+
+
 def _load_business_metadata_fallback(data_dir: Path) -> dict:
     """Rebuild business metadata when the saved pickle is missing.
 
@@ -64,7 +75,9 @@ def _load_business_metadata_fallback(data_dir: Path) -> dict:
     item_map_path = data_dir / "item_map_after_kcore.pkl"
     reviews_path = data_dir / "reviews_df.pkl"
 
-    if not item_map_path.exists() and not reviews_path.exists():
+    shared_payload = _load_shared_payload_from_data_dir(data_dir)
+
+    if not item_map_path.exists() and not reviews_path.exists() and not shared_payload:
         raise FileNotFoundError(
             f"Could not rebuild business metadata: missing {item_map_path.name} and {reviews_path.name}"
         )
@@ -78,12 +91,20 @@ def _load_business_metadata_fallback(data_dir: Path) -> dict:
             f"Rebuilding business metadata from {item_map_path.name} ({len(item_ids)} items)"
         )
     else:
-        with open(reviews_path, "rb") as f:
-            reviews_df = pickle.load(f)
-        item_ids = sorted(set(reviews_df["business_id"].dropna().astype(str)))
-        logger.info(
-            f"Rebuilding business metadata from {reviews_path.name} ({len(item_ids)} businesses)"
-        )
+        if reviews_path.exists():
+            with open(reviews_path, "rb") as f:
+                reviews_df = pickle.load(f)
+            item_ids = sorted(set(reviews_df["business_id"].dropna().astype(str)))
+            logger.info(
+                f"Rebuilding business metadata from {reviews_path.name} ({len(item_ids)} businesses)"
+            )
+        elif shared_payload:
+            item_map = shared_payload["item_map_after_kcore"]
+            item_ids = list(item_map.keys())
+            logger.info(
+                "Rebuilding business metadata from shared preprocessing cache (%d items)",
+                len(item_ids),
+            )
 
     config_path = Path("configs/default.yaml")
     if not config_path.exists():
@@ -795,14 +816,18 @@ def load_review_lookup(
             return default
 
     reviews_path = data_dir / "reviews_df.pkl"
-    if not reviews_path.exists():
-        logger.warning(
-            "Reviews artifact not found for review-based labeling: %s", reviews_path
-        )
-        return {}
-
-    with open(reviews_path, "rb") as f:
-        reviews_df = pickle.load(f)
+    if reviews_path.exists():
+        with open(reviews_path, "rb") as f:
+            reviews_df = pickle.load(f)
+    else:
+        shared_payload = _load_shared_payload_from_data_dir(data_dir)
+        if not shared_payload:
+            logger.warning(
+                "Reviews artifact not found for review-based labeling: %s", reviews_path
+            )
+            return {}
+        reviews_df = shared_payload["reviews"]
+        logger.info("Loaded review snippets from shared preprocessing cache")
 
     if reviews_df is None or len(reviews_df) == 0:
         return {}
@@ -1143,15 +1168,20 @@ def label_neurons(
         logger.info(f"  Loaded item2index from {item2index_path.name}")
     else:
         fallback_item_map = data_path / "item_map_after_kcore.pkl"
-        if not fallback_item_map.exists():
-            raise FileNotFoundError(
-                f"Neither {item2index_path.name} nor {fallback_item_map.name} was found in {data_path}"
+        if fallback_item_map.exists():
+            with open(fallback_item_map, "rb") as f:
+                item2index = pickle.load(f)
+            logger.info(
+                f"  Loaded item2index from fallback mapping {fallback_item_map.name}"
             )
-        with open(fallback_item_map, "rb") as f:
-            item2index = pickle.load(f)
-        logger.info(
-            f"  Loaded item2index from fallback mapping {fallback_item_map.name}"
-        )
+        else:
+            shared_payload = _load_shared_payload_from_data_dir(data_path)
+            if not shared_payload:
+                raise FileNotFoundError(
+                    f"Neither {item2index_path.name} nor {fallback_item_map.name} was found in {data_path}"
+                )
+            item2index = shared_payload["item_map_after_kcore"]
+            logger.info("  Loaded item2index from shared preprocessing cache")
 
     if business_metadata_path is not None and business_metadata_path.exists():
         with open(business_metadata_path, "rb") as f:
@@ -1362,6 +1392,15 @@ def label_neurons(
         method_descriptions=method_descriptions,
         method_aliases={"tag-based": "weighted-category"},
         extras={
+            "artifact_schema": {
+                "version": "interpretability-v2",
+                "review_artifact_required_columns": [
+                    "business_id",
+                    "text",
+                    "useful",
+                    "stars",
+                ],
+            },
             "superfeatures": {str(k): v for k, v in superfeatures.items()},
             "concept_mapping": {
                 "concepts": concept_mapping_payload.get("concepts", []),

@@ -42,6 +42,7 @@ from src.data.shared_preprocessing_cache import (
     prepare_shared_preprocessing_cache,
     shared_preprocessing_manifest_path,
 )
+from src.data.run_artifacts import build_shared_data_manifest, shared_data_manifest_path
 from src.models.collaborative_filtering import ELSA, NMSELoss
 from src.models.sparse_autoencoder import TopKSAE
 from src.run_registry import RunRegistry, create_run_id, write_latest_run_pointer
@@ -58,10 +59,13 @@ from src.utils.evaluation import (
     build_holdout_split_sparse,
     compare_model_performance,
     compute_coverage,
+    compute_holdout_diagnostics,
+    compute_score_diagnostics,
     compute_entropy,
     evaluate_recommendations_batched,
     benchmark_inference,
     print_evaluation_report,
+    save_holdout_split_artifacts,
 )
 
 logger = logging.getLogger(__name__)
@@ -535,12 +539,15 @@ def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
 
         # Small pipeline metadata useful for cloud diagnostics
         for metadata_file in [
-            output_dir / "business_metadata.pkl",
-            output_dir / "item_map_after_kcore.pkl",
-            output_dir / "reviews_df.pkl",
+            output_dir / "data" / "shared_data_manifest.json",
             output_dir / "data" / "train_user_ids.json",
             output_dir / "data" / "test_user_ids.json",
+            output_dir / "data" / "val_user_ids.json",
             output_dir / "data" / "test_users_top50.json",
+            output_dir / "data" / "evaluation_protocol.json",
+            output_dir / "data" / "test_holdout_input.npz",
+            output_dir / "data" / "test_holdout_target.npz",
+            output_dir / "data" / "test_holdout_metadata.json",
         ]:
             _upload_file(
                 metadata_file,
@@ -717,16 +724,24 @@ def persist_test_user_artifacts(
     reviews_df,
     train_user_ids: list[str],
     test_user_ids: list[str],
+    val_user_ids: list[str],
     *,
     top_k: int = 50,
+    evaluation_protocol: Optional[dict] = None,
+    holdout_input_csr=None,
+    holdout_target_csr=None,
+    holdout_split: str = "test",
+    holdout_metadata: Optional[dict] = None,
 ) -> dict[str, Path]:
-    """Persist run-scoped train/test user artifacts for the UI."""
+    """Persist run-scoped split artifacts for the UI and deterministic evaluation."""
     data_dir = output_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
 
     train_ids_path = data_dir / "train_user_ids.json"
     test_ids_path = data_dir / "test_user_ids.json"
+    val_ids_path = data_dir / "val_user_ids.json"
     top_users_path = data_dir / "test_users_top50.json"
+    evaluation_protocol_path = data_dir / "evaluation_protocol.json"
 
     interaction_counts = (
         reviews_df[reviews_df["user_id"].isin(test_user_ids)]
@@ -742,16 +757,46 @@ def persist_test_user_artifacts(
 
     train_ids_path.write_text(json.dumps([str(uid) for uid in train_user_ids], indent=2))
     test_ids_path.write_text(json.dumps([str(uid) for uid in test_user_ids], indent=2))
+    val_ids_path.write_text(json.dumps([str(uid) for uid in val_user_ids], indent=2))
     top_users_path.write_text(json.dumps(top_users, indent=2))
+    evaluation_protocol_path.write_text(
+        json.dumps(evaluation_protocol or {}, indent=2)
+    )
+
+    holdout_artifacts: dict[str, Path] = {}
+    if holdout_input_csr is not None and holdout_target_csr is not None:
+        holdout_artifacts = save_holdout_split_artifacts(
+            data_dir,
+            holdout_input_csr,
+            holdout_target_csr,
+            split=holdout_split,
+            metadata=holdout_metadata or {},
+        )
+        logger.info(
+            "Saved exact %s holdout replay artifacts to %s",
+            holdout_split,
+            data_dir,
+        )
 
     logger.info("Saved train/test user artifacts to %s", data_dir)
     logger.info("Saved %d ranked test users for UI", len(top_users))
 
-    return {
+    artifacts = {
         "train_user_ids": train_ids_path,
         "test_user_ids": test_ids_path,
+        "val_user_ids": val_ids_path,
         "test_users_top50": top_users_path,
+        "evaluation_protocol": evaluation_protocol_path,
     }
+    if holdout_artifacts:
+        artifacts.update(
+            {
+                f"{holdout_split}_holdout_input": holdout_artifacts["input"],
+                f"{holdout_split}_holdout_target": holdout_artifacts["target"],
+                f"{holdout_split}_holdout_metadata": holdout_artifacts["metadata"],
+            }
+        )
+    return artifacts
 
 
 class SparseDataset(Dataset):
@@ -1468,6 +1513,7 @@ def main() -> None:
             test_size=val_ratio,
             random_state=config["data"]["seed"],
         )
+        val_user_ids = [str(train_user_ids[idx]) for idx in val_idx]
 
         n_val = len(val_idx)
         n_train_split = len(train_idx)
@@ -1581,6 +1627,21 @@ def main() -> None:
                 seed=config["data"]["seed"],
             )
 
+            eval_k_values = config.get("evaluation", {}).get("k_values", [10, 20, 50])
+            holdout_diagnostics = compute_holdout_diagnostics(
+                X_eval_input_csr,
+                X_eval_target_csr,
+                min_interactions=min_interactions,
+            )
+
+            logger.info(
+                "Holdout diagnostics: %d split users, %d evaluated users, avg held-out items %.2f, skipped %.2f%%",
+                holdout_diagnostics["n_split_users"],
+                holdout_diagnostics["n_eval_users"],
+                holdout_diagnostics["avg_heldout_items_per_user"],
+                holdout_diagnostics["pct_skipped_users"] * 100.0,
+            )
+
             logger.info(
                 "Evaluating ranking on held-out test items (per-user item holdout, masked input)"
             )
@@ -1591,7 +1652,7 @@ def main() -> None:
                 X_eval_input_csr,
                 X_eval_target_csr,
                 lambda batch: _score_elsa_batch(elsa_model, batch, device),
-                ks=[5, 10, 20],
+                ks=eval_k_values,
                 batch_size=256,
             )
 
@@ -1601,8 +1662,43 @@ def main() -> None:
                 X_eval_input_csr,
                 X_eval_target_csr,
                 lambda batch: _score_sae_batch(elsa_model, sae_model, batch, device),
-                ks=[5, 10, 20],
+                ks=eval_k_values,
                 batch_size=256,
+            )
+
+            if n_eval_users == 0:
+                raise RuntimeError(
+                    "Training-time ranking evaluation produced zero effective users; "
+                    "check holdout settings and test split artifacts."
+                )
+
+            elsa_score_diag = compute_score_diagnostics(
+                lambda batch: _score_elsa_batch(elsa_model, batch, device),
+                X_eval_input_csr,
+                X_eval_target_csr,
+                top_k=max(eval_k_values),
+            )
+            sae_score_diag = compute_score_diagnostics(
+                lambda batch: _score_sae_batch(elsa_model, sae_model, batch, device),
+                X_eval_input_csr,
+                X_eval_target_csr,
+                top_k=max(eval_k_values),
+            )
+            logger.info(
+                "ELSA score diagnostics: finite_fraction=%.4f mean=%.4f std=%.4f range=[%.4f, %.4f]",
+                elsa_score_diag["finite_fraction"],
+                elsa_score_diag["score_mean"],
+                elsa_score_diag["score_std"],
+                elsa_score_diag["score_min"],
+                elsa_score_diag["score_max"],
+            )
+            logger.info(
+                "SAE+ELSA score diagnostics: finite_fraction=%.4f mean=%.4f std=%.4f range=[%.4f, %.4f]",
+                sae_score_diag["finite_fraction"],
+                sae_score_diag["score_mean"],
+                sae_score_diag["score_std"],
+                sae_score_diag["score_min"],
+                sae_score_diag["score_max"],
             )
 
         coverage, entropy, latency_metrics = _compute_auxiliary_metrics(
@@ -1611,7 +1707,7 @@ def main() -> None:
             X_eval_input_csr,
             device=device,
             batch_size=256,
-            top_k=20,
+            top_k=max(eval_k_values),
         )
 
         # Add these to SAE+ELSA ranking metrics
@@ -1658,7 +1754,34 @@ def main() -> None:
             reviews,
             train_user_ids,
             test_user_ids,
+            val_user_ids,
             top_k=50,
+            evaluation_protocol={
+                "split": "per-user holdout",
+                "holdout_ratio": config.get("evaluation", {}).get("holdout_ratio", 0.2),
+                "min_interactions": config.get("evaluation", {}).get(
+                    "min_interactions", 5
+                ),
+                "k_values": eval_k_values,
+                "train_test_split_seed": seed,
+                "train_val_split_seed": seed,
+                "scoring_mode": "masked_input_minus_seen_items",
+            },
+            holdout_input_csr=X_eval_input_csr,
+            holdout_target_csr=X_eval_target_csr,
+            holdout_split="test",
+            holdout_metadata={
+                "artifact_schema": "ranking_holdout_v1",
+                "split": "test",
+                "holdout_ratio": holdout_ratio,
+                "min_interactions": min_interactions,
+                "k_values": eval_k_values,
+                "metric_input": "masked user history",
+                "metric_target": "held-out interactions",
+                "scoring_mode": "masked_input_minus_seen_items",
+                "n_eval_users": int(n_eval_users),
+                "diagnostics": holdout_diagnostics,
+            },
         )
 
         # Save comprehensive summary
@@ -1729,8 +1852,11 @@ def main() -> None:
                 "split": "per-user holdout",
                 "holdout_ratio": holdout_ratio,
                 "min_interactions": min_interactions,
+                "k_values": eval_k_values,
                 "metric_input": "masked user history",
                 "metric_target": "held-out interactions",
+                "scoring_mode": "masked_input_minus_seen_items",
+                "holdout_diagnostics": holdout_diagnostics,
             },
         }
 
@@ -1744,43 +1870,20 @@ def main() -> None:
         data_dir.mkdir(exist_ok=True, parents=True)
 
         try:
-            # Save the processed training CSR used by the model pipeline
-            with open(data_dir / "processed_train.pkl", "wb") as f:
-                pickle.dump(X_train_csr, f)
-            logger.info(
-                f"✅ Saved processed_train to {data_dir / 'processed_train.pkl'}"
+            shared_manifest = build_shared_data_manifest(
+                cache_dir=shared_cache_dir,
+                cache_key=preprocessing_cache_key,
+                manifest_path=shared_preprocessing_manifest_path(shared_cache_dir),
             )
-
-            # Save filtered reviews DataFrame
-            with open(data_dir / "reviews_df.pkl", "wb") as f:
-                pickle.dump(reviews, f)
-            logger.info(
-                f"✅ Saved reviews_df ({len(reviews)} rows) to {data_dir / 'reviews_df.pkl'}"
+            shared_manifest_file = shared_data_manifest_path(data_dir)
+            shared_manifest_file.write_text(
+                json.dumps(shared_manifest, indent=2),
+                encoding="utf-8",
             )
-
-            # Save item mapping (k-core filtered)
-            with open(data_dir / "item_map_after_kcore.pkl", "wb") as f:
-                pickle.dump(item_map_after_kcore, f)
-            logger.info(
-                f"✅ Saved item_map_after_kcore ({len(item_map_after_kcore)} items) to {data_dir / 'item_map_after_kcore.pkl'}"
-            )
-
-            # Save business metadata for neuron labeling and UI interpretation
-            if "business_metadata" not in locals():
-                business_metadata = _build_business_metadata_from_db(
-                    db_path=db_path,
-                    item_map_after_kcore=item_map_after_kcore,
-                    state_filter=config["data"].get("state_filter"),
-                )
-
-            with open(data_dir / "business_metadata.pkl", "wb") as f:
-                pickle.dump(business_metadata, f)
-            logger.info(
-                f"✅ Saved business_metadata to {data_dir / 'business_metadata.pkl'}"
-            )
+            logger.info("Saved shared data manifest to %s", shared_manifest_file)
         except Exception as e:
             logger.error(f"Failed to save data for neuron labeling: {e}")
-            logger.warning("Continuing without saved data (neuron labeling may fail)")
+            logger.warning("Continuing without saved data manifest (labeling fallback may be limited)")
 
         # 🔄 PRECOMPUTE USER CSR MATRICES (post-training step)
         # This enables fast user history lookup in the app without querying DB each time
@@ -1847,4 +1950,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 

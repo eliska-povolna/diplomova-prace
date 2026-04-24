@@ -157,7 +157,7 @@ class LabelingService:
                 logger.warning("Failed to load %s: %s", concept_mapping_path, e)
 
     def _normalize_method_name(self, method_name: str) -> str:
-        if method_name == "tag-based":
+        if method_name in {"tag-based", "default"}:
             return "weighted-category"
         return self.method_aliases.get(method_name, method_name)
 

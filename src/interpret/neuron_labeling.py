@@ -572,10 +572,18 @@ class SuperfeatureGenerator:
     def __init__(
         self,
         similarity_threshold: float = 0.7,
+        max_cluster_size: int = 25,
+        min_mean_similarity: Optional[float] = None,
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
     ):
         self.similarity_threshold = similarity_threshold
+        self.max_cluster_size = max_cluster_size
+        self.min_mean_similarity = (
+            min_mean_similarity
+            if min_mean_similarity is not None
+            else min(0.95, similarity_threshold + 0.08)
+        )
 
         if not HAS_GEMINI:
             raise ImportError("google-generativeai not installed")
@@ -616,12 +624,28 @@ class SuperfeatureGenerator:
         clusters = {}
         cluster_id = 0
 
+        def _mean_cluster_similarity(cluster_positions: list[int]) -> float:
+            if len(cluster_positions) < 2:
+                return 1.0
+            values = []
+            for left in range(len(cluster_positions)):
+                for right in range(left + 1, len(cluster_positions)):
+                    values.append(
+                        float(
+                            similarity_matrix[
+                                cluster_positions[left], cluster_positions[right]
+                            ]
+                        )
+                    )
+            return float(np.mean(values)) if values else 1.0
+
         for i, neuron_a in enumerate(neuron_indices):
             if i in clustered:
                 continue
 
             # Start new cluster
             cluster = [neuron_a]
+            cluster_positions = [i]
             clustered.add(i)
 
             # Find similar neurons
@@ -631,9 +655,29 @@ class SuperfeatureGenerator:
 
                 if similarity_matrix[i, j] >= self.similarity_threshold:
                     cluster.append(neuron_b)
+                    cluster_positions.append(j)
                     clustered.add(j)
 
             if len(cluster) >= 2:  # Only save clusters with 2+ neurons
+                if len(cluster) > self.max_cluster_size:
+                    logger.info(
+                        "Skipping broad superfeature cluster seeded by neuron %s (%s neurons > max %s)",
+                        neuron_a,
+                        len(cluster),
+                        self.max_cluster_size,
+                    )
+                    continue
+
+                mean_similarity = _mean_cluster_similarity(cluster_positions)
+                if mean_similarity < self.min_mean_similarity:
+                    logger.info(
+                        "Skipping low-coherence superfeature cluster seeded by neuron %s (mean similarity %.3f < %.3f)",
+                        neuron_a,
+                        mean_similarity,
+                        self.min_mean_similarity,
+                    )
+                    continue
+
                 clusters[cluster_id] = sorted(cluster)
                 cluster_id += 1
 

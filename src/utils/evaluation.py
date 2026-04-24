@@ -1,12 +1,15 @@
-"""Ranking metrics for recommendation system evaluation.
+"""Ranking metrics and replay helpers for recommendation evaluation.
 
-Computes standard metrics: NDCG, Recall, MRR, Hit Rate, MAP across all test users.
+Computes standard ranking metrics and supports deterministic replay of the
+training-time masked holdout evaluation.
 """
 
 from __future__ import annotations
 
+import json
 import numpy as np
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Tuple
 import logging
 from scipy import sparse
 
@@ -446,6 +449,207 @@ def evaluate_recommendations_batched(
     }
 
     return averaged, evaluated_users
+
+
+def save_holdout_split_artifacts(
+    data_dir: Path | str,
+    X_input_csr,
+    X_target_csr,
+    *,
+    split: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """Persist sparse masked-input / held-out-target artifacts for exact replay."""
+    data_dir = Path(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    input_path = data_dir / f"{split}_holdout_input.npz"
+    target_path = data_dir / f"{split}_holdout_target.npz"
+    metadata_path = data_dir / f"{split}_holdout_metadata.json"
+
+    sparse.save_npz(input_path, X_input_csr)
+    sparse.save_npz(target_path, X_target_csr)
+    metadata_path.write_text(
+        json.dumps(metadata or {}, indent=2),
+        encoding="utf-8",
+    )
+
+    return {
+        "input": input_path,
+        "target": target_path,
+        "metadata": metadata_path,
+    }
+
+
+def load_holdout_split_artifacts(
+    data_dir: Path | str,
+    *,
+    split: str,
+) -> tuple[sparse.csr_matrix, sparse.csr_matrix, dict[str, Any]] | None:
+    """Load persisted sparse holdout artifacts if they exist."""
+    data_dir = Path(data_dir)
+    input_path = data_dir / f"{split}_holdout_input.npz"
+    target_path = data_dir / f"{split}_holdout_target.npz"
+    metadata_path = data_dir / f"{split}_holdout_metadata.json"
+
+    if not input_path.exists() or not target_path.exists():
+        return None
+
+    metadata: dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            metadata = {}
+
+    return (
+        sparse.load_npz(input_path).tocsr(),
+        sparse.load_npz(target_path).tocsr(),
+        metadata,
+    )
+
+
+def compute_holdout_diagnostics(
+    X_input_csr,
+    X_target_csr,
+    *,
+    min_interactions: int,
+) -> dict[str, float]:
+    """Summarize the effective evaluation set for masked holdout ranking."""
+    target_counts = np.asarray(X_target_csr.getnnz(axis=1)).reshape(-1)
+    input_counts = np.asarray(X_input_csr.getnnz(axis=1)).reshape(-1)
+    total_users = int(X_input_csr.shape[0])
+    evaluated_users = int((target_counts > 0).sum())
+    skipped_users = int(total_users - evaluated_users)
+
+    return {
+        "n_split_users": total_users,
+        "n_eval_users": evaluated_users,
+        "n_skipped_users": skipped_users,
+        "pct_skipped_users": float(skipped_users / total_users) if total_users else 0.0,
+        "avg_input_items_per_user": float(input_counts.mean()) if total_users else 0.0,
+        "avg_heldout_items_per_user": float(target_counts[target_counts > 0].mean())
+        if evaluated_users
+        else 0.0,
+        "min_interactions_threshold": int(min_interactions),
+    }
+
+
+def compute_score_diagnostics(
+    score_fn,
+    X_input_csr,
+    X_target_csr,
+    *,
+    top_k: int = 10,
+    sample_users: int = 3,
+) -> dict[str, Any]:
+    """Inspect score health and a few manual examples for debugging."""
+    if X_input_csr.shape[0] == 0:
+        return {
+            "sampled_users": 0,
+            "finite_fraction": 0.0,
+            "score_mean": 0.0,
+            "score_std": 0.0,
+            "score_min": 0.0,
+            "score_max": 0.0,
+            "examples": [],
+        }
+
+    candidate_rows = np.where(np.asarray(X_target_csr.getnnz(axis=1)).reshape(-1) > 0)[0]
+    if len(candidate_rows) == 0:
+        return {
+            "sampled_users": 0,
+            "finite_fraction": 0.0,
+            "score_mean": 0.0,
+            "score_std": 0.0,
+            "score_min": 0.0,
+            "score_max": 0.0,
+            "examples": [],
+        }
+
+    chosen_rows = candidate_rows[:sample_users]
+    batch = X_input_csr[chosen_rows].toarray().astype(np.float32)
+    targets = X_target_csr[chosen_rows].toarray().astype(np.float32)
+    scores = score_fn(batch)
+
+    finite_scores = scores[np.isfinite(scores)]
+    finite_fraction = (
+        float(np.isfinite(scores).sum() / scores.size) if scores.size else 0.0
+    )
+
+    examples = []
+    for local_idx, row_idx in enumerate(chosen_rows):
+        ranked = np.argsort(-scores[local_idx])[:top_k]
+        target_items = np.where(targets[local_idx] > 0)[0]
+        hits = [int(item) for item in ranked if item in set(target_items)]
+        examples.append(
+            {
+                "row_index": int(row_idx),
+                "top_items": [int(item) for item in ranked],
+                "target_items": [int(item) for item in target_items[:top_k]],
+                "hit_count_top_k": len(hits),
+                "hit_items": hits,
+            }
+        )
+
+    return {
+        "sampled_users": int(len(chosen_rows)),
+        "finite_fraction": finite_fraction,
+        "score_mean": float(finite_scores.mean()) if finite_scores.size else 0.0,
+        "score_std": float(finite_scores.std()) if finite_scores.size else 0.0,
+        "score_min": float(finite_scores.min()) if finite_scores.size else 0.0,
+        "score_max": float(finite_scores.max()) if finite_scores.size else 0.0,
+        "examples": examples,
+    }
+
+
+def compare_metric_dicts(
+    stored: dict[str, Any],
+    refreshed: dict[str, Any],
+    *,
+    tolerance: float = 1e-6,
+) -> dict[str, Any]:
+    """Return structured drift information between two nested metric dicts."""
+
+    def _flatten(metrics: dict[str, Any], prefix: str = "") -> dict[str, float]:
+        flattened: dict[str, float] = {}
+        if not isinstance(metrics, dict):
+            return flattened
+        for key, value in metrics.items():
+            full_key = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                flattened.update(_flatten(value, full_key))
+            elif isinstance(value, (int, float, np.floating)):
+                flattened[full_key] = float(value)
+        return flattened
+
+    stored_flat = _flatten(stored)
+    refreshed_flat = _flatten(refreshed)
+
+    deltas = []
+    for key, refreshed_value in refreshed_flat.items():
+        if key not in stored_flat:
+            continue
+        stored_value = stored_flat[key]
+        diff = abs(stored_value - refreshed_value)
+        deltas.append(
+            {
+                "metric": key,
+                "stored": stored_value,
+                "refreshed": refreshed_value,
+                "abs_diff": diff,
+            }
+        )
+
+    deltas.sort(key=lambda row: row["abs_diff"], reverse=True)
+    significant = [row for row in deltas if row["abs_diff"] > tolerance]
+
+    return {
+        "matches": len(significant) == 0,
+        "tolerance": tolerance,
+        "largest_diff": significant[0] if significant else None,
+        "significant_differences": significant[:20],
+    }
 
 
 def print_evaluation_report(metrics: Dict[str, Dict[str, float]]) -> str:
