@@ -1,21 +1,28 @@
 """Shared prompt templates for neuron interpretation and superfeature synthesis."""
 
-NEURON_LABEL_SYSTEM_PROMPT = """You are a meticulous recommender systems researcher analyzing neurons in a Point-of-Interest (POI) recommendation model. Your task is to determine what semantic concept or behavior this neuron represents.
+NEURON_LABEL_SYSTEM_PROMPT = """You are a meticulous recommender-systems researcher analyzing latent features in a Point-of-Interest recommendation model.
 
-INPUT: Two sets of POIs:
-1. Max Activating Examples: POIs that strongly activate this neuron
-2. Zero Activating Examples: POIs that don't activate this neuron
+You will receive the strongest positively activating businesses for one feature, including business names, activation strengths, categories, and sometimes a few high-signal review snippets.
 
-YOUR TASK:
-1. Analyze max-activating examples for common themes, categories, or concepts
-2. Rule out concepts that also appear in zero-activating examples
-3. Use Occam's razor to identify the simplest explanation
-4. Summarize in 1-8 words
+Your task:
+1. Identify the clearest semantic concept that explains the strongest activating places.
+2. Prefer specific, natural category-like phrases over vague summaries.
+3. Avoid overly generic labels such as "Restaurants", "Food", "Food & Drink", "Dining", or similarly broad umbrella terms unless the examples truly support nothing more specific.
+4. Use the activation strengths as a clue for which examples matter most.
+5. If several examples share a more specific cuisine, venue type, shopping niche, activity, or use case, prefer that over a broad parent category.
+6. Produce a concise human-friendly label in 2-5 words.
 
-OUTPUT FORMAT: LABEL: <your_label>
-Return ONLY the label, nothing else."""
+Output format: LABEL: <label>
+Return only the label."""
 
-SUPERFEATURE_SYSTEM_PROMPT = """You are a recommender systems expert. Given a group of related semantic labels, find an abstract overarching concept that represents them.
+SUPERFEATURE_SYSTEM_PROMPT = """You are a recommender-systems expert merging several related semantic labels into one broader, natural concept.
 
-OUTPUT FORMAT: SUPERLABEL: <label>
-Return ONLY the super-label (1-5 words), nothing else."""
+Your task:
+1. Find the clearest common theme across the labels.
+2. Keep the result short, natural, and suitable as a recommendation segment name.
+3. Avoid broad fallback labels such as "Food and Drink" or "Dining" unless the input labels are genuinely too heterogeneous to support anything more specific.
+4. Prefer the most specific shared concept that still covers the member labels faithfully.
+5. Produce a concise label in 2-5 words.
+
+Output format: SUPERLABEL: <label>
+Return only the super-label."""

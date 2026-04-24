@@ -1,9 +1,4 @@
-"""Neuron labeling and interpretation using multiple approaches.
-
-This module provides two complementary methods for interpreting neurons:
-1. Tag-based labeling: Direct analysis of business categories/tags
-2. LLM-based labeling: Using Gemini API for deeper semantic interpretation
-"""
+"""Neuron labeling and interpretation using multiple approaches."""
 
 from __future__ import annotations
 
@@ -19,6 +14,8 @@ import torch
 from scipy.spatial.distance import cosine
 
 logger = logging.getLogger(__name__)
+
+STOP_CATEGORIES = {"Restaurants", "Food"}
 
 # Try to import secrets helper for Streamlit integration
 try:
@@ -91,11 +88,7 @@ class NeuronLabeler(ABC):
 
 
 class TagBasedLabeler(NeuronLabeler):
-    """Label neurons based on business categories and tags.
-
-    Analyzes the top categories/tags in max-activating businesses
-    and uses TF-IDF to find the most discriminative ones.
-    """
+    """Label neurons from activation-weighted business categories."""
 
     def __init__(
         self,
@@ -103,7 +96,7 @@ class TagBasedLabeler(NeuronLabeler):
         max_tags_per_neuron: int = 3,
         item_index_to_business_id: dict = None,
     ):
-        super().__init__("tag-based")
+        super().__init__("weighted-category")
         self.min_tag_frequency = min_tag_frequency
         self.max_tags_per_neuron = max_tags_per_neuron
         self.item_index_to_business_id = item_index_to_business_id or {}
@@ -150,9 +143,8 @@ class TagBasedLabeler(NeuronLabeler):
                 labels[neuron_idx] = "Unknown"
                 continue
 
-            # Extract categories and tags from max-activating items
+            # Extract activation-weighted categories from max-activating items
             category_counts = defaultdict(int)
-            tag_counts = defaultdict(int)
 
             for item_id, activation in max_items[:10]:  # Top 10
                 # Resolve item_id to business metadata
@@ -178,23 +170,12 @@ class TagBasedLabeler(NeuronLabeler):
                 for cat in meta.get("categories", []):
                     category_counts[cat] += activation
 
-                # Count tags
-                for tag in meta.get("tags", []):
-                    tag_counts[tag] += activation
-
-            # Combine and sort
-            all_tags = {**category_counts, **tag_counts}
-            if not all_tags:
+            if not category_counts:
                 labels[neuron_idx] = "Unknown"
                 continue
 
-            # Get top tags
-            top_tags = sorted(all_tags.items(), key=lambda x: x[1], reverse=True)[
-                : self.max_tags_per_neuron
-            ]
-
             # Create label
-            tag_names = [tag for tag, _count in top_tags]
+            tag_names = _rank_categories(category_counts)
             label = " and ".join(tag_names)
             labels[neuron_idx] = label[:100]  # Limit length
 
@@ -211,9 +192,10 @@ class LLMBasedLabeler(NeuronLabeler):
         self,
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
-        temperature: float = 0.3,
+        temperature: float = 0.1,
         max_retries: int = 3,
         rate_limit_delay: float = 1.0,
+        progress_log_every: int = 25,
     ):
         super().__init__("llm-based")
 
@@ -224,6 +206,7 @@ class LLMBasedLabeler(NeuronLabeler):
         self.temperature = temperature
         self.max_retries = max_retries
         self.rate_limit_delay = rate_limit_delay
+        self.progress_log_every = progress_log_every
 
         # Setup API
         if api_key is None:
@@ -250,7 +233,10 @@ class LLMBasedLabeler(NeuronLabeler):
     ) -> str:
         """Format max-activating examples for the prompt."""
         lines = []
-        for i, (bid, activation) in enumerate(max_items[:5], 1):  # Top 5
+        detailed_items = max_items[:5]
+        additional_items = max_items[5:15]
+
+        for i, (bid, activation) in enumerate(detailed_items, 1):
             meta = business_metadata.get(bid, {})
 
             # If no metadata found and bid is an index, try looking it up by position
@@ -267,31 +253,21 @@ class LLMBasedLabeler(NeuronLabeler):
                 line += f"\n   Categories: {categories}"
             lines.append(line)
 
-        return "\n".join(lines)
+        if additional_items:
+            lines.append("\nAdditional high-activation places:")
+            for i, (bid, activation) in enumerate(additional_items, 1):
+                meta = business_metadata.get(bid, {})
+                if not meta and isinstance(bid, int):
+                    business_list = list(business_metadata.values())
+                    if 0 <= bid < len(business_list):
+                        meta = business_list[bid]
 
-    def _format_zero_activating(
-        self,
-        zero_items: list[str],
-        business_metadata: dict,
-    ) -> str:
-        """Format zero-activating examples for the prompt."""
-        lines = []
-        for i, bid in enumerate(zero_items[:5], 1):  # Top 5
-            meta = business_metadata.get(bid, {})
-
-            # If no metadata found and bid is an index, try looking it up by position
-            if not meta and isinstance(bid, int):
-                business_list = list(business_metadata.values())
-                if 0 <= bid < len(business_list):
-                    meta = business_list[bid]
-
-            name = meta.get("name", "Unknown")
-            categories = ", ".join(meta.get("categories", [])[:2])
-
-            line = f"{i}. {name}"
-            if categories:
-                line += f" ({categories})"
-            lines.append(line)
+                name = meta.get("name", "Unknown")
+                categories = ", ".join(meta.get("categories", [])[:3])
+                line = f"{i}. {name} ({activation:.4f})"
+                if categories:
+                    line += f" - {categories}"
+                lines.append(line)
 
         return "\n".join(lines)
 
@@ -299,16 +275,19 @@ class LLMBasedLabeler(NeuronLabeler):
         self,
         neuron_idx: int,
         max_examples_text: str,
-        zero_examples_text: str,
+        review_examples_text: str = "",
     ) -> Optional[str]:
         """Interpret a single neuron using Gemini."""
 
         user_message = f"""
 Max-activating examples:
 {max_examples_text}
+"""
+        if review_examples_text:
+            user_message += f"""
 
-Zero-activating examples:
-{zero_examples_text}
+Representative user reviews:
+{review_examples_text}
 """
 
         for attempt in range(self.max_retries):
@@ -353,7 +332,26 @@ Zero-activating examples:
         """Label neurons using Gemini API."""
         labels = {}
 
-        for neuron_idx, profile in sorted(neuron_profiles.items()):
+        def _rank_categories(category_counts: dict) -> list[str]:
+            ranked = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
+            specific = [
+                (cat, score) for cat, score in ranked if cat not in STOP_CATEGORIES
+            ]
+            chosen = specific if specific else ranked
+            return [tag for tag, _count in chosen[: self.max_tags_per_neuron]]
+        total = len(neuron_profiles)
+        successes = 0
+
+        logger.info(
+            "Starting %s labeling for %s neurons with Gemini model %s",
+            self.name,
+            total,
+            self.model_name,
+        )
+
+        for position, (neuron_idx, profile) in enumerate(
+            sorted(neuron_profiles.items()), 1
+        ):
             # Support multiple data formats:
             # Format 1: {"max_activating": {"indices": [...], "activations": [...]}}
             # Format 2: {"max_activating": {"items": [...]}}
@@ -370,33 +368,127 @@ Zero-activating examples:
                 elif "items" in max_activating:
                     max_items = max_activating.get("items", [])
 
-            # Similar for zero_activating
-            zero_activating = profile.get("zero_activating", {})
-            zero_items = []
+            if not max_items:
+                labels[neuron_idx] = "Unknown"
+                continue
 
-            if isinstance(zero_activating, dict):
-                # Try indices first
-                if "indices" in zero_activating:
-                    zero_items = zero_activating.get("indices", [])
-                # Fall back to items format
-                elif "items" in zero_activating:
-                    zero_items = zero_activating.get("items", [])
+            max_text = self._format_max_activating(max_items, business_metadata)
+            label = self._interpret_single(neuron_idx, max_text)
+
+            if label:
+                labels[neuron_idx] = label
+                successes += 1
+            else:
+                labels[neuron_idx] = "Unknown"
+
+            if (
+                position == 1
+                or position == total
+                or position % self.progress_log_every == 0
+            ):
+                logger.info(
+                    "[%s] Progress %s/%s (%.1f%%) successes=%s failures=%s",
+                    self.name,
+                    position,
+                    total,
+                    100.0 * position / max(total, 1),
+                    successes,
+                    position - successes,
+                )
+
+            # Rate limiting
+            time.sleep(self.rate_limit_delay)
+
+        return labels
+
+
+class ReviewBasedLLMLabeler(LLMBasedLabeler):
+    """Label neurons using metadata plus top useful review snippets."""
+
+    def __init__(
+        self,
+        review_lookup: Optional[dict[str, list[dict]]] = None,
+        max_reviews_per_business: int = 2,
+        max_review_chars: int = 240,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.name = "llm-review-based"
+        self.review_lookup = review_lookup or {}
+        self.max_reviews_per_business = max_reviews_per_business
+        self.max_review_chars = max_review_chars
+
+    def _format_reviews(self, max_items: list[tuple[str, float]], business_metadata: dict) -> str:
+        lines = []
+        for business_id, _activation in max_items[:5]:
+            business_key = str(business_id)
+            reviews = self.review_lookup.get(business_key, [])[: self.max_reviews_per_business]
+            if not reviews:
+                continue
+
+            meta = business_metadata.get(business_key, {})
+            business_name = meta.get("name", business_key)
+            lines.append(f"{business_name}:")
+            for review in reviews:
+                text = str(review.get("text", "")).strip().replace("\n", " ")
+                if not text:
+                    continue
+                useful = review.get("useful", 0)
+                stars = review.get("stars")
+                clipped = text[: self.max_review_chars].strip()
+                suffix = "..." if len(text) > self.max_review_chars else ""
+                if stars is not None:
+                    lines.append(
+                        f'- Useful {useful}, Stars {stars}: "{clipped}{suffix}"'
+                    )
+                else:
+                    lines.append(f'- Useful {useful}: "{clipped}{suffix}"')
+        return "\n".join(lines)
+
+    def label_neurons(
+        self,
+        neuron_profiles: dict,
+        business_metadata: dict,
+    ) -> dict[int, str]:
+        labels = {}
+        total = len(neuron_profiles)
+        successes = 0
+        logger.info("Preparing review-enriched prompts for %s neurons", total)
+
+        for position, (neuron_idx, profile) in enumerate(
+            sorted(neuron_profiles.items()), 1
+        ):
+            max_items = profile.get("max_activating", {}).get("items", [])
 
             if not max_items:
                 labels[neuron_idx] = "Unknown"
                 continue
 
             max_text = self._format_max_activating(max_items, business_metadata)
-            zero_text = self._format_zero_activating(zero_items, business_metadata)
+            review_text = self._format_reviews(max_items, business_metadata)
 
-            label = self._interpret_single(neuron_idx, max_text, zero_text)
-
+            label = self._interpret_single(
+                neuron_idx,
+                max_text,
+                review_examples_text=review_text,
+            )
+            labels[neuron_idx] = label or "Unknown"
             if label:
-                labels[neuron_idx] = label
-            else:
-                labels[neuron_idx] = "Unknown"
-
-            # Rate limiting
+                successes += 1
+            if (
+                position == 1
+                or position == total
+                or position % self.progress_log_every == 0
+            ):
+                logger.info(
+                    "[%s] Progress %s/%s (%.1f%%) successes=%s failures=%s",
+                    self.name,
+                    position,
+                    total,
+                    100.0 * position / max(total, 1),
+                    successes,
+                    position - successes,
+                )
             time.sleep(self.rate_limit_delay)
 
         return labels
@@ -578,7 +670,7 @@ class SuperfeatureGenerator:
             response = model.generate_content(
                 user_message,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
+                    temperature=0.1,
                     max_output_tokens=50,
                 ),
             )
@@ -616,8 +708,10 @@ class SuperfeatureGenerator:
             {superfeature_id: {"neurons": [...], "label": str}}
         """
         superfeatures = {}
+        total = len(clusters)
+        logger.info("Starting Gemini superfeature naming for %s clusters", total)
 
-        for cluster_id, neuron_list in clusters.items():
+        for position, (cluster_id, neuron_list) in enumerate(clusters.items(), 1):
             similar_labels = [labels[nid] for nid in neuron_list]
             superlabel = self.generate_superlabel(similar_labels)
 
@@ -630,6 +724,13 @@ class SuperfeatureGenerator:
                 logger.info(
                     f"Superfeature {cluster_id}: {superlabel} "
                     f"({len(neuron_list)} neurons)"
+                )
+            if position == 1 or position == total or position % 10 == 0:
+                logger.info(
+                    "[superfeatures] Progress %s/%s (%.1f%%)",
+                    position,
+                    total,
+                    100.0 * position / max(total, 1),
                 )
 
         return superfeatures

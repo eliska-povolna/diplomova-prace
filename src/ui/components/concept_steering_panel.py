@@ -1,190 +1,224 @@
-"""Concept Steering UI Panel for Streamlit.
+"""Concept and superfeature steering UI for Streamlit.
 
-Allows users to search for neurons by semantic query and apply concept-based steering.
-Integrates with live_demo.py as a separate steering tab.
-
-Reference: IMPLEMENTATION_PLAN.md Task 8.4
+This panel reads saved interpretability artifacts and applies steering at inference time.
+It does not retrain models or regenerate labels.
 """
 
-import json
+from __future__ import annotations
+
 import logging
-from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Tuple
 
 import streamlit as st
 
 logger = logging.getLogger(__name__)
 
 
+def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
+    if selected_method == "matrix-based":
+        concepts = labels_service.get_concept_mapping().get("concepts", [])
+        return {
+            str(concept["concept_id"]): str(concept.get("display_name") or concept["concept_id"])
+            for concept in concepts
+        }
+
+    if selected_method.startswith("llm"):
+        superfeatures = labels_service.get_superfeatures()
+        search_index = {}
+        if superfeatures:
+            search_index.update({
+                f"superfeature:{sf_id}": str(sf_data.get("super_label", f"Superfeature {sf_id}"))
+                for sf_id, sf_data in superfeatures.items()
+            })
+        hidden_dim = getattr(getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0)
+        search_index.update(
+            {str(idx): labels_service.get_label(idx) for idx in range(hidden_dim)}
+        )
+        return search_index
+
+    hidden_dim = getattr(getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0)
+    return {str(idx): labels_service.get_label(idx) for idx in range(hidden_dim)}
+
+
+def _resolve_result(
+    selected_method: str,
+    entity_id: str,
+    score: float,
+    labels_service,
+) -> Tuple[str, Dict[int, float], str]:
+    if selected_method == "matrix-based":
+        neuron_weights = labels_service.resolve_concept_to_neurons(entity_id)
+        label = next(
+            (
+                concept.get("display_name", entity_id)
+                for concept in labels_service.get_concept_mapping().get("concepts", [])
+                if concept.get("concept_id") == entity_id
+            ),
+            entity_id,
+        )
+        return label, neuron_weights, "concept"
+
+    if selected_method.startswith("llm") and entity_id.startswith("superfeature:"):
+        superfeature_id = entity_id.split(":", 1)[1]
+        superfeature = labels_service.get_superfeature(superfeature_id) or {}
+        return (
+            str(superfeature.get("super_label", f"Superfeature {superfeature_id}")),
+            labels_service.resolve_superfeature_to_neurons(superfeature_id),
+            "superfeature",
+        )
+
+    return (
+        labels_service.get_label(int(entity_id)),
+        {int(entity_id): max(0.1, float(score))},
+        "neuron",
+    )
+
+
 def render_concept_steering_panel(
     inference_service,
     config: dict,
     session_state,
+    selected_user: str | None = None,
 ):
-    """Render Concept Steering panel in Streamlit.
+    """Render concept/superfeature steering and apply it live."""
+    labels_service = session_state.get("labels")
+    data_service = session_state.get("data")
+    selected_user = selected_user or session_state.get("current_user_id")
 
-    Parameters
-    ----------
-    inference_service : InferenceService
-        Service for model inference and neuron activation
-    config : dict
-        Configuration dict with model paths and hyperparameters
-    session_state : st.session_state
-        Streamlit session state for persistence
+    if not labels_service:
+        st.error("Labeling service not initialized.")
+        return
+    if not selected_user:
+        st.info("Select a user first to try concept steering.")
+        return
 
-    Usage in live_demo.py:
-    -------
-    tab1, tab2 = st.tabs(["Neuron Steering", "Concept Steering"])
-    with tab1:
-        render_neuron_steering_panel(inference_service, config, st.session_state)
-    with tab2:
-        render_concept_steering_panel(inference_service, config, st.session_state)
-    """
     try:
         from src.models.concept_steering import ConceptSteering
     except ImportError:
-        st.error("❌ ConceptSteering module not found. Install dependencies.")
+        st.error("Concept steering search dependencies are not installed.")
         return
 
-    st.markdown("## 🔍 Concept Steering: Find Neurons by Semantic Query")
+    st.markdown("## Concept Steering")
+    st.caption(
+        "Use saved interpretability artifacts to steer recommendations semantically. "
+        "Matrix-based labels search saved concept mappings, while LLM-based labels can search "
+        "saved superfeatures or individual neuron labels."
+    )
     st.markdown(
         """
-    Find neurons that are semantically similar to a concept or user preference.
-    
-    **Example queries:**
-    - "Italian restaurants" → Find neurons tuned to Italian cuisine
-    - "quiet coffee shops" → Find neurons for peaceful dining
-    - "upscale fine dining" → Find neurons for expensive venues
-    """
+Search for a concept in plain language, inspect the matching concepts or grouped features,
+and apply steering through the same hidden-space mechanism used for direct neuron steering.
+"""
     )
 
-    # Load neuron labels from the already initialized label service when available.
-    try:
-        labels_service = session_state.get("labels")
-        if labels_service is not None:
-            hidden_dim = getattr(
-                getattr(inference_service, "sae", None), "hidden_dim", 0
-            )
-            neuron_labels = {
-                idx: labels_service.get_label(idx) for idx in range(hidden_dim)
-            }
-        else:
-            output_dir = Path(config.get("model_checkpoint_dir", "outputs"))
-            labels_path = output_dir.parent / "neuron_labels.json"
-
-            if not labels_path.exists():
-                st.warning(
-                    "⚠️ Neuron labels are not available in the current session. "
-                    "Run labeling first or configure GCS-backed labels."
-                )
-                return
-
-            with open(labels_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict) and "neuron_labels" in data:
-                    neuron_labels = {
-                        int(k): v for k, v in data["neuron_labels"].items()
-                    }
-                else:
-                    neuron_labels = {int(k): v for k, v in data.items()}
-
-    except Exception as e:
-        st.error(f"❌ Failed to load neuron labels: {e}")
+    selected_method = labels_service.selected_method
+    search_index = _build_search_index(labels_service, selected_method)
+    if not search_index:
+        st.info("No concepts or labels available for this method yet.")
         return
 
-    # Initialize ConceptSteering
-    if "concept_steering" not in session_state:
-        try:
-            session_state.concept_steering = ConceptSteering(
-                neuron_labels=neuron_labels,
-                model_name="all-MiniLM-L6-v2",  # Fast 384-dim model
-            )
-            st.success(f"✅ Loaded {len(neuron_labels)} neuron labels")
-        except ImportError as e:
-            st.error(
-                f"❌ SentenceTransformer required: pip install sentence-transformers"
-            )
-            return
+    search_cache_key = f"concept_search::{selected_method}"
+    cached = session_state.get(search_cache_key)
+    if not cached or cached.get("labels") != search_index:
+        session_state[search_cache_key] = {
+            "labels": dict(search_index),
+            "engine": ConceptSteering(search_index),
+        }
+    search_engine = session_state[search_cache_key]["engine"]
 
-    concept = session_state.concept_steering
-
-    # UI Controls
     col1, col2 = st.columns([3, 1])
     with col1:
         query = st.text_input(
-            "🎯 Enter concept query:",
-            placeholder="e.g., 'Italian restaurants', 'quiet cafes'",
-            key="concept_query",
+            "Search concepts",
+            placeholder="e.g. japanese food, quiet cafes, nightlife",
+            key=f"concept_query_{selected_method}",
         )
     with col2:
-        top_k = st.slider("Top-K:", min_value=1, max_value=20, value=10, step=1)
+        top_k = st.slider(
+            "Top-K",
+            min_value=1,
+            max_value=15,
+            value=8,
+            key=f"concept_top_k_{selected_method}",
+        )
 
     if not query:
-        st.info("💡 Enter a query to find related neurons")
+        st.info(
+            "Enter a concept to search the saved concept mappings, superfeatures, or neuron labels."
+        )
         return
 
-    # Find related neurons
-    st.markdown("### Related Neurons")
-    results = concept.find_related_neurons(query, top_k=top_k)
-
+    results = search_engine.find_related_neurons(query, top_k=top_k)
     if not results:
-        st.warning("No neurons found for this query")
+        st.warning("No matching concepts found.")
         return
 
-    # Display results as table
-    col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
-    with col1:
-        st.markdown("**#**")
-    with col2:
-        st.markdown("**Neuron Label**")
-    with col3:
-        st.markdown("**Similarity**")
-    with col4:
-        st.markdown("**Select**")
+    chosen_entity = None
+    chosen_weights = {}
+    chosen_type = "concept"
 
-    st.divider()
+    for rank, (entity_id, label, similarity) in enumerate(results, 1):
+        resolved_label, neuron_weights, entity_type = _resolve_result(
+            selected_method, str(entity_id), similarity, labels_service
+        )
+        if not neuron_weights:
+            continue
 
-    selected_neurons = []
-    for idx, (neuron_id, label, similarity) in enumerate(results, 1):
-        col1, col2, col3, col4 = st.columns([1, 3, 2, 1])
+        columns = st.columns([1, 4, 2, 1])
+        with columns[0]:
+            st.write(f"{rank}.")
+        with columns[1]:
+            st.write(f"**{resolved_label}**")
+            st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
+        with columns[2]:
+            st.write(f"{similarity:.3f}")
+        with columns[3]:
+            if st.checkbox("", key=f"concept_pick_{selected_method}_{entity_id}"):
+                chosen_entity = str(entity_id)
+                chosen_weights = neuron_weights
+                chosen_type = entity_type
 
-        with col1:
-            st.write(f"{idx}.")
-        with col2:
-            st.write(f"**Neuron {neuron_id}:** {label}")
-        with col3:
-            # Show similarity as bar
-            bar_width = int(similarity * 20)
-            st.write(f"{'█' * bar_width} {similarity:.3f}")
-        with col4:
-            is_selected = st.checkbox(f"", key=f"neuron_{neuron_id}")
-            if is_selected:
-                selected_neurons.append(neuron_id)
-
-    # Steering strength
-    st.divider()
-    st.markdown("### Steering Control")
-    strength = st.slider(
-        "Steering Strength (0=no effect, 1=full steering):",
+    alpha = st.slider(
+        "Steering strength",
         min_value=0.0,
         max_value=1.0,
-        value=0.5,
-        step=0.1,
-        help="Controls how much the concept affects recommendations",
+        value=0.3,
+        step=0.05,
+        key=f"concept_alpha_{selected_method}",
     )
 
-    if selected_neurons:
-        st.markdown(f"✅ **Selected {len(selected_neurons)} neurons for steering**")
+    if not chosen_weights:
+        st.info("Select one result to apply steering.")
+        return
 
-        if st.button("🚀 Apply Concept Steering"):
-            st.info(
-                f"Steering with {len(selected_neurons)} neurons at strength {strength:.2f}. "
-                "Results will reflect concept-guided recommendations."
+    if st.button("Apply Concept Steering", key=f"apply_concept_{selected_method}"):
+        steering_config = {
+            "type": chosen_type,
+            "alpha": alpha,
+            "neuron_weights": chosen_weights,
+        }
+        if chosen_type == "concept":
+            steering_config["concept_id"] = chosen_entity
+        elif chosen_type == "superfeature":
+            steering_config["superfeature_id"] = chosen_entity.split(":", 1)[1]
+        else:
+            steering_config["neuron_values"] = chosen_weights
+
+        valid_item_ids = data_service.get_valid_item_ids() if data_service else None
+        recommendations = inference_service.get_recommendations_with_delta(
+            selected_user,
+            steering_config=steering_config,
+            top_k=20,
+            valid_item_ids=valid_item_ids,
+        )
+        if data_service:
+            poi_indices = [r.get("item_id") or r.get("poi_idx") for r in recommendations]
+            session_state[f"poi_details_map_{selected_user}"] = data_service.get_poi_details_batch(
+                poi_indices
             )
-
-            # TODO: Integrate with recommendation inference
-            # concept_vector = concept.compute_concept_vector(query, strength=strength)
-            # recommendations = inference_service.steer_with_concept(concept_vector, selected_neurons)
-
-    else:
-        st.info("Select neurons to apply steering")
+        session_state.current_recommendations = recommendations
+        session_state.steering_modified = True
+        session_state.current_steering_config = steering_config
+        st.success(
+            f"Applied {chosen_type} steering using {len(chosen_weights)} saved neuron targets."
+        )

@@ -67,6 +67,21 @@ def _find_latest_model_timestamp(cloud_storage) -> Optional[str]:
     return sorted(timestamps)[-1]
 
 
+def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
+    """Extract a run timestamp from a selected run path/string."""
+    if not selected_output_dir:
+        return None
+
+    try:
+        candidate = Path(str(selected_output_dir))
+        name = candidate.name or Path(str(selected_output_dir).replace("\\", "/")).name
+        if len(name) == 15:
+            return name
+    except Exception:
+        return None
+    return None
+
+
 def _download_gcs_file(cloud_storage, gcs_path: str, local_path: Path) -> bool:
     """Download one GCS object to a local path."""
     try:
@@ -111,6 +126,13 @@ def _build_experiment_results(
     experiment_dir: Path,
 ) -> Optional[Dict]:
     """Normalize an experiment manifest into the structure expected by the UI."""
+    def _ndcg_at_10(summary: Optional[dict]) -> float:
+        ranking_metrics = summary.get("ranking_metrics", {}) if isinstance(summary, dict) else {}
+        try:
+            return float(ranking_metrics.get("ndcg", {}).get("@10", float("-inf")))
+        except (TypeError, ValueError):
+            return float("-inf")
+
     runs = []
 
     for raw_run in manifest.get("runs", []):
@@ -131,16 +153,23 @@ def _build_experiment_results(
                         )
 
         run["summary"] = summary
+        run["ndcg_at_10"] = _ndcg_at_10(summary)
         runs.append(run)
 
     if not runs:
         return None
 
-    selected_summary = runs[0].get("summary") or {}
+    runs = sorted(runs, key=lambda run: run.get("ndcg_at_10", float("-inf")), reverse=True)
+    best_run = runs[0]
+    for idx, run in enumerate(runs):
+        run["is_best_run"] = idx == 0
+
+    selected_summary = best_run.get("summary") or {}
     return {
         "summary": selected_summary,
         "ranking_metrics": selected_summary.get("ranking_metrics"),
         "source": source,
+        "default_run_dir": best_run.get("run_dir"),
         "experiment": {
             "experiment_id": manifest.get("experiment_id"),
             "created": manifest.get("created"),
@@ -148,6 +177,8 @@ def _build_experiment_results(
             "base_config": manifest.get("base_config"),
             "experiment_dir": str(experiment_dir),
             "manifest": manifest,
+            "best_run_dir": best_run.get("run_dir"),
+            "selection_metric": "ndcg@10",
         },
         "runs": runs,
     }
@@ -427,6 +458,7 @@ def load_inference_service(
     filtered or configured on the inference machine.
     """
     # Prefer the run selected in the Results page, then fall back to config.
+    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
     ckpt_base = (
         Path(selected_output_dir)
         if selected_output_dir
@@ -484,9 +516,11 @@ def load_inference_service(
         if not checkpoint_dir:
             cloud_storage = _get_cloud_storage_helper()
             if cloud_storage:
-                latest_timestamp = _find_latest_model_timestamp(cloud_storage)
-                if latest_timestamp:
-                    gcs_checkpoint_prefix = f"models/{latest_timestamp}/checkpoints/"
+                target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
+                    cloud_storage
+                )
+                if target_timestamp:
+                    gcs_checkpoint_prefix = f"models/{target_timestamp}/checkpoints/"
                     temp_checkpoint_dir = Path(
                         tempfile.mkdtemp(prefix="diplomov_pr_ce_ckpts_")
                     )
@@ -824,9 +858,10 @@ def load_labeling_service(
 
     Labels are lazy-loaded on first access (no startup delay).
     If no LLM provider is available (no API keys), uses basic pre-computed labels.
-    NeuronInterpreter is only imported if LLM providers are configured.
+    Labels are loaded from saved artifacts only.
     """
     # Prefer the run selected in the Results page, then fall back to latest run.
+    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
     output_dir = Path(selected_output_dir) if selected_output_dir else None
 
     if output_dir and not output_dir.exists():
@@ -835,7 +870,7 @@ def load_labeling_service(
 
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
 
-    if latest_run_path.exists():
+    if (not output_dir or not output_dir.exists()) and latest_run_path.exists():
         try:
             with open(latest_run_path, "r", encoding="utf-8") as f:
                 output_dir_str = f.read().strip()
@@ -860,10 +895,12 @@ def load_labeling_service(
     if not output_dir or not output_dir.exists():
         cloud_storage = _get_cloud_storage_helper()
         if cloud_storage:
-            latest_timestamp = _find_latest_model_timestamp(cloud_storage)
-            if latest_timestamp:
+            target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
+                cloud_storage
+            )
+            if target_timestamp:
                 temp_root = Path(tempfile.mkdtemp(prefix="diplomov_pr_ce_labels_"))
-                gcs_prefix = f"models/{latest_timestamp}/neuron_interpretations/"
+                gcs_prefix = f"models/{target_timestamp}/neuron_interpretations/"
                 if _download_gcs_prefix(
                     cloud_storage, gcs_prefix, temp_root / "neuron_interpretations"
                 ):
@@ -891,7 +928,14 @@ def load_labeling_service(
         labels_path = Path("outputs") / "neuron_labels.json"
         logger.debug(f"Using fallback labels path: {labels_path}")
 
-    # Check if LLM providers are configured before importing NeuronInterpreter
+    service = LabelingService(
+        labels_json_path=labels_path,
+        config=config,
+        data_service=data_service,
+    )
+    return service
+
+    # Legacy unreachable block retained below during transition; UI uses saved artifacts only.
     interpreter = None
     from src.ui.services.secrets_helper import get_gemini_api_key
     import os
@@ -899,25 +943,24 @@ def load_labeling_service(
     has_gemini = bool(get_gemini_api_key())
 
     if has_gemini:
-        # Only import NeuronInterpreter if we have Gemini API key configured
+        # Legacy path; no longer used.
         try:
-            from src.interpret.neuron_interpreter import NeuronInterpreter
+            # Legacy interpreter path removed; UI now reads saved artifacts only.
 
             try:
-                interpreter = NeuronInterpreter()  # Uses GOOGLE_API_KEY
+                interpreter = None
                 logger.info("✅ LLM interpreter available (Gemini API)")
             except ValueError as e:
                 logger.debug(f"LLM interpreter not available: {e}")
                 interpreter = None
         except ImportError as e:
-            logger.debug(f"NeuronInterpreter not available: {e}")
+            logger.debug(f"Legacy interpreter path unavailable: {e}")
             interpreter = None
     else:
         logger.debug("No GOOGLE_API_KEY configured. Using basic pre-computed labels.")
 
     service = LabelingService(
         labels_json_path=labels_path,
-        interpreter=interpreter,
         config=config,
         data_service=data_service,
     )
@@ -941,6 +984,7 @@ def load_wordcloud_service(
         return None
 
     # Prefer the run selected in the Results page, then fall back to latest run.
+    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
     output_dir = Path(selected_output_dir) if selected_output_dir else None
 
     if output_dir and not output_dir.exists():
@@ -949,7 +993,7 @@ def load_wordcloud_service(
 
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
 
-    if latest_run_path.exists():
+    if (not output_dir or not output_dir.exists()) and latest_run_path.exists():
         try:
             with open(latest_run_path, "r") as f:
                 output_dir_str = f.read().strip()
@@ -974,22 +1018,24 @@ def load_wordcloud_service(
     if not output_dir or not output_dir.exists():
         cloud_storage = _get_cloud_storage_helper()
         if cloud_storage:
-            latest_timestamp = _find_latest_model_timestamp(cloud_storage)
-            if latest_timestamp:
+            target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
+                cloud_storage
+            )
+            if target_timestamp:
                 temp_root = Path(tempfile.mkdtemp(prefix="diplomov_pr_ce_wordclouds_"))
-                labels_prefix = f"models/{latest_timestamp}/neuron_interpretations/"
+                labels_prefix = f"models/{target_timestamp}/neuron_interpretations/"
                 if _download_gcs_prefix(
                     cloud_storage,
                     labels_prefix,
                     temp_root / "neuron_interpretations",
                 ) and _download_gcs_file(
                     cloud_storage,
-                    f"models/{latest_timestamp}/neuron_category_metadata.json",
+                    f"models/{target_timestamp}/neuron_category_metadata.json",
                     temp_root / "neuron_category_metadata.json",
                 ):
                     output_dir = temp_root
                     logger.info(
-                        f"✅ Loaded interpretability artifacts from GCS run: gs://{cloud_storage.bucket_name}/models/{latest_timestamp}/"
+                        f"✅ Loaded interpretability artifacts from GCS run: gs://{cloud_storage.bucket_name}/models/{target_timestamp}/"
                     )
 
     # Look for label and metadata files
@@ -1033,6 +1079,7 @@ def load_coactivation_service(
     Provides co-activation relationships between neurons.
     """
     # Prefer the run selected in the Results page, then fall back to latest run.
+    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
     output_dir = Path(selected_output_dir) if selected_output_dir else None
 
     if output_dir and not output_dir.exists():
@@ -1041,7 +1088,7 @@ def load_coactivation_service(
 
     latest_run_path = Path("outputs") / "LATEST_RUN.txt"
 
-    if latest_run_path.exists():
+    if (not output_dir or not output_dir.exists()) and latest_run_path.exists():
         try:
             with open(latest_run_path, "r") as f:
                 output_dir_str = f.read().strip()
@@ -1066,19 +1113,21 @@ def load_coactivation_service(
     if not output_dir or not output_dir.exists():
         cloud_storage = _get_cloud_storage_helper()
         if cloud_storage:
-            latest_timestamp = _find_latest_model_timestamp(cloud_storage)
-            if latest_timestamp:
+            target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
+                cloud_storage
+            )
+            if target_timestamp:
                 temp_root = Path(
                     tempfile.mkdtemp(prefix="diplomov_pr_ce_coactivation_")
                 )
                 if _download_gcs_file(
                     cloud_storage,
-                    f"models/{latest_timestamp}/neuron_coactivation.json",
+                    f"models/{target_timestamp}/neuron_coactivation.json",
                     temp_root / "neuron_coactivation.json",
                 ):
                     output_dir = temp_root
                     logger.info(
-                        f"✅ Loaded coactivation data from GCS run: gs://{cloud_storage.bucket_name}/models/{latest_timestamp}/"
+                        f"✅ Loaded coactivation data from GCS run: gs://{cloud_storage.bucket_name}/models/{target_timestamp}/"
                     )
 
     # Look for coactivation file
@@ -1117,18 +1166,20 @@ def load_training_results(
 
     results = {"summary": None, "ranking_metrics": None, "source": None}
 
-    if selected_output_dir:
-        selected_run = _load_summary_from_run_dir(Path(selected_output_dir))
-        if selected_run:
-            return selected_run
-
     # Prefer latest experiment sweep if one exists.
     experiment_results = _load_gcs_experiment_results()
     if not experiment_results:
         experiment_results = _load_local_experiment_results(Path("outputs"))
 
     if experiment_results:
+        if selected_output_dir:
+            experiment_results["selected_run_dir"] = selected_output_dir
         return experiment_results
+
+    if selected_output_dir:
+        selected_run = _load_summary_from_run_dir(Path(selected_output_dir))
+        if selected_run:
+            return selected_run
 
     # Try GCS first
     gcs_bucket_name = os.getenv("GCS_BUCKET_NAME")

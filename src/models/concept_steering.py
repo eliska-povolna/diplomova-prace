@@ -31,7 +31,7 @@ except ImportError:
 
 
 class ConceptSteering:
-    """Find neurons semantically similar to user text queries.
+    """Find labeled entities semantically similar to user text queries.
 
     Algorithm:
     1. Encode user query to 384-dimensional embedding
@@ -42,8 +42,9 @@ class ConceptSteering:
 
     Parameters
     ----------
-    neuron_labels : dict[int, str]
-        Mapping from neuron index to label (e.g., {5: "Italian Fine Dining", 42: "Casual Cafes"})
+        neuron_labels : dict[object, str]
+            Mapping from entity id to label. The ids may be neuron indices, concept ids,
+            or superfeature ids.
     model_name : str
         SentenceTransformer model (default: "all-MiniLM-L6-v2" - 384-dim, fast)
     precomputed_embeddings_path : str, optional
@@ -143,8 +144,8 @@ class ConceptSteering:
 
     def find_related_neurons(
         self, query_text: str, top_k: int = 10
-    ) -> list[tuple[int, str, float]]:
-        """Find neurons with labels semantically similar to query text.
+    ) -> list[tuple[object, str, float]]:
+        """Find labeled entities with labels semantically similar to query text.
 
         Parameters
         ----------
@@ -155,9 +156,9 @@ class ConceptSteering:
 
         Returns
         -------
-        list[tuple[int, str, float]]
-            List of (neuron_idx, label, similarity_score) tuples, sorted by similarity (highest first)
-            - neuron_idx: Index of the neuron (int)
+        list[tuple[object, str, float]]
+            List of (entity_id, label, similarity_score) tuples, sorted by similarity (highest first)
+            - entity_id: id of the matched entity
             - label: Pre-computed neuron label (str)
             - similarity_score: Cosine similarity between query and neuron label (0-1 range)
 

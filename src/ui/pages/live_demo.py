@@ -141,6 +141,7 @@ def render_steering_tabs(
             inference_service=inference,
             config=getattr(inference, "config", {}),
             session_state=st.session_state,
+            selected_user=selected_user,
         )
 
 

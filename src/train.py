@@ -46,7 +46,14 @@ from src.models.collaborative_filtering import ELSA, NMSELoss
 from src.models.sparse_autoencoder import TopKSAE
 from src.run_registry import RunRegistry, create_run_id, write_latest_run_pointer
 from src.ui.services.secrets_helper import get_cloud_storage_bucket
-from src.utils import CheckpointManager, Config, load_config, setup_logger
+from src.utils import (
+    CheckpointManager,
+    Config,
+    build_dataloader_generator,
+    load_config,
+    set_global_reproducibility,
+    setup_logger,
+)
 from src.utils.evaluation import (
     build_holdout_split_sparse,
     compare_model_performance,
@@ -948,6 +955,8 @@ def train_elsa(
     X_val,
     n_items: int,
     checkpoint_mgr: CheckpointManager,
+    *,
+    seed: int,
 ) -> tuple[ELSA, float, dict]:
     """Train ELSA model.
 
@@ -986,7 +995,10 @@ def train_elsa(
     criterion = NMSELoss()
 
     train_loader = torch.utils.data.DataLoader(
-        X_train, batch_size=elsa_cfg["batch_size"], shuffle=True
+        X_train,
+        batch_size=elsa_cfg["batch_size"],
+        shuffle=True,
+        generator=build_dataloader_generator(seed),
     )
     val_loader = torch.utils.data.DataLoader(
         X_val, batch_size=elsa_cfg["batch_size"], shuffle=False
@@ -1095,6 +1107,8 @@ def train_sae(
     Z_train: torch.Tensor,
     Z_val: torch.Tensor,
     checkpoint_mgr: CheckpointManager,
+    *,
+    seed: int,
 ) -> tuple[TopKSAE, float, dict]:
     """Train TopK SAE model.
 
@@ -1141,7 +1155,10 @@ def train_sae(
     )
 
     train_loader = torch.utils.data.DataLoader(
-        Z_train, batch_size=sae_cfg["batch_size"], shuffle=True
+        Z_train,
+        batch_size=sae_cfg["batch_size"],
+        shuffle=True,
+        generator=build_dataloader_generator(seed),
     )
     val_loader = torch.utils.data.DataLoader(
         Z_val, batch_size=sae_cfg["batch_size"], shuffle=False
@@ -1329,6 +1346,15 @@ def main() -> None:
     )
     logger.info(f"Output directory: {output_dir}")
 
+    seed = int(config["data"]["seed"])
+    reproducibility = set_global_reproducibility(seed)
+    logger.info(
+        "Reproducibility configured: seed=%d, cudnn_deterministic=%s, deterministic_algorithms=%s",
+        reproducibility["seed"],
+        reproducibility["cudnn_deterministic"],
+        reproducibility["deterministic_algorithms_enabled"],
+    )
+
     # Save resolved config for downstream comparison / UI selectors
     resolved_config_path = output_dir / "resolved_config.yaml"
     _save_yaml(resolved_config_path, config.to_dict())
@@ -1458,7 +1484,12 @@ def main() -> None:
 
         # Train ELSA
         elsa_model, elsa_best_loss, elsa_stats = train_elsa(
-            config, X_train_split, X_val_split, X_train_csr.shape[1], checkpoint_mgr
+            config,
+            X_train_split,
+            X_val_split,
+            X_train_csr.shape[1],
+            checkpoint_mgr,
+            seed=seed,
         )
 
         # Encode all users with ELSA (frozen) using chunked encoding for large matrices
@@ -1482,7 +1513,12 @@ def main() -> None:
 
         # Train SAE
         sae_model, sae_best_loss, sae_stats = train_sae(
-            config, elsa_model, Z_train, Z_val, checkpoint_mgr
+            config,
+            elsa_model,
+            Z_train,
+            Z_val,
+            checkpoint_mgr,
+            seed=seed,
         )
 
         # Final evaluation on test set
@@ -1679,6 +1715,12 @@ def main() -> None:
                 "source": preprocessing_source,
                 "manifest_path": str(shared_preprocessing_manifest_path(shared_cache_dir)),
                 "manifest": preprocessing_manifest,
+            },
+            "reproducibility": {
+                **reproducibility,
+                "device": device,
+                "train_test_split_seed": seed,
+                "holdout_split_seed": seed,
             },
             "artifacts": {
                 key: str(path) for key, path in test_user_artifacts.items()

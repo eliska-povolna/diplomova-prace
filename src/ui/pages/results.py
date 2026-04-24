@@ -17,10 +17,13 @@ def _run_label(run: dict) -> str:
     summary = run.get("summary") or {}
     ranking_metrics = summary.get("ranking_metrics", {})
     recall = ranking_metrics.get("recall", {}).get("@20")
+    ndcg10 = ranking_metrics.get("ndcg", {}).get("@10")
     ndcg = ranking_metrics.get("ndcg", {}).get("@20")
     size_mb = summary.get("model_sizes", {}).get("total_mb")
 
-    parts = [run_name]
+    parts = [f"{run_name}{' [best]' if run.get('is_best_run') else ''}"]
+    if ndcg10 is not None:
+        parts.append(f"NDCG@10={ndcg10:.3f}")
     if recall is not None:
         parts.append(f"R@20={recall:.3f}")
     if ndcg is not None:
@@ -106,11 +109,39 @@ def show():
             experiment = training_results.get("experiment", {})
             source = training_results.get("source") or "cached results"
             st.info(f"Showing experiment results from: `{source}`")
+            st.caption(
+                "Runs are sorted by NDCG@10, and the default selection is the best run from the latest experiment."
+            )
+
+            current_run_dir = (
+                st.session_state.get("selected_result_run_dir")
+                or training_results.get("selected_run_dir")
+                or training_results.get("default_run_dir")
+            )
+            selected_index_default = 0
+            if current_run_dir:
+                selected_index_default = next(
+                    (
+                        idx
+                        for idx, run in enumerate(runs)
+                        if run.get("run_dir") == current_run_dir
+                    ),
+                    0,
+                )
+
+            current_widget_index = st.session_state.get("results_run_selector")
+            if (
+                current_widget_index is None
+                or current_widget_index >= len(runs)
+                or runs[current_widget_index].get("run_dir") != current_run_dir
+            ):
+                st.session_state.results_run_selector = selected_index_default
 
             selected_index = st.selectbox(
                 "Model / run",
                 options=list(range(len(runs))),
                 format_func=lambda idx: _run_label(runs[idx]),
+                index=st.session_state.results_run_selector,
                 key="results_run_selector",
             )
             selected_run = runs[selected_index]

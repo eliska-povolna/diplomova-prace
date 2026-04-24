@@ -7,7 +7,6 @@ from .activations import (
     get_max_activating_items,
     get_zero_activating_items,
 )
-from .neuron_interpreter import NeuronInterpreter
 from .neuron_labeling import (
     LLMBasedLabeler,
     NeuronEmbedder,
@@ -29,6 +28,4 @@ __all__ = [
     "LLMBasedLabeler",
     "NeuronEmbedder",
     "SuperfeatureGenerator",
-    # Interpretation
-    "NeuronInterpreter",
 ]

@@ -9,8 +9,8 @@ This module provides tools for interpreting and labeling neurons in sparse autoe
 | File | Purpose |
 |------|---------|
 | **`activations.py`** | Low-level activation extraction and analysis utilities |
-| **`neuron_interpreter.py`** | High-level LLM-based neuron interpretation (uses Google Gemini) |
-| **`neuron_labeling.py`** | Tag-based neuron labeling from business categories |
+| **`neuron_labeling.py`** | Weighted-category baseline labels, Gemini labels, embeddings, and superfeatures |
+| **`matrix_based_labeling.py`** | TF-IDF concept-neuron mapping and grounded statistical labels |
 
 ## Current Workflow
 
@@ -88,20 +88,6 @@ profile = build_neuron_profile(
 )
 ```
 
-## Alternative: High-Level LLM-Based Interpretation
-
-For semantic interpretation using LLMs:
-
-```python
-from src.interpret.neuron_interpreter import NeuronInterpreter
-
-# Initialize with Google Gemini (requires GOOGLE_API_KEY)
-interpreter = NeuronInterpreter()
-
-# Interpret a neuron
-label = interpreter.label_neuron(neuron_profiles[neuron_id])
-```
-
 ## What Each Module Does
 
 ### `activations.py` - Low-level Utilities
@@ -112,12 +98,13 @@ label = interpreter.label_neuron(neuron_profiles[neuron_id])
 
 **When to use:** For batch processing, custom analysis pipelines, or when you need fine-grained control.
 
-### `neuron_interpreter.py` - LLM-Based Interpretation
-✓ Generate semantic descriptions using LLMs  
-✓ Uses Google Gemini for semantic interpretation  
-✓ Extract tags and reasons from LLM responses  
+### `neuron_labeling.py` - Label Generation and Superfeatures
+✓ Weighted-category baseline labels  
+✓ Gemini-based neuron naming  
+✓ Review-enriched Gemini labels  
+✓ Embeddings and superfeature clustering  
 
-**When to use:** For generating human-readable interpretations of neuron behavior.
+**When to use:** For the saved labeling pipeline used by `python -m src.label`.
 
 ### `neuron_labeling.py` - Tag-Based Labeling
 ✓ Extract categories from max-activating items  
@@ -147,7 +134,7 @@ collect_business_metadata()
     ↓
 Business details (categories, names, etc.)
     ↓
-build_neuron_profile() + neuron_interpreter.label_neuron()
+build_neuron_profile() + the saved labeling pipeline from `python -m src.label`
     ↓
 Labeled neuron profiles (with tags and interpretations)
 ```

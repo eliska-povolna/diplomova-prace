@@ -108,7 +108,7 @@ Raw Yelp JSON Files
     ↓
 [Train] → ELSA (dense latents) + TopK SAE (sparse features)
     ↓
-[Label] → Neuron interpretations (tag-based, LLM-based)
+[Label] → Neuron interpretations (weighted-category, TF-IDF, LLM)
     ↓
 [Evaluate] → Ranking metrics, model comparison
     ↓
@@ -349,14 +349,16 @@ python -m src.label
 
 **What it does:**
 - Loads the latest complete training run automatically unless you pass `--training-dir`
-- Supports label generation with tag-based, matrix-based, and/or LLM-based methods
+- If the latest run came from an experiment sweep, the UI and labeling defaults follow the best run from that latest experiment by **NDCG@10**
+- Supports label generation with a weighted-category baseline, matrix-based TF-IDF, metadata-only LLM, and review-based LLM methods
 - Supports `--method non-llm`, `--skip-coactivation`, and `--coactivation-only`
 - Generates neuron labels, neuron embeddings, co-activation data, and interpretability metadata
 
 **Labeling methods:**
-- **Tag-based**: looks at the businesses that activate a neuron most strongly, then turns their category tags into a short, human-readable summary. This is the fastest and most deterministic option.
-- **Matrix-based**: builds a tag-neuron association matrix from the activation data and ranks the tags that best characterize each neuron. This is useful when you want a more systematic, data-driven label than simple tag aggregation.
+- **Weighted-category baseline**: looks at the businesses that activate a neuron most strongly and aggregates their categories weighted by activation strength. Very generic parent categories such as `Restaurants` and `Food` are deprioritized unless they are the only available categories. For backwards compatibility, older artifacts may still call this `tag-based`.
+- **Matrix-based**: builds a category-neuron association matrix from the real sparse activations and applies TF-IDF to find the categories that best characterize each neuron while staying grounded in that neuron's top-activating businesses. This is the statistical baseline.
 - **LLM-based**: sends the strongest examples and their categories to Google Gemini, which returns a semantic label in plain language. This usually produces the most natural descriptions, but it depends on the API key and is slower than the other methods. The prompt templates live in [src/interpret/prompts.py](src/interpret/prompts.py#L3) for neuron labels and [src/interpret/prompts.py](src/interpret/prompts.py#L17) for superfeature labels.
+- **Review-based LLM**: extends the LLM prompt with top useful review snippets from the highest-activating businesses, so the label can capture atmosphere and user-experience details that categories alone miss.
 
 **Optional LLM API:**
 - `GOOGLE_API_KEY` in `.env` or `.streamlit/secrets.toml` (for Gemini-based neuron labeling)
@@ -364,9 +366,13 @@ python -m src.label
 **Output:**
 - Locally, the artifacts are written under `outputs/YYYYMMDD_HHMMSS/neuron_interpretations/`.
 - In cloud runs, they are uploaded to GCS automatically so Streamlit Cloud can load them.
-- `neuron_labels.json` — Selected labels and per-method labels
-- `labels_tag-based.pkl` — Dictionary of neuron → tags
+- `neuron_labels.json` — Selected labels, per-method labels, aliases, and comparison payload
+- `labels_weighted-category.pkl` — Dictionary of neuron → activation-weighted category label
+- `labels_tag-based.pkl` — Legacy compatibility alias for the weighted-category baseline
+- `labels_matrix-based.pkl` — Dictionary of neuron → TF-IDF label
 - `labels_llm-based.pkl` — Dictionary of neuron → LLM description
+- `labels_llm-review-based.pkl` — Dictionary of neuron → review-enriched LLM description
+- `concept_mapping.pkl` — Saved matrix-based concept → neuron mapping for concept steering
 - `neuron_embeddings.pt` — Embedding vectors for each neuron
 - `neuron_category_metadata.json` — Per-neuron category metadata for the UI
 - `neuron_coactivation.json` — Co-activation correlations and labels
@@ -670,15 +676,20 @@ Deployed version: [https://explainable-steerable-poi-recommendations.streamlit.a
 **🎛️ Live Demo** (main page)
 - Select a user or create synthetic profile
 - Steering sliders for each neuron
+- Concept steering from saved matrix-based concept mappings
+- Superfeature steering from saved LLM-grouped feature families
 - Top-K recommendations list
 - POI details (name, category, rating, reviews)
 - Photo gallery (if Yelp photos available)
 
 **🔍 Interpretability**
 - Neuron browser (sorted by activation frequency)
-- Neuron labels (tag-based and LLM-based)
+- Neuron labels (weighted-category baseline, TF-IDF, and LLM-based)
+- Superfeature browser for LLM-based labeling runs
 - Co-activation heatmap
 - Feature visualization
+
+The UI reads saved artifacts from the selected run and does not retrain models or regenerate labels at runtime.
 
 ---
 

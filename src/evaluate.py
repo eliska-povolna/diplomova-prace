@@ -29,7 +29,7 @@ from src.models.collaborative_filtering import ELSA
 from src.models.sae_cf_model import ELSASAEModel
 from src.models.sparse_autoencoder import TopKSAE
 from src.run_registry import RunRegistry
-from src.utils import CheckpointManager, setup_logger
+from src.utils import CheckpointManager, set_global_reproducibility, setup_logger
 from src.utils.evaluation import (
     benchmark_inference,
     build_holdout_split_sparse,
@@ -196,9 +196,18 @@ def main() -> None:
 
     config = summary["config"]
 
+    seed = int(config["data"]["seed"])
+    reproducibility = set_global_reproducibility(seed)
+
     # Set up logging
     setup_logger(__name__, log_dir=output_dir, level=logging.INFO)
     logger.info(f"Evaluating checkpoint from {output_dir}")
+    logger.info(
+        "Reproducibility configured for evaluation: seed=%d, cudnn_deterministic=%s, deterministic_algorithms=%s",
+        reproducibility["seed"],
+        reproducibility["cudnn_deterministic"],
+        reproducibility["deterministic_algorithms_enabled"],
+    )
 
     # Extract run_id from output directory and initialize registry
     run_id = output_dir.name
@@ -385,6 +394,11 @@ def main() -> None:
                 "manifest_path": str(
                     shared_preprocessing_manifest_path(shared_cache_dir)
                 ),
+            },
+            "reproducibility": {
+                **reproducibility,
+                "device": device,
+                "holdout_split_seed": seed,
             },
         }
 

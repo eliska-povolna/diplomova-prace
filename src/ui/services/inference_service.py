@@ -933,7 +933,7 @@ class InferenceService:
         Args:
             user_z: User latent vector (latent_dim,) - already on device
             steering_config: Dict with keys:
-                - type: 'neuron' (concept steering not yet supported)
+                - type: 'neuron' | 'concept' | 'superfeature'
                 - neuron_values: {neuron_idx: strength} where:
                     - neuron_idx: SAE feature index (0 to sae_hidden_dim-1)
                     - strength: slider value in [-1, 2]
@@ -947,9 +947,32 @@ class InferenceService:
 
         with torch.no_grad():
             if steering_type == "neuron":
-                # Get steering overrides for SAE features
                 neuron_values = steering_config.get("neuron_values", {})
+            elif steering_type in {"concept", "superfeature"}:
+                neuron_values = {
+                    int(neuron_idx): float(weight)
+                    for neuron_idx, weight in (
+                        steering_config.get("neuron_weights") or {}
+                    ).items()
+                }
 
+                if not neuron_values and self.labels:
+                    if steering_type == "concept":
+                        concept_id = steering_config.get("concept_id")
+                        if concept_id:
+                            neuron_values = self.labels.resolve_concept_to_neurons(
+                                str(concept_id)
+                            )
+                    else:
+                        superfeature_id = steering_config.get("superfeature_id")
+                        if superfeature_id is not None:
+                            neuron_values = self.labels.resolve_superfeature_to_neurons(
+                                str(superfeature_id)
+                            )
+            else:
+                neuron_values = {}
+
+            if steering_type in {"neuron", "concept", "superfeature"}:
                 # Step 1: Encode user latent to SAE features
                 h_user = self.sae.encode(user_z.unsqueeze(0))  # (1, sae_hidden_dim)
                 h_steered = h_user.clone()

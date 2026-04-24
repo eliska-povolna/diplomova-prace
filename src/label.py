@@ -3,7 +3,7 @@
 Pipeline:
   1. Load trained SAE model and training data
   2. Extract neuron activation profiles
-    3. Label neurons using tag-based, matrix-based, and/or LLM-based methods
+  3. Label neurons using weighted-category, matrix-based, and/or LLM-based methods
   4. Create neuron embeddings and cluster similar neurons into superfeatures
   5. Generate co-activation data from correlation matrices
   6. Save all results to output directory
@@ -31,21 +31,25 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import pickle
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import torch
-import pickle
+import yaml
 
 from src.interpret.neuron_labeling import (
     TagBasedLabeler,
     LLMBasedLabeler,
+    ReviewBasedLLMLabeler,
     NeuronEmbedder,
     SuperfeatureGenerator,
 )
+from src.interpret.label_registry import LabelRegistry
 from src.interpret.matrix_based_labeling import matrix_based_neuron_labeling
 from src.run_registry import write_latest_run_pointer
+from src.ui.services.secrets_helper import get_cloud_storage_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +155,51 @@ def _load_experiment_manifest(experiment_dir: Path) -> dict:
     return manifest
 
 
+def _load_run_summary(run_dir: Path) -> dict:
+    summary_path = run_dir / "summary.json"
+    if not summary_path.exists():
+        return {}
+    with summary_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _extract_ndcg_at_10(summary: dict) -> float:
+    ranking_metrics = (
+        summary.get("ranking_metrics", {}) if isinstance(summary, dict) else {}
+    )
+    ndcg = ranking_metrics.get("ndcg", {})
+    try:
+        return float(ndcg.get("@10", float("-inf")))
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _resolve_run_summary(run: dict) -> dict:
+    summary = run.get("summary")
+    if isinstance(summary, dict) and summary:
+        return summary
+
+    run_dir = Path(run.get("run_dir", ""))
+    if run_dir.exists():
+        return _load_run_summary(run_dir)
+    return {}
+
+
+def _find_best_experiment_run(runs: list[dict]) -> Optional[dict]:
+    best_run = None
+    best_score = float("-inf")
+    for raw_run in runs:
+        run = dict(raw_run)
+        summary = _resolve_run_summary(run)
+        score = _extract_ndcg_at_10(summary)
+        run["summary"] = summary
+        run["ndcg_at_10"] = score
+        if best_run is None or score > best_score:
+            best_run = run
+            best_score = score
+    return best_run
+
+
 def _find_latest_experiment_dir() -> Optional[Path]:
     pointer_path = Path("outputs") / "LATEST_EXPERIMENT.txt"
     if pointer_path.exists():
@@ -176,6 +225,85 @@ def _find_latest_experiment_dir() -> Optional[Path]:
     return sorted(experiment_dirs, key=lambda d: d.name)[-1]
 
 
+def upload_label_artifacts_to_cloud(training_dir: Path) -> bool:
+    """Upload label/UI artifacts created by `src.label` to GCS."""
+    try:
+        bucket_name = get_cloud_storage_bucket()
+        if not bucket_name:
+            logger.info("GCS bucket not configured, skipping label artifact upload")
+            return True
+
+        from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+        cloud_storage = CloudStorageHelper(bucket_name=bucket_name)
+        timestamp = training_dir.name
+        gcs_prefix = f"models/{timestamp}"
+
+        def _upload_file(
+            local_file: Path, gcs_path: str, content_type: Optional[str] = None
+        ) -> None:
+            if not local_file.exists():
+                return
+            blob = cloud_storage.bucket.blob(gcs_path)
+            if content_type:
+                blob.upload_from_filename(str(local_file), content_type=content_type)
+            else:
+                blob.upload_from_filename(str(local_file))
+
+        interpretations_dir = training_dir / "neuron_interpretations"
+        if interpretations_dir.exists():
+            for artifact_file in interpretations_dir.glob("*"):
+                if artifact_file.is_file():
+                    content_type = (
+                        "application/json"
+                        if artifact_file.suffix.lower() == ".json"
+                        else "application/octet-stream"
+                    )
+                    _upload_file(
+                        artifact_file,
+                        f"{gcs_prefix}/neuron_interpretations/{artifact_file.name}",
+                        content_type,
+                    )
+
+        _upload_file(
+            training_dir / "neuron_category_metadata.json",
+            f"{gcs_prefix}/neuron_category_metadata.json",
+            "application/json",
+        )
+        _upload_file(
+            training_dir / "neuron_coactivation.json",
+            f"{gcs_prefix}/neuron_coactivation.json",
+            "application/json",
+        )
+
+        precomputed_cache_dir = (
+            training_dir / "precomputed_ui_cache" / "neuron_wordclouds"
+        )
+        if precomputed_cache_dir.exists():
+            for cache_file in precomputed_cache_dir.glob("*"):
+                if cache_file.is_file():
+                    content_type = (
+                        "application/json"
+                        if cache_file.suffix.lower() == ".json"
+                        else "application/octet-stream"
+                    )
+                    _upload_file(
+                        cache_file,
+                        f"{gcs_prefix}/precomputed_ui_cache/neuron_wordclouds/{cache_file.name}",
+                        content_type,
+                    )
+
+        logger.info(
+            "Uploaded label artifacts to gs://%s/%s/",
+            bucket_name,
+            gcs_prefix,
+        )
+        return True
+    except Exception as e:
+        logger.warning("Failed to upload label artifacts to cloud: %s", e)
+        return False
+
+
 def _label_experiment_runs(
     experiment_dir: Path,
     *,
@@ -190,11 +318,19 @@ def _label_experiment_runs(
     runs = manifest.get("runs", [])
     if not runs:
         raise ValueError(f"No runs found in experiment manifest: {experiment_dir}")
+    best_run = _find_best_experiment_run(runs)
+    best_run_dir = Path(best_run.get("run_dir", "")) if best_run else None
 
     logger.info("EXPERIMENT BATCH LABELING MODE")
     logger.info("=" * 80)
     logger.info(f"Experiment directory: {experiment_dir}")
     logger.info(f"Run count: {len(runs)}")
+    if best_run_dir and best_run_dir.exists():
+        logger.info(
+            "Best run by NDCG@10: %s (%.4f)",
+            best_run.get("run_name", best_run_dir.name),
+            best_run.get("ndcg_at_10", float("nan")),
+        )
     logger.info("=" * 80)
 
     batch_results = []
@@ -233,6 +369,12 @@ def _label_experiment_runs(
         "source_config": manifest.get("source_config"),
         "base_config": manifest.get("base_config"),
         "method": method,
+        "selection_metric": "ndcg@10",
+        "best_run": {
+            "run_name": best_run.get("run_name") if best_run else None,
+            "run_dir": str(best_run_dir) if best_run_dir else None,
+            "ndcg_at_10": best_run.get("ndcg_at_10") if best_run else None,
+        },
         "skip_coactivation": skip_coactivation,
         "coactivation_only": coactivation_only,
         "runs": batch_results,
@@ -243,11 +385,14 @@ def _label_experiment_runs(
         json.dump(label_manifest, f, indent=2)
 
     logger.info(f"✓ Saved batch labeling manifest: {label_manifest_path}")
+    if best_run_dir and best_run_dir.exists():
+        write_latest_run_pointer(best_run_dir)
     return {
         "mode": "experiment_batch",
         "experiment_dir": str(experiment_dir),
         "labeling_manifest": label_manifest_path,
         "runs_labeled": len(batch_results),
+        "best_run_dir": best_run_dir,
     }
 
 
@@ -323,7 +468,7 @@ def _build_neuron_category_metadata(
             "category_weights": category_weights,
             "top_categories": sorted(
                 category_weights.keys(),
-                key=lambda category: len(category_weights[category]),
+                key=lambda category: sum(category_weights[category]),
                 reverse=True,
             ),
             "max_activation": max(activation_values) if activation_values else 0.0,
@@ -499,7 +644,7 @@ def find_model_files(training_dir: Path) -> tuple:
     Returns
     -------
     tuple
-        (model_path, data_path, business_metadata_path)
+        (sae_model_path, elsa_model_path, data_path, business_metadata_path)
     """
     checkpoints_dir = training_dir / "checkpoints"
     data_dir = training_dir / "data"
@@ -514,6 +659,10 @@ def find_model_files(training_dir: Path) -> tuple:
             logger.info(f"Found SAE model with suffix: {sae_model.name}")
         else:
             raise FileNotFoundError(f"SAE checkpoint not found in {checkpoints_dir}")
+
+    elsa_model = checkpoints_dir / "elsa_best.pt"
+    if not elsa_model.exists():
+        raise FileNotFoundError(f"ELSA checkpoint not found in {checkpoints_dir}")
 
     # Find data directory
     if not data_dir.exists():
@@ -531,7 +680,33 @@ def find_model_files(training_dir: Path) -> tuple:
     if business_metadata_path.exists():
         logger.info("✓ Found business metadata")
 
-    return sae_model, data_dir, business_metadata_path
+    logger.info("Found ELSA model: %s", elsa_model.name)
+    return sae_model, elsa_model, data_dir, business_metadata_path
+
+
+def _load_training_config(training_dir: Path) -> dict:
+    summary_path = training_dir / "summary.json"
+    if summary_path.exists():
+        with summary_path.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+        if isinstance(summary, dict) and isinstance(summary.get("config"), dict):
+            return summary["config"]
+
+    config_path = Path("configs/default.yaml")
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    return {}
+
+
+def _load_checkpoint_state_dict(model_path: Path) -> dict:
+    """Load a model state dict from either a raw state dict or a checkpoint payload."""
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        return checkpoint["model_state_dict"]
+    if isinstance(checkpoint, dict):
+        return checkpoint
+    raise TypeError(f"Unsupported checkpoint format at {model_path}")
 
 
 def load_sae_model(model_path: Path, config: dict) -> tuple:
@@ -565,13 +740,117 @@ def load_sae_model(model_path: Path, config: dict) -> tuple:
     k = config.get("k", sae_config.get("k", 32))
 
     model = TopKSAE(latent_dim, hidden_dim, k)
-    model.load_state_dict(torch.load(model_path, map_location="cpu"))
+    model.load_state_dict(_load_checkpoint_state_dict(model_path))
     model.eval()
 
     logger.info(f"Loaded SAE model from {model_path}")
     logger.info(f"  Hidden dim: {hidden_dim}, K: {k}")
 
     return model, hidden_dim, k
+
+
+def load_elsa_model(model_path: Path, n_items: int, config: dict):
+    """Load ELSA model from checkpoint."""
+    from src.models.collaborative_filtering import ELSA
+
+    elsa_config = config.get("elsa", {})
+    latent_dim = config.get("latent_dim", elsa_config.get("latent_dim", 128))
+    model = ELSA(n_items=n_items, latent_dim=latent_dim)
+    model.load_state_dict(_load_checkpoint_state_dict(model_path))
+    model.eval()
+    logger.info(f"Loaded ELSA model from {model_path}")
+    logger.info(f"  Items: {n_items}, latent dim: {latent_dim}")
+    return model
+
+
+def compute_item_sparse_activations(elsa_model, sae_model) -> torch.Tensor:
+    """Compute real item-to-neuron sparse activations from trained models."""
+    with torch.no_grad():
+        item_latents = elsa_model._A_norm.detach().cpu()
+        sparse_activations = sae_model.encode(item_latents).cpu()
+
+    logger.info(
+        "Computed real item sparse activations: shape %s",
+        tuple(sparse_activations.shape),
+    )
+    return sparse_activations
+
+
+def load_review_lookup(
+    data_dir: Path,
+    *,
+    max_reviews_per_business: int = 3,
+) -> dict[str, list[dict]]:
+    """Load top useful reviews per business for review-based labeling."""
+
+    def _safe_numeric(value, default: float = -1.0) -> float:
+        try:
+            if value is None:
+                return default
+            text = str(value).strip().lower()
+            if text in {"", "none", "nan", "<na>"}:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    reviews_path = data_dir / "reviews_df.pkl"
+    if not reviews_path.exists():
+        logger.warning(
+            "Reviews artifact not found for review-based labeling: %s", reviews_path
+        )
+        return {}
+
+    with open(reviews_path, "rb") as f:
+        reviews_df = pickle.load(f)
+
+    if reviews_df is None or len(reviews_df) == 0:
+        return {}
+
+    if "business_id" not in reviews_df.columns or "text" not in reviews_df.columns:
+        logger.warning(
+            "Reviews artifact missing required columns for review-based labeling"
+        )
+        return {}
+
+    working_df = reviews_df.copy()
+    if "useful" not in working_df.columns:
+        working_df["useful"] = 0
+    if "stars" not in working_df.columns:
+        working_df["stars"] = None
+
+    working_df["business_id"] = working_df["business_id"].astype(str)
+    working_df["text"] = working_df["text"].astype(str)
+    working_df["useful"] = working_df["useful"].apply(
+        lambda value: _safe_numeric(value, 0.0)
+    )
+    working_df["stars_sort"] = working_df["stars"].apply(_safe_numeric)
+    working_df = working_df.sort_values(
+        by=["business_id", "useful", "stars_sort"],
+        ascending=[True, False, False],
+    )
+
+    review_lookup: dict[str, list[dict]] = {}
+    for business_id, group in working_df.groupby("business_id", sort=False):
+        snippets = []
+        for _, row in group.head(max_reviews_per_business).iterrows():
+            text = str(row.get("text", "")).strip()
+            if not text:
+                continue
+            snippets.append(
+                {
+                    "text": text,
+                    "useful": int(row.get("useful", 0) or 0),
+                    "stars": (
+                        float(row["stars"]) if row.get("stars") is not None else None
+                    ),
+                }
+            )
+        if snippets:
+            review_lookup[business_id] = snippets
+
+    logger.info("Prepared review lookup for %s businesses", len(review_lookup))
+    return review_lookup
 
 
 def extract_neuron_profiles(
@@ -804,7 +1083,7 @@ def label_neurons(
     business_metadata_path : Path, optional
         Path to business metadata (auto-detected if not provided)
     method : str
-        "tag-based", "llm-based", or "both"
+        "weighted-category", "matrix-based", "llm-based", "llm-review-based", or "both"
     gemini_api_key : str, optional
         Gemini API key for LLM labeling
     similarity_threshold : float
@@ -844,9 +1123,12 @@ def label_neurons(
         }
 
     # Auto-detect model files
+    elsa_model_path = None
     if model_path is None or data_path is None or business_metadata_path is None:
         logger.info("Auto-detecting model files...")
-        model_path, data_path, business_metadata_path = find_model_files(training_dir)
+        model_path, elsa_model_path, data_path, business_metadata_path = (
+            find_model_files(training_dir)
+        )
 
     output_dir = training_dir / "neuron_interpretations"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -880,25 +1162,15 @@ def label_neurons(
     logger.info(f"  Items: {len(item2index)}")
     logger.info(f"  Metadata entries: {len(business_metadata)}")
 
-    # Load config
-    config_path = Path("configs/default.yaml")
-    if config_path.exists():
-        import yaml
+    config = _load_training_config(training_dir)
+    sae_model, _hidden_dim, _k = load_sae_model(model_path, config)
+    if elsa_model_path is None:
+        elsa_model_path = training_dir / "checkpoints" / "elsa_best.pt"
+    elsa_model = load_elsa_model(elsa_model_path, len(item2index), config)
 
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-        sae_config = config.get("sae", {})
-        elsa_config = config.get("elsa", {})
-    else:
-        sae_config = {"width_ratio": 2, "k": 32}
-        elsa_config = {"latent_dim": 128}
-
-    # Compute sparse activations
-    logger.info("Computing sparse activations...")
-    num_neurons = sae_config.get("hidden_dim") or (
-        sae_config.get("width_ratio", 2) * elsa_config.get("latent_dim", 128)
-    )
-    sparse_activations = torch.rand(len(item2index), num_neurons)
+    logger.info("Computing sparse activations from trained ELSA + SAE...")
+    sparse_activations = compute_item_sparse_activations(elsa_model, sae_model)
+    review_lookup = load_review_lookup(data_path)
 
     # Extract profiles
     logger.info("Extracting neuron profiles...")
@@ -911,23 +1183,25 @@ def label_neurons(
 
     # Label neurons
     all_labels = {}
+    concept_mapping_payload = {}
+    resolved_method = "weighted-category" if method == "tag-based" else method
 
-    if method in ["tag-based", "non-llm", "both"]:
+    if resolved_method in ["weighted-category", "non-llm", "both"]:
         logger.info("=" * 80)
-        logger.info("PHASE 1: TAG-BASED LABELING")
+        logger.info("PHASE 1: WEIGHTED-CATEGORY LABELING")
         logger.info("=" * 80)
         try:
             labeler = TagBasedLabeler()
             labels = labeler.label_neurons(neuron_profiles, business_metadata)
-            all_labels["tag-based"] = labels
+            all_labels["weighted-category"] = labels
 
             logger.info(f"✓ Tagged {len(labels)} neurons")
             for nid, label in list(labels.items())[:5]:
                 logger.info(f"  Neuron {nid}: {label}")
         except Exception as e:
-            logger.error(f"Tag-based labeling failed: {e}")
+            logger.error(f"Weighted-category labeling failed: {e}")
 
-    if method in ["matrix-based", "non-llm"]:
+    if resolved_method in ["matrix-based", "non-llm", "both"]:
         logger.info("=" * 80)
         logger.info("PHASE 2: MATRIX-BASED LABELING")
         logger.info("=" * 80)
@@ -940,17 +1214,21 @@ def label_neurons(
                 item_index_to_business_id=index_to_business_id,
                 neuron_profiles=neuron_profiles,
                 sparse_activations=sparse_activations,
+                include_attributes=False,
             )
             all_labels["matrix-based"] = labels
+            concept_mapping_payload = analysis_results.get("concept_mapping", {})
 
             logger.info(f"✓ Labeled {len(labels)} neurons")
-            logger.info(f"  Tags extracted: {analysis_results.get('num_tags', 'N/A')}")
+            logger.info(
+                f"  Distinct categories extracted: {analysis_results.get('num_tags', 'N/A')}"
+            )
             for nid, label in list(labels.items())[:5]:
                 logger.info(f"  Neuron {nid}: {label}")
         except Exception as e:
             logger.error(f"Matrix-based labeling failed: {e}")
 
-    if method in ["llm-based", "both"]:
+    if resolved_method in ["llm-based", "both"]:
         logger.info("=" * 80)
         logger.info("PHASE 3: LLM-BASED LABELING")
         logger.info("=" * 80)
@@ -965,12 +1243,43 @@ def label_neurons(
         except Exception as e:
             logger.error(f"LLM-based labeling failed: {e}")
 
+    if resolved_method in ["llm-review-based", "both"]:
+        logger.info("=" * 80)
+        logger.info("PHASE 4: REVIEW-BASED LLM LABELING")
+        logger.info("=" * 80)
+        try:
+            if not review_lookup:
+                raise RuntimeError(
+                    "No review snippets available for review-based labeling"
+                )
+            labeler = ReviewBasedLLMLabeler(
+                api_key=gemini_api_key,
+                review_lookup=review_lookup,
+            )
+            labels = labeler.label_neurons(neuron_profiles, business_metadata)
+            all_labels["llm-review-based"] = labels
+
+            logger.info(f"âś“ Labeled {len(labels)} neurons")
+            for nid, label in list(labels.items())[:5]:
+                logger.info(f"  Neuron {nid}: {label}")
+        except Exception as e:
+            logger.error(f"Review-based LLM labeling failed: {e}")
+
     if not all_labels:
         logger.error("No labeling methods succeeded!")
         return {"error": "No labeling methods succeeded"}
 
-    # Use first available method for embeddings and superfeatures
-    selected_method = list(all_labels.keys())[0]
+    # Prefer richer methods when available for downstream summaries.
+    preferred_methods = [
+        "llm-review-based",
+        "llm-based",
+        "matrix-based",
+        "weighted-category",
+    ]
+    selected_method = next(
+        (method_name for method_name in preferred_methods if method_name in all_labels),
+        list(all_labels.keys())[0],
+    )
     selected_labels = all_labels[selected_method]
     logger.info(f"Using {selected_method} labels for embeddings and superfeatures")
 
@@ -1026,6 +1335,12 @@ def label_neurons(
     logger.info("=" * 80)
 
     output_files = {}
+    method_descriptions = {
+        "weighted-category": "Baseline activation-weighted category aggregation over top-activating businesses.",
+        "matrix-based": "Paper-style TF-IDF concept-neuron mapping derived from real sparse activations.",
+        "llm-based": "Gemini semantic naming from top activating businesses and categories.",
+        "llm-review-based": "Gemini semantic naming from top businesses, categories, and top useful reviews.",
+    }
 
     # Save all labels
     for method_name, labels in all_labels.items():
@@ -1035,17 +1350,31 @@ def label_neurons(
         output_files[f"labels_{method_name}"] = output_file
         logger.info(f"✓ Saved {method_name} labels: {output_file}")
 
+    if "weighted-category" in all_labels:
+        legacy_output = output_dir / "labels_tag-based.pkl"
+        with open(legacy_output, "wb") as f:
+            pickle.dump(all_labels["weighted-category"], f)
+        output_files["labels_tag-based"] = legacy_output
+
+    label_registry = LabelRegistry(
+        methods=all_labels,
+        selected_method=selected_method,
+        method_descriptions=method_descriptions,
+        method_aliases={"tag-based": "weighted-category"},
+        extras={
+            "superfeatures": {str(k): v for k, v in superfeatures.items()},
+            "concept_mapping": {
+                "concepts": concept_mapping_payload.get("concepts", []),
+                "top_concepts_per_neuron": concept_mapping_payload.get(
+                    "top_concepts_per_neuron", {}
+                ),
+            },
+        },
+    )
+
     labels_json_path = output_dir / "neuron_labels.json"
     with labels_json_path.open("w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "selected_method": selected_method,
-                "neuron_labels": selected_labels,
-                "methods": all_labels,
-            },
-            f,
-            indent=2,
-        )
+        json.dump(label_registry.as_payload(), f, indent=2)
     output_files["labels_json"] = labels_json_path
     logger.info(f"✓ Saved labels JSON: {labels_json_path}")
 
@@ -1071,6 +1400,13 @@ def label_neurons(
         output_files["superfeatures"] = output_file
         logger.info(f"✓ Saved superfeatures: {output_file}")
 
+    if concept_mapping_payload:
+        output_file = output_dir / "concept_mapping.pkl"
+        with open(output_file, "wb") as f:
+            pickle.dump(concept_mapping_payload, f)
+        output_files["concept_mapping"] = output_file
+        logger.info(f"Saved concept mapping: {output_file}")
+
     # Save summary
     summary = {
         "methods": list(all_labels.keys()),
@@ -1078,6 +1414,7 @@ def label_neurons(
         "num_neurons": len(selected_labels),
         "num_superfeatures": len(superfeatures),
         "similarity_threshold": similarity_threshold,
+        "selection_metric": "ndcg@10",
     }
 
     output_file = output_dir / "summary.pkl"
@@ -1125,6 +1462,7 @@ def label_neurons(
 
     output_files["output_dir"] = output_dir
     write_latest_run_pointer(training_dir)
+    upload_label_artifacts_to_cloud(training_dir)
     return output_files
 
 
@@ -1136,7 +1474,7 @@ def main():
         "  1. FULL (default): Labels + embeddings + superfeatures + coactivations\n"
         "  2. NO COACTIVATION: Labels + embeddings + superfeatures (skip coactivation)\n"
         "  3. COACTIVATION ONLY: Just generate coactivation data (skip all labeling)\n"
-        "  4. NON-LLM: Tag-based + matrix-based labels without Gemini\n"
+        "  4. NON-LLM: Weighted-category + matrix-based labels without Gemini\n"
         "\nEXAMPLES:\n"
         "  # Full: auto-detect latest model and generate everything\n"
         "  python -m src.label\n"
@@ -1146,8 +1484,8 @@ def main():
         "  python -m src.label --skip-coactivation\n"
         "\n  # Only coactivation (skip all labeling)\n"
         "  python -m src.label --coactivation-only\n"
-        "\n  # Tag-based labeling only\n"
-        "  python -m src.label --method tag-based\n"
+        "\n  # Weighted-category labeling only\n"
+        "  python -m src.label --method weighted-category\n"
         "\n  # Matrix-based labeling only\n"
         "  python -m src.label --method matrix-based\n"
         "\n  # All non-LLM labeling methods\n"
@@ -1193,9 +1531,17 @@ def main():
     parser.add_argument(
         "--method",
         type=str,
-        choices=["tag-based", "matrix-based", "llm-based", "non-llm", "both"],
+        choices=[
+            "tag-based",
+            "weighted-category",
+            "matrix-based",
+            "llm-based",
+            "llm-review-based",
+            "non-llm",
+            "both",
+        ],
         default="both",
-        help="Labeling method to use (default: both; non-llm runs tag-based + matrix-based)",
+        help="Labeling method to use (default: both; non-llm runs weighted-category + matrix-based)",
     )
     parser.add_argument(
         "--gemini-api-key",

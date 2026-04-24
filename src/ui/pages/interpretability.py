@@ -81,6 +81,11 @@ def show():
     through human-readable labels and visual wordclouds of activating business categories.
     """
     )
+    st.caption(
+        "By default the app follows the best run from the latest experiment (highest NDCG@10). "
+        "The weighted-category baseline uses activation-weighted business categories rather than raw category counts, "
+        "and deprioritizes very generic parent categories such as Restaurants and Food when more specific categories are available."
+    )
 
     # Initialize services
     labels_service = st.session_state.get("labels")
@@ -111,6 +116,14 @@ def show():
             labels_service.set_method(selected_method)
 
         st.caption(f"Showing labels from `{selected_method}`")
+        superfeatures = (
+            labels_service.get_superfeatures()
+            if selected_method.startswith("llm")
+            else {}
+        )
+    else:
+        selected_method = getattr(labels_service, "selected_method", "default")
+        superfeatures = {}
 
     if not wordcloud_service:
         st.warning(
@@ -142,6 +155,14 @@ def show():
         st.caption(
             "Search by feature number (e.g., '5', '42'), label name (e.g., 'Italian', 'Coffee'), or by meaning (e.g., 'Asian' finds semantically similar features)"
         )
+        browse_mode = "Neuron"
+        if superfeatures:
+            browse_mode = st.radio(
+                "Browse",
+                options=["Neuron", "Superfeature"],
+                horizontal=True,
+                key="interpretability_browse_mode",
+            )
 
         # If pending feature search was set by button click, update session state directly
         # (value param doesn't override existing keyed widget values in session_state)
@@ -190,7 +211,29 @@ def show():
 
         # Only run search if there's a query AND we haven't already selected a feature
         matching_features = []
-        if search_query and neuron_idx is None:
+        if browse_mode == "Superfeature":
+            matching_superfeatures = []
+            for sf_id, sf_data in superfeatures.items():
+                super_label = str(sf_data.get("super_label", f"Superfeature {sf_id}"))
+                sub_labels = " ".join(sf_data.get("sub_labels", []))
+                haystack = f"{super_label} {sub_labels}".lower()
+                if not search_query or search_query.lower() in haystack:
+                    matching_superfeatures.append((sf_id, super_label))
+
+            if matching_superfeatures:
+                selected_sf_idx = st.radio(
+                    "Select a superfeature",
+                    options=range(len(matching_superfeatures)),
+                    format_func=lambda i: f"{matching_superfeatures[i][1]}",
+                    key="superfeature_selection_radio",
+                    label_visibility="collapsed",
+                )
+                st.session_state.selected_superfeature_id = matching_superfeatures[
+                    selected_sf_idx
+                ][0]
+            elif search_query:
+                st.warning("No superfeatures found. Try a different search.")
+        elif search_query and neuron_idx is None:
             # Try to match as a number first
             try:
                 search_num = int(search_query)
@@ -309,12 +352,34 @@ def show():
             else:
                 if search_query:
                     st.warning("No features found. Try a different search.")
-        elif neuron_idx is None and not search_query:
+        elif browse_mode != "Superfeature" and neuron_idx is None and not search_query:
             st.info("👉 Enter a feature name or number to get started")
 
     # ═══════════════════════════════════════════════════════════════════
     # MAIN AREA: Feature Details
     # ═══════════════════════════════════════════════════════════════════
+
+    superfeature_id = st.session_state.get("selected_superfeature_id")
+    if superfeature_id is not None:
+        if "selected_superfeature_id" in st.session_state:
+            del st.session_state["selected_superfeature_id"]
+        superfeature = superfeatures.get(str(superfeature_id), {})
+        st.markdown(
+            f"## Superfeature: {superfeature.get('super_label', f'Superfeature {superfeature_id}')}"
+        )
+        st.caption(
+            f"{len(superfeature.get('neurons', []))} member neurons from `{selected_method}` labels"
+        )
+        st.divider()
+        if superfeature.get("sub_labels"):
+            st.subheader("Member Neurons")
+            for neuron_id, sub_label in zip(
+                superfeature.get("neurons", []), superfeature.get("sub_labels", [])
+            ):
+                render_clickable_feature(int(neuron_id), str(sub_label))
+        else:
+            st.info("No member neuron labels available for this superfeature.")
+        st.stop()
 
     # Get the selected feature from sidebar (session_state handles the selection)
     neuron_idx = st.session_state.get("selected_feature_id")

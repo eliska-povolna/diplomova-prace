@@ -103,12 +103,22 @@ try:
 
     # Initialize session state first
     init_session_state()
-    selected_output_dir = st.session_state.get("selected_result_run_dir")
 
     # Load and flatten config
     logger.info("Loading configuration...")
     config = load_config(config_path)
     _show_startup_diagnostics(config)
+
+    selected_output_dir = st.session_state.get("selected_result_run_dir")
+    with st.spinner("Loading training results..."):
+        training_results = load_training_results(config, selected_output_dir)
+
+    if not selected_output_dir and training_results:
+        default_run_dir = training_results.get("default_run_dir")
+        if default_run_dir:
+            st.session_state.selected_result_run_dir = default_run_dir
+            selected_output_dir = default_run_dir
+
     with st.spinner("Loading models..."):
         inference = load_inference_service(config, selected_output_dir)
 
@@ -164,9 +174,6 @@ try:
                 f"   ✅ Aligned: Model ({model_neurons} neurons) matches coactivation data"
             )
     logger.info("=" * 80 + "\n")
-
-    with st.spinner("Loading training results..."):
-        training_results = load_training_results(config, selected_output_dir)
 
     with st.spinner("Loading semantic search model..."):
         semantic_search_model = load_semantic_search_model()
