@@ -1,0 +1,441 @@
+# Grid search experiments for ELSA + TopK SAE hyperparameter tuning
+# 
+# Format:
+# - List values (e.g., k: [8, 16, 32]) trigger sweeps
+# - Scalar values are used as-is
+# - Each experiment expands into multiple runs
+
+experiments:
+  # ===================================================================
+  # EXPERIMENT 1: Baseline with Current Settings
+  # ===================================================================
+  - name: baseline_current
+    description: "Current default configuration for comparison"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: 0.0
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: 3e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 1B: Learning Rate Sweep (ELSA + SAE)
+  # ===================================================================
+  - name: learning_rate_sweep
+    description: "Test ELSA + SAE learning rates"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: [5e-5, 1e-4, 3e-4, 5e-4]  # SWEEP
+      batch_size: 1024
+      num_epochs: 40
+      patience: 15
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: [5e-5, 1e-4, 3e-4, 5e-4]  # SWEEP
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 75
+      patience: 15
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 1C: Training Duration Sweep (Patience + Epochs)
+  # ===================================================================
+  - name: training_duration_sweep
+    description: "Test patience and num_epochs: more time to find optimum?"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 1e-4
+      batch_size: 1024
+      num_epochs: [30, 50, 100]  # SWEEP: More epochs?
+      patience: [10, 20, 30]      # SWEEP: More patience?
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: 1e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: [50, 100, 150]  # SWEEP
+      patience: [10, 20, 30]       # SWEEP
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 1D: Quick Ablation - min_delta Impact
+  # ===================================================================
+  - name: sae_min_delta_sweep
+    description: "Test SAE min_delta: affects early stopping sensitivity"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 1e-4
+      batch_size: 1024
+      num_epochs: 40
+      patience: 15
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: 1e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 100
+      patience: 20
+      min_delta: [0.00001, 0.0001, 0.001]  # SWEEP
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 2: ELSA Regularization Study
+  # ===================================================================
+  - name: elsa_regularization_sweep
+    description: "Test ELSA weight_decay impact on generalization"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: [0.0, 1e-4, 5e-4, 1e-3]  # SWEEP: Test regularization
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: 3e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 3: SAE Sparsity Study (k parameter)
+  # ===================================================================
+  - name: sae_sparsity_k_sweep
+    description: "Test SAE sparsity level (k) impact on compression & generalization"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: 1e-4  # Add regularization from exp 2
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: [16, 24, 32, 48, 64]  # SWEEP: Test sparsity levels
+      learning_rate: 3e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 4: SAE Regularization Study (l1_coef)
+  # ===================================================================
+  - name: sae_l1_regularization_sweep
+    description: "Test SAE L1 regularization strength"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: 3e-4
+      l1_coef: [1e-5, 1e-4, 3e-4, 5e-4, 1e-3]  # SWEEP: Test L1 strength
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 5: SAE Dictionary Size (width_ratio)
+  # ===================================================================
+  - name: sae_dictionary_size_sweep
+    description: "Test SAE dictionary capacity (width_ratio)"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: [2, 4, 8, 16]  # SWEEP: Test dictionary sizes
+      k: 32
+      learning_rate: 3e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 6: ELSA Model Capacity (latent_dim)
+  # ===================================================================
+  - name: elsa_latent_dim_sweep
+    description: "Test ELSA latent dimensionality"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: [256, 512, 768, 1024]  # SWEEP: Test model capacity
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: 3e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 7: Combined Optimization (Grid Search)
+  # ===================================================================
+  - name: combined_optimization_grid
+    description: "Joint optimization: k + width_ratio + l1_coef"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: [4, 8]        # SWEEP
+      k: [32, 48, 64]            # SWEEP
+      learning_rate: 3e-4
+      l1_coef: [1e-4, 3e-4]      # SWEEP
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 8: Compression-Focused (Fix Poor Compression)
+  # ===================================================================
+  - name: compression_focus_aggressive
+    description: "Aggressive compression tuning: large dict, high k, low L1"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 15
+      weight_decay: 0.0
+      device: "cpu"
+
+    sae:
+      width_ratio: 12
+      k: 96
+      learning_rate: 3e-4
+      l1_coef: 1e-5
+      batch_size: 1024
+      num_epochs: 150
+      patience: 20
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 9: Generalization-Focused (Fix Poor Generalization)
+  # ===================================================================
+  - name: generalization_focus_aggressive
+    description: "Aggressive generalization tuning: small dict, low k, high L1"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 256
+      learning_rate: 1e-4
+      batch_size: 512
+      num_epochs: 50
+      patience: 15
+      weight_decay: 1e-3
+      device: "cpu"
+
+    sae:
+      width_ratio: 2
+      k: 24
+      learning_rate: 1e-4
+      l1_coef: 1e-3
+      batch_size: 512
+      num_epochs: 100
+      patience: 15
+      min_delta: 0.001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 10: Quick Ablation (Testing One Change at a Time)
+  # ===================================================================
+  - name: ablation_add_elsa_regularization
+    description: "Ablation: measure impact of weight_decay alone"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: [0.0, 1e-4]  # Ablation: with vs without
+      device: "cpu"
+
+    sae:
+      width_ratio: 4
+      k: 32
+      learning_rate: 3e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"
+
+  # ===================================================================
+  # EXPERIMENT 11: Quick Ablation (SAE changes)
+  # ===================================================================
+  - name: ablation_increase_sae_capacity
+    description: "Ablation: measure impact of width_ratio alone"
+    data:
+      state_filter: "PA"
+      min_review_count: 20
+      train_test_split: 0.8
+      val_split: 0.1
+
+    elsa:
+      latent_dim: 512
+      learning_rate: 3e-4
+      batch_size: 1024
+      num_epochs: 25
+      patience: 10
+      weight_decay: 1e-4
+      device: "cpu"
+
+    sae:
+      width_ratio: [4, 8]        # Ablation: 4 vs 8
+      k: 32
+      learning_rate: 3e-4
+      l1_coef: 3e-4
+      batch_size: 1024
+      num_epochs: 50
+      patience: 10
+      min_delta: 0.0001
+      device: "cpu"

@@ -59,7 +59,9 @@ def render_clickable_feature(feature_id: int, feature_label: str):
     ):
         # Update session state: set feature ID and use a separate variable for pending search
         # (can't modify feature_search key directly after widget creation)
-        logger.info(f"🔘 Related feature button clicked: feature_id={feature_id}, label={feature_label}")
+        logger.info(
+            f"🔘 Related feature button clicked: feature_id={feature_id}, label={feature_label}"
+        )
         st.session_state.selected_feature_id = feature_id
         st.session_state._pending_feature_search = str(feature_id)
         logger.info(f"   ✓ Set session_state.selected_feature_id = {feature_id}")
@@ -79,6 +81,11 @@ def show():
     through human-readable labels and visual wordclouds of activating business categories.
     """
     )
+    st.caption(
+        "By default the app follows the best run from the latest experiment (highest NDCG@10). "
+        "The weighted-category baseline uses activation-weighted business categories rather than raw category counts, "
+        "and deprioritizes very generic parent categories such as Restaurants and Food when more specific categories are available."
+    )
 
     # Initialize services
     labels_service = st.session_state.get("labels")
@@ -90,6 +97,34 @@ def show():
         st.error("❌ Labeling service not initialized")
         return
 
+    available_methods = getattr(labels_service, "available_methods", [])
+    if available_methods:
+        default_method = getattr(
+            labels_service, "selected_method", available_methods[0]
+        )
+        if default_method not in available_methods:
+            default_method = available_methods[0]
+
+        selected_method = st.selectbox(
+            "Label source",
+            options=available_methods,
+            index=available_methods.index(default_method),
+            key="interpretability_label_method",
+        )
+
+        if hasattr(labels_service, "set_method"):
+            labels_service.set_method(selected_method)
+
+        st.caption(f"Showing labels from `{selected_method}`")
+        superfeatures = (
+            labels_service.get_superfeatures()
+            if selected_method.startswith("llm")
+            else {}
+        )
+    else:
+        selected_method = getattr(labels_service, "selected_method", "weighted-category")
+        superfeatures = {}
+
     if not wordcloud_service:
         st.warning(
             "⚠️ Wordcloud service not available - labels will display without visualizations"
@@ -100,13 +135,16 @@ def show():
     semantic_top_k = config.get("ui", {}).get("semantic_search_top_k", 10)
 
     # Get maximum neuron count from loaded model
+    # IMPORTANT: Use hidden_dim (actual neuron count), NOT k (sparsity level)
+    # k = how many neurons to keep active per sample
+    # hidden_dim = total neurons in the dictionary
     max_neuron = (
-        st.session_state.inference.sae.k - 1
+        st.session_state.inference.sae.hidden_dim - 1
         if (
             hasattr(st.session_state, "inference")
             and hasattr(st.session_state.inference, "sae")
         )
-        else 63
+        else 1023
     )
 
     # ═══════════════════════════════════════════════════════════════════
@@ -117,13 +155,25 @@ def show():
         st.caption(
             "Search by feature number (e.g., '5', '42'), label name (e.g., 'Italian', 'Coffee'), or by meaning (e.g., 'Asian' finds semantically similar features)"
         )
+        browse_mode = "Neuron"
+        if superfeatures:
+            browse_mode = st.radio(
+                "Browse",
+                options=["Neuron", "Superfeature"],
+                horizontal=True,
+                key="interpretability_browse_mode",
+            )
 
         # If pending feature search was set by button click, update session state directly
         # (value param doesn't override existing keyed widget values in session_state)
         if st.session_state.get("_pending_feature_search"):
             pending_value = st.session_state._pending_feature_search
-            logger.info(f"📝 Found pending_feature_search in session_state: '{pending_value}'")
-            logger.info(f"   → Updating session_state.feature_search to '{pending_value}'")
+            logger.info(
+                f"📝 Found pending_feature_search in session_state: '{pending_value}'"
+            )
+            logger.info(
+                f"   → Updating session_state.feature_search to '{pending_value}'"
+            )
             st.session_state.feature_search = pending_value
             logger.info(f"   ✓ session_state.feature_search updated")
             del st.session_state._pending_feature_search
@@ -131,15 +181,17 @@ def show():
         else:
             logger.debug("No pending_feature_search found")
 
-        logger.debug(f"Current session_state.feature_search = '{st.session_state.get('feature_search', '')}' (before widget creation)")
-        
+        logger.debug(
+            f"Current session_state.feature_search = '{st.session_state.get('feature_search', '')}' (before widget creation)"
+        )
+
         search_query = st.text_input(
             "Search features",
             placeholder="e.g., Italian or 5 or Asian",
             key="feature_search",
             label_visibility="collapsed",
         )
-        
+
         logger.debug(f"Search bar widget created, search_query = '{search_query}'")
 
         # Check if feature was passed via session_state (from related features button)
@@ -159,7 +211,29 @@ def show():
 
         # Only run search if there's a query AND we haven't already selected a feature
         matching_features = []
-        if search_query and neuron_idx is None:
+        if browse_mode == "Superfeature":
+            matching_superfeatures = []
+            for sf_id, sf_data in superfeatures.items():
+                super_label = str(sf_data.get("super_label", f"Superfeature {sf_id}"))
+                sub_labels = " ".join(sf_data.get("sub_labels", []))
+                haystack = f"{super_label} {sub_labels}".lower()
+                if not search_query or search_query.lower() in haystack:
+                    matching_superfeatures.append((sf_id, super_label))
+
+            if matching_superfeatures:
+                selected_sf_idx = st.radio(
+                    "Select a superfeature",
+                    options=range(len(matching_superfeatures)),
+                    format_func=lambda i: f"{matching_superfeatures[i][1]}",
+                    key="superfeature_selection_radio",
+                    label_visibility="collapsed",
+                )
+                st.session_state.selected_superfeature_id = matching_superfeatures[
+                    selected_sf_idx
+                ][0]
+            elif search_query:
+                st.warning("No superfeatures found. Try a different search.")
+        elif search_query and neuron_idx is None:
             # Try to match as a number first
             try:
                 search_num = int(search_query)
@@ -185,7 +259,10 @@ def show():
             # If still no results, try semantic search (use cached model from cache.py)
             if not matching_features:
                 try:
-                    from cache import load_semantic_search_model, cache_all_label_embeddings
+                    from cache import (
+                        load_semantic_search_model,
+                        cache_all_label_embeddings,
+                    )
 
                     semantic_model = load_semantic_search_model()
                     logger.info(f"Semantic model loaded: {semantic_model is not None}")
@@ -220,7 +297,9 @@ def show():
                                 try:
                                     # Compute cosine similarity using numpy (more reliable)
                                     # cos_sim = dot(a, b) / (norm(a) * norm(b))
-                                    dot_product = np.dot(query_embedding, label_embedding)
+                                    dot_product = np.dot(
+                                        query_embedding, label_embedding
+                                    )
                                     norm_query = np.linalg.norm(query_embedding)
                                     norm_label = np.linalg.norm(label_embedding)
                                     similarity = dot_product / (norm_query * norm_label)
@@ -273,25 +352,49 @@ def show():
             else:
                 if search_query:
                     st.warning("No features found. Try a different search.")
-        elif neuron_idx is None and not search_query:
+        elif browse_mode != "Superfeature" and neuron_idx is None and not search_query:
             st.info("👉 Enter a feature name or number to get started")
 
     # ═══════════════════════════════════════════════════════════════════
     # MAIN AREA: Feature Details
     # ═══════════════════════════════════════════════════════════════════
-    
+
+    superfeature_id = st.session_state.get("selected_superfeature_id")
+    if superfeature_id is not None:
+        if "selected_superfeature_id" in st.session_state:
+            del st.session_state["selected_superfeature_id"]
+        superfeature = superfeatures.get(str(superfeature_id), {})
+        st.markdown(
+            f"## Superfeature: {superfeature.get('super_label', f'Superfeature {superfeature_id}')}"
+        )
+        st.caption(
+            f"{len(superfeature.get('neurons', []))} member neurons from `{selected_method}` labels"
+        )
+        st.divider()
+        if superfeature.get("sub_labels"):
+            st.subheader("Member Neurons")
+            for neuron_id, sub_label in zip(
+                superfeature.get("neurons", []), superfeature.get("sub_labels", [])
+            ):
+                render_clickable_feature(int(neuron_id), str(sub_label))
+        else:
+            st.info("No member neuron labels available for this superfeature.")
+        st.stop()
+
     # Get the selected feature from sidebar (session_state handles the selection)
     neuron_idx = st.session_state.get("selected_feature_id")
     logger.info(f"🔍 Main area: retrieved selected_feature_id = {neuron_idx}")
-    
+
     # Clear it so it doesn't interfere with next interaction
     if "selected_feature_id" in st.session_state:
         logger.info(f"   ✓ Clearing selected_feature_id from session_state")
         del st.session_state.selected_feature_id
-    
+
     # Validate neuron index
     if neuron_idx is not None and not (0 <= neuron_idx <= max_neuron):
-        logger.warning(f"   ✗ Invalid neuron_idx {neuron_idx} (max_neuron={max_neuron}), setting to None")
+        logger.warning(
+            f"   ✗ Invalid neuron_idx {neuron_idx} (max_neuron={max_neuron}), setting to None"
+        )
         neuron_idx = None
     elif neuron_idx is not None:
         logger.info(f"   ✓ Valid neuron_idx: {neuron_idx} (max_neuron={max_neuron})")
@@ -374,7 +477,7 @@ def show():
                 )
 
                 if fig is not None:
-                    st.pyplot(fig, use_container_width=True)
+                    st.pyplot(fig, width="stretch")
                 else:
                     st.info("No wordcloud data available")
             except Exception as e:
@@ -421,10 +524,15 @@ def show():
 
     if coactivation_service and neuron_idx is not None:
         st.subheader("🔗 Related Features")
-        
+
         # Log diagnostic info about data sources
-        if hasattr(coactivation_service, 'coactivation_data') and coactivation_service.coactivation_data:
-            coact_neuron_ids = [int(k) for k in coactivation_service.coactivation_data.keys()]
+        if (
+            hasattr(coactivation_service, "coactivation_data")
+            and coactivation_service.coactivation_data
+        ):
+            coact_neuron_ids = [
+                int(k) for k in coactivation_service.coactivation_data.keys()
+            ]
             coact_max = max(coact_neuron_ids) if coact_neuron_ids else 0
             logger.debug(
                 f"🔍 Data source mismatch diagnostic:"

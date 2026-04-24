@@ -9,6 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import duckdb
 import pandas as pd
+from src.data.run_artifacts import load_shared_preprocessing_payload_for_run
 
 # Conditional Streamlit import for caching
 try:
@@ -52,7 +53,7 @@ class PhotoMetadata:
 
 class DataService:
     """
-    Load POI metadata from DuckDB + Parquet files.
+    Load POI metadata from DuckDB or CloudSQL.
 
     Provides:
     - POI details with photos
@@ -66,10 +67,10 @@ class DataService:
     def __init__(
         self,
         duckdb_path: Path,
-        parquet_dir: Path,
         config: Optional[Dict] = None,
         item2index_path: Optional[Path] = None,
         local_photos_dir: Optional[Path] = None,
+        active_run_dir: Optional[Path] = None,
     ):
         """
         Initialize DataService.
@@ -78,7 +79,6 @@ class DataService:
 
         Args:
             duckdb_path: Path to yelp.duckdb
-            parquet_dir: Path to parquet data directory
             config: Optional config dict
             item2index_path: Path to item2index.pkl mapping (business_id -> model index)
             local_photos_dir: Path to local photos directory
@@ -86,10 +86,10 @@ class DataService:
         import os
 
         self.duckdb_path = Path(duckdb_path)
-        self.parquet_dir = Path(parquet_dir)
         self.config = config or {}
         self.state_filter = self.config.get("state_filter")
         self.local_photos_dir = Path(local_photos_dir) if local_photos_dir else None
+        self.active_run_dir = Path(active_run_dir) if active_run_dir else None
         self.backend_type = "unknown"
         self.engine = None  # For Cloud SQL
 
@@ -272,14 +272,8 @@ class DataService:
                     return None
 
             else:
-                # Query from DuckDB (local) - parameterized query prevents SQL injection
-                # No state filter (item2index comes from full training data)
-                parquet_pattern = str(
-                    self.parquet_dir / "business" / "state=*" / "*.parquet"
-                )
-                parquet_pattern = parquet_pattern.replace("\\", "/")
-
-                query = f"SELECT * FROM read_parquet('{parquet_pattern}') WHERE business_id = ? LIMIT 1"
+                # Query from DuckDB (local) - use yelp_business table
+                query = "SELECT * FROM yelp_business WHERE business_id = ? LIMIT 1"
                 result = self.conn.execute(query, [business_id]).df()
 
                 if len(result) > 0:
@@ -687,7 +681,7 @@ class DataService:
 
         **Photo Resolution**:
         - Tries local_photos_dir first if configured
-        - Falls back to Yelp dataset photos from parquet/duckdb
+        - Falls back to Yelp dataset photos from DuckDB
         - Returns photo URL or None if unavailable
 
         Args:
@@ -910,8 +904,17 @@ class DataService:
         Get top N test users for dropdown selector.
 
         Filters to users with interactions in the current state_filter.
-        Loads from precomputed cache if available for fast startup.
+        Prefers the active run's saved test-user artifacts. Falls back to legacy
+        broad caches/database queries only for older runs that do not have them.
         """
+        run_users = _self._load_run_test_users(limit=limit)
+        if run_users:
+            logger.info(
+                "✅ Loaded %d real test users from active run artifacts",
+                len(run_users),
+            )
+            return run_users
+
         # Try loading from precomputed cache first
         project_root = Path(__file__).parent.parent.parent
         cache_dir = project_root / "data" / "ui_cache"
@@ -975,31 +978,14 @@ class DataService:
                     users_df = pd.read_sql(query, conn, params=params)
 
             else:
-                # Query from DuckDB (parquet)
-                # Check if parquet files exist before querying
-                review_path = _self.parquet_dir / "review"
-                if not review_path.exists():
-                    logger.debug(
-                        f"Parquet directory not found at {review_path}. "
-                        "Expected on Streamlit Cloud without local data. "
-                        "Configure Cloud SQL to use the app."
-                    )
-                    return []
-
-                review_pattern = str(review_path / "year=*" / "*.parquet")
-                business_pattern = str(
-                    _self.parquet_dir / "business" / "state=*" / "*.parquet"
-                )
-                review_pattern = review_pattern.replace("\\", "/")
-                business_pattern = business_pattern.replace("\\", "/")
-
+                # Query from DuckDB - use yelp_review and yelp_business tables
                 if _self.state_filter:
                     query = f"""
                         SELECT
                             reviews.user_id,
                             COUNT(*) as interactions
-                        FROM read_parquet('{review_pattern}') AS reviews
-                        INNER JOIN read_parquet('{business_pattern}') AS business
+                        FROM yelp_review AS reviews
+                        INNER JOIN yelp_business AS business
                             ON reviews.business_id = business.business_id
                         WHERE reviews.stars >= 4.0 AND business.state = '{_self.state_filter}'
                         GROUP BY reviews.user_id
@@ -1011,7 +997,7 @@ class DataService:
                         SELECT
                             user_id,
                             COUNT(*) as interactions
-                        FROM read_parquet('{review_pattern}')
+                        FROM yelp_review
                         WHERE stars >= 4.0
                         GROUP BY user_id
                         ORDER BY interactions DESC
@@ -1034,6 +1020,69 @@ class DataService:
                 f"get_test_users failed (expected if using Streamlit Cloud without local data): {e}"
             )
             return []
+
+    def _load_run_test_users(self, limit: int = 50) -> List[Dict]:
+        """Load real held-out test users for the active run."""
+        if not self.active_run_dir:
+            return []
+
+        if getattr(self, "cloud_storage_helper", None) and len(self.active_run_dir.name) == 15:
+            gcs_path = f"models/{self.active_run_dir.name}/data/test_users_top50.json"
+            try:
+                users = self.cloud_storage_helper.read_json(gcs_path)
+                if isinstance(users, list):
+                    logger.info(
+                        "Loaded real test users from GCS artifact: %s", gcs_path
+                    )
+                    return users[:limit]
+            except Exception as e:
+                logger.debug("Could not load run-scoped test users from cloud: %s", e)
+
+        top_users_path = self.active_run_dir / "data" / "test_users_top50.json"
+        if top_users_path.exists():
+            try:
+                with open(top_users_path, "r", encoding="utf-8") as f:
+                    users = json.load(f)
+                if isinstance(users, list):
+                    return users[:limit]
+            except Exception as e:
+                logger.warning("Failed to load %s: %s", top_users_path, e)
+
+        test_ids_path = self.active_run_dir / "data" / "test_user_ids.json"
+        reviews_path = self.active_run_dir / "data" / "reviews_df.pkl"
+        if test_ids_path.exists():
+            try:
+                with open(test_ids_path, "r", encoding="utf-8") as f:
+                    test_user_ids = json.load(f)
+                if reviews_path.exists():
+                    with open(reviews_path, "rb") as f:
+                        reviews_df = pickle.load(f)
+                else:
+                    shared_payload = load_shared_preprocessing_payload_for_run(
+                        self.active_run_dir / "data"
+                    )
+                    if not shared_payload:
+                        raise FileNotFoundError("shared preprocessing payload unavailable")
+                    reviews_df = shared_payload["reviews"]
+
+                counts = (
+                    reviews_df[reviews_df["user_id"].isin(test_user_ids)]
+                    .groupby("user_id")
+                    .size()
+                    .sort_values(ascending=False)
+                )
+                return [
+                    {"id": str(user_id), "interactions": int(count)}
+                    for user_id, count in counts.head(limit).items()
+                ]
+            except Exception as e:
+                logger.warning(
+                    "Failed to derive run-scoped test users from %s: %s",
+                    self.active_run_dir,
+                    e,
+                )
+
+        return []
 
     @cache_data
     def get_user_interactions(_self, user_id: str, min_stars: float = 4.0) -> List[int]:
@@ -1067,16 +1116,7 @@ class DataService:
                     business_ids = pd.read_sql(text(base_query), conn, params=params)
 
             else:
-                # Query from DuckDB (parquet)
-                review_pattern = str(
-                    _self.parquet_dir / "review" / "year=*" / "*.parquet"
-                )
-                business_pattern = str(
-                    _self.parquet_dir / "business" / "state=*" / "*.parquet"
-                )
-                review_pattern = review_pattern.replace("\\", "/")
-                business_pattern = business_pattern.replace("\\", "/")
-
+                # Query from DuckDB - use yelp_review and yelp_business tables
                 # Build WHERE clause using parameterized queries to prevent SQL injection
                 where_clause = "WHERE reviews.user_id = ? AND reviews.stars >= ?"
                 params = [user_id, min_stars]
@@ -1086,8 +1126,8 @@ class DataService:
 
                 query = f"""
                     SELECT DISTINCT business.business_id
-                    FROM read_parquet('{review_pattern}') reviews
-                    JOIN read_parquet('{business_pattern}') business
+                    FROM yelp_review reviews
+                    JOIN yelp_business business
                     ON reviews.business_id = business.business_id
                     {where_clause}
                 """
@@ -1127,7 +1167,7 @@ class DataService:
                 logger.info(
                     f"User {user_id}: {len(poi_indices)} valid interactions, max_idx={max_idx}"
                 )
-                
+
                 # Log warning if indices might be out of bounds (this is checked later by the caller)
                 logger.debug(
                     f"Caller is responsible for validating indices are < n_items. "
@@ -1166,18 +1206,11 @@ class DataService:
                     return int(result["cnt"][0]) if len(result) > 0 else 0
 
             else:
-                # Query from DuckDB (parquet)
-                parquet_pattern = str(
-                    self.parquet_dir / "business" / "state=*" / "*.parquet"
-                )
-                parquet_pattern = parquet_pattern.replace("\\", "/")
-
+                # Query from DuckDB - use yelp_business table
                 if self.state_filter:
-                    query = f"SELECT COUNT(*) as cnt FROM read_parquet('{parquet_pattern}') WHERE state = '{self.state_filter}'"
+                    query = f"SELECT COUNT(*) as cnt FROM yelp_business WHERE state = '{self.state_filter}'"
                 else:
-                    query = (
-                        f"SELECT COUNT(*) as cnt FROM read_parquet('{parquet_pattern}')"
-                    )
+                    query = "SELECT COUNT(*) as cnt FROM yelp_business"
 
                 result = self.conn.execute(query).df()
                 return int(result["cnt"][0]) if len(result) > 0 else 0
@@ -1220,21 +1253,14 @@ class DataService:
                     return result["user_id"].tolist() if len(result) > 0 else []
 
             else:
-                # Query from DuckDB (parquet)
-                review_pattern = str(
-                    self.parquet_dir / "review" / "year=*" / "*.parquet"
-                )
-                review_pattern = review_pattern.replace("\\", "/")
-
+                # Query from DuckDB - use yelp_review table
                 if min_reviews > 1:
                     query = f"""
-                        SELECT DISTINCT user_id FROM read_parquet('{review_pattern}')
+                        SELECT DISTINCT user_id FROM yelp_review
                         GROUP BY user_id HAVING COUNT(*) >= {min_reviews}
                     """
                 else:
-                    query = (
-                        f"SELECT DISTINCT user_id FROM read_parquet('{review_pattern}')"
-                    )
+                    query = "SELECT DISTINCT user_id FROM yelp_review"
 
                 result = self.conn.execute(query).df()
                 return result["user_id"].tolist() if len(result) > 0 else []
@@ -1248,14 +1274,43 @@ class DataService:
         Load precomputed CSR matrices for all users.
 
         Load priority:
-        1. Cloud Storage: metadata/user_csr_matrices.pkl
-        2. Local: data/user_csr_matrices.pkl
-        3. Return empty dict if neither available
+        1. Active run local: outputs/<run_id>/precomputed/user_csr_matrices.pkl
+        2. Active run cloud: models/<run_id>/precomputed/user_csr_matrices.pkl
+        3. Legacy Cloud Storage: metadata/user_csr_matrices.pkl
+        4. Legacy local: data/user_csr_matrices.pkl
+        5. Return empty dict if none available
 
         Returns:
             Dict[user_id, csr_matrix] or empty dict if not found
         """
-        # Try cloud first
+        if self.active_run_dir:
+            if getattr(self, "cloud_storage_helper", None) and len(self.active_run_dir.name) == 15:
+                cloud_run_path = (
+                    f"models/{self.active_run_dir.name}/precomputed/user_csr_matrices.pkl"
+                )
+                try:
+                    matrices = self.cloud_storage_helper.read_pickle(cloud_run_path)
+                    if matrices:
+                        logger.info(
+                            f"✅ Loaded precomputed user matrices from active run cloud ({len(matrices)} users)"
+                        )
+                        return matrices
+                except Exception as e:
+                    logger.debug(f"Could not load active-run matrices from cloud: {e}")
+
+            run_local_path = self.active_run_dir / "precomputed" / "user_csr_matrices.pkl"
+            if run_local_path.exists():
+                try:
+                    with open(run_local_path, "rb") as f:
+                        matrices = pickle.load(f)
+                    logger.info(
+                        f"✅ Loaded precomputed user matrices from active run ({len(matrices)} users)"
+                    )
+                    return matrices
+                except Exception as e:
+                    logger.debug(f"Could not load active-run matrices from local: {e}")
+
+        # Try legacy cloud path
         cloud_path = "metadata/user_csr_matrices.pkl"
         try:
             if getattr(self, "cloud_storage_helper", None):

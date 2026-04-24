@@ -9,7 +9,6 @@ from .cloud_storage_helper import CloudStorageHelper
 from .data_service import DataService
 from .inference_service import InferenceService
 from .labeling_service import LabelingService
-from .model_loader import ModelLoader
 from .secrets_helper import (
     get_cloudsql_config,
     get_gemini_api_key,
@@ -25,7 +24,6 @@ __all__ = [
     "InferenceService",
     "DataService",
     "LabelingService",
-    "ModelLoader",
     "WordcloudService",
     "CloudStorageHelper",
     "CloudSQLHelper",

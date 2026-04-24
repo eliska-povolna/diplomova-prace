@@ -19,6 +19,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 def extract_tags_and_items(
     business_metadata: Dict[str, Dict[str, Any]],
     item_index_to_business_id: Dict[int, str],
+    include_attributes: bool = False,
 ) -> Dict[str, List[int]]:
     """
     Extract both categories and attributes as "tags" with their item indices.
@@ -64,7 +65,11 @@ def extract_tags_and_items(
                         tag_items[f"category:{cat}"].add(item_idx)
 
             # Extract attributes
-            if "attributes" in metadata and isinstance(metadata["attributes"], dict):
+            if (
+                include_attributes
+                and "attributes" in metadata
+                and isinstance(metadata["attributes"], dict)
+            ):
                 attrs = metadata["attributes"]
                 for attr_key, attr_val in attrs.items():
                     if attr_val and str(attr_val).lower() not in (
@@ -105,7 +110,11 @@ def extract_tags_and_items(
                         tag_items[f"category:{cat}"].add(item_idx)
 
             # Extract attributes
-            if "attributes" in metadata and isinstance(metadata["attributes"], dict):
+            if (
+                include_attributes
+                and "attributes" in metadata
+                and isinstance(metadata["attributes"], dict)
+            ):
                 attrs = metadata["attributes"]
                 for attr_key, attr_val in attrs.items():
                     if attr_val and str(attr_val).lower() not in (
@@ -264,10 +273,68 @@ def apply_tfidf_on_neurons(
     return label_neuron_tfidf, tag_names
 
 
+def _clean_tag_name(tag_name: str) -> str:
+    if tag_name.startswith("category:"):
+        return tag_name[9:]
+    if tag_name.startswith("attribute:"):
+        return tag_name[10:]
+    return tag_name
+
+
+def build_concept_mapping_payload(
+    tag_names: List[str],
+    tag_items: Dict[str, List[int]],
+    tag_to_neuron_tfidf: np.ndarray,
+    top_k: int = 8,
+) -> Dict[str, Any]:
+    """Build steering-ready concept mapping payload from the TF-IDF matrices."""
+    concepts = []
+    for tag_idx, tag_name in enumerate(tag_names):
+        scores = tag_to_neuron_tfidf[tag_idx]
+        top_neuron_indices = np.argsort(-scores)[:top_k]
+        top_neurons = [
+            {"neuron_idx": int(neuron_idx), "score": float(scores[neuron_idx])}
+            for neuron_idx in top_neuron_indices
+            if scores[neuron_idx] > 1e-8
+        ]
+        concepts.append(
+            {
+                "concept_id": tag_name,
+                "display_name": _clean_tag_name(tag_name),
+                "kind": "attribute" if tag_name.startswith("attribute:") else "category",
+                "item_count": len(tag_items.get(tag_name, [])),
+                "top_neurons": top_neurons,
+            }
+        )
+
+    top_concepts_per_neuron = {}
+    num_neurons = tag_to_neuron_tfidf.shape[1]
+    for neuron_idx in range(num_neurons):
+        scores = tag_to_neuron_tfidf[:, neuron_idx]
+        top_tag_indices = np.argsort(-scores)[:top_k]
+        top_concepts_per_neuron[str(neuron_idx)] = [
+            {
+                "concept_id": tag_names[tag_idx],
+                "display_name": _clean_tag_name(tag_names[tag_idx]),
+                "score": float(scores[tag_idx]),
+            }
+            for tag_idx in top_tag_indices
+            if scores[tag_idx] > 1e-8
+        ]
+
+    return {
+        "concepts": concepts,
+        "tag_names": list(tag_names),
+        "tag_to_neuron_tfidf": tag_to_neuron_tfidf,
+        "top_concepts_per_neuron": top_concepts_per_neuron,
+    }
+
+
 def label_neurons_from_tags(
     label_neuron_tfidf: np.ndarray,
     tag_names: List[str],
     neuron_profiles: Dict[int, Dict],
+    business_metadata: Dict[str, Dict[str, Any]],
 ) -> Dict[int, str]:
     """
     Generate neuron labels by finding top tags per neuron.
@@ -287,23 +354,80 @@ def label_neurons_from_tags(
         {neuron_id: label_string, ...}
     """
     neuron_labels = {}
+    stop_categories = {"Restaurants", "Food"}
 
-    # For each neuron, find top scoring tags
+    def _local_category_support(profile: Dict) -> Dict[str, float]:
+        support = defaultdict(float)
+        max_items = profile.get("max_activating", {}).get("items", [])
+
+        for business_id, activation in max_items:
+            meta = business_metadata.get(str(business_id), {})
+            categories = meta.get("categories", [])
+            if isinstance(categories, str):
+                categories = [c.strip() for c in categories.split(",") if c.strip()]
+            elif isinstance(categories, (list, tuple, set)):
+                categories = [str(c).strip() for c in categories if str(c).strip()]
+            else:
+                categories = []
+
+            for category in categories:
+                support[category] += float(activation)
+
+        return support
+
+    # For each neuron, find top scoring tags grounded in its own top businesses.
     for neuron_idx in range(label_neuron_tfidf.shape[1]):
         scores = label_neuron_tfidf[:, neuron_idx]
         top_indices = np.argsort(-scores)[:3]  # Top 3 tags
 
-        top_tags = []
-        for idx in top_indices:
-            if scores[idx] > 1e-6:
-                tag_name = tag_names[idx]
-                # Remove prefix for cleaner label
-                if tag_name.startswith("category:"):
-                    tag_name = tag_name[9:]  # Remove "category:"
-                elif tag_name.startswith("attribute:"):
-                    tag_name = tag_name[10:]  # Remove "attribute:"
+        profile = neuron_profiles.get(neuron_idx, {})
+        local_support = _local_category_support(profile)
+        max_local_support = max(local_support.values(), default=0.0)
+        min_required_support = max_local_support * 0.15 if max_local_support > 0 else 0.0
 
-                top_tags.append(tag_name)
+        candidate_tags = []
+        for idx in np.argsort(-scores):
+            if scores[idx] <= 1e-6:
+                continue
+
+            tag_name = tag_names[idx]
+            if tag_name.startswith("category:"):
+                clean_name = tag_name[9:]
+            elif tag_name.startswith("attribute:"):
+                clean_name = tag_name[10:]
+            else:
+                clean_name = tag_name
+
+            if (
+                clean_name in local_support
+                and local_support[clean_name] >= min_required_support
+            ):
+                candidate_tags.append(
+                    (clean_name, float(scores[idx]), float(local_support[clean_name]))
+                )
+
+        if candidate_tags:
+            filtered_candidates = [
+                row for row in candidate_tags if row[0] not in stop_categories
+            ]
+            chosen_candidates = filtered_candidates if filtered_candidates else candidate_tags
+            chosen_candidates.sort(
+                key=lambda row: (row[2], row[1], row[1] * row[2]), reverse=True
+            )
+            top_tags = [tag for tag, _tfidf, _support in chosen_candidates[:2]]
+        else:
+            # Fallback to the strongest local categories if TF-IDF offers no grounded match.
+            local_ranked = sorted(
+                local_support.items(), key=lambda row: row[1], reverse=True
+            )
+            filtered_ranked = [
+                row for row in local_ranked if row[0] not in stop_categories
+            ]
+            chosen_ranked = filtered_ranked if filtered_ranked else local_ranked
+            top_tags = [
+                category
+                for category, _support in chosen_ranked[:2]
+            ]
 
         # Build label from top tags
         if top_tags:
@@ -321,6 +445,7 @@ def matrix_based_neuron_labeling(
     item_index_to_business_id: Dict[int, str],
     neuron_profiles: Dict[int, Dict],
     sparse_activations: torch.Tensor,
+    include_attributes: bool = False,
 ) -> Tuple[Dict[int, str], Dict[str, Any]]:
     """
     Complete matrix-based neuron labeling pipeline.
@@ -346,7 +471,11 @@ def matrix_based_neuron_labeling(
 
     # Step 1: Extract tags from categories and attributes
     print("\n1. Extracting tags from categories and attributes...")
-    tag_items = extract_tags_and_items(business_metadata, item_index_to_business_id)
+    tag_items = extract_tags_and_items(
+        business_metadata,
+        item_index_to_business_id,
+        include_attributes=include_attributes,
+    )
     print(f"   ✓ Extracted {len(tag_items)} unique tags")
 
     # Step 2: Build joint distribution matrix
@@ -373,7 +502,7 @@ def matrix_based_neuron_labeling(
     # Step 5: Generate neuron labels
     print("\n5. Generating neuron labels...")
     neuron_labels = label_neurons_from_tags(
-        label_neuron_tfidf, tag_names_sorted, neuron_profiles
+        label_neuron_tfidf, tag_names_sorted, neuron_profiles, business_metadata
     )
     print(f"   ✓ Generated {len(neuron_labels)} neuron labels")
 
@@ -382,11 +511,18 @@ def matrix_based_neuron_labeling(
         "num_tags": len(tag_names),
         "num_items": num_items,
         "num_neurons": num_neurons,
-        "tag_names": tag_names,
+        "include_attributes": include_attributes,
+        "tag_names": tag_names_sorted,
         "joint_distribution": joint_distribution,
         "tag_neuron_matrix": tag_neuron_matrix,
         "label_neuron_tfidf": label_neuron_tfidf,
+        "tag_to_neuron_tfidf": label_neuron_tfidf,
         "tag_items": tag_items,
     }
+    analysis_results["concept_mapping"] = build_concept_mapping_payload(
+        tag_names=tag_names_sorted,
+        tag_items=tag_items,
+        tag_to_neuron_tfidf=label_neuron_tfidf,
+    )
 
     return neuron_labels, analysis_results

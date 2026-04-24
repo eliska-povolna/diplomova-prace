@@ -56,7 +56,7 @@ def _show_startup_diagnostics(config: dict) -> None:
         ("Config", config.get("config_path")),
         ("Checkpoint root", config.get("model_checkpoint_dir")),
         ("DuckDB", config.get("duckdb_path")),
-        ("Parquet root", config.get("parquet_dir")),
+        ("Preprocessed data", config.get("preprocess_dir")),
     ]
 
     missing = []
@@ -108,23 +108,72 @@ try:
     logger.info("Loading configuration...")
     config = load_config(config_path)
     _show_startup_diagnostics(config)
+
+    selected_output_dir = st.session_state.get("selected_result_run_dir")
+    with st.spinner("Loading training results..."):
+        training_results = load_training_results(config, selected_output_dir)
+
+    if not selected_output_dir and training_results:
+        default_run_dir = training_results.get("default_run_dir")
+        if default_run_dir:
+            st.session_state.selected_result_run_dir = default_run_dir
+            selected_output_dir = default_run_dir
+
     with st.spinner("Loading models..."):
-        inference = load_inference_service(config)
+        inference = load_inference_service(config, selected_output_dir)
 
     with st.spinner("Loading POI data..."):
-        data = load_data_service(config)
+        data = load_data_service(config, selected_output_dir=selected_output_dir)
 
     with st.spinner("Initializing labeling service..."):
-        labels = load_labeling_service(config)
+        labels = load_labeling_service(config, selected_output_dir=selected_output_dir)
 
     with st.spinner("Initializing wordcloud service..."):
-        wordcloud = load_wordcloud_service(config)
+        wordcloud = load_wordcloud_service(config, selected_output_dir)
 
     with st.spinner("Initializing co-activation service..."):
-        coactivation = load_coactivation_service(config)
+        coactivation = load_coactivation_service(config, selected_output_dir)
 
-    with st.spinner("Loading training results..."):
-        training_results = load_training_results(config)
+    # 📋 **CRITICAL DIAGNOSTIC**: Show data sources for model vs coactivation
+    logger.info("\n" + "=" * 80)
+    logger.info("🔍 DATA SOURCE DIAGNOSTIC - Model vs Coactivation Alignment")
+    logger.info("=" * 80)
+    logger.info(
+        f"✓ Inference checkpoint dir (config): {config.get('model_checkpoint_dir')}"
+    )
+    logger.info(
+        f"✓ Inference model neurons: {inference.sae.hidden_dim} (SAE hidden_dim)"
+    )
+    logger.info(
+        f"✓ Inference sparsity (k): {inference.sae.k} (top-k neurons to activate)"
+    )
+    logger.info(
+        f"✓ Coactivation source: GCS artifacts first, local outputs/ only as offline fallback"
+    )
+    if coactivation and coactivation.coactivation_data:
+        coact_neuron_ids = [int(k) for k in coactivation.coactivation_data.keys()]
+        logger.info(
+            f"✓ Coactivation neurons: {len(coactivation.coactivation_data)} (min={min(coact_neuron_ids)}, max={max(coact_neuron_ids)})"
+        )
+    else:
+        logger.warning("⚠️ Coactivation data NOT loaded or empty")
+    logger.info("=" * 80)
+    logger.info("💡 ALIGNMENT CHECK:")
+    if coactivation and coactivation.coactivation_data:
+        coact_neuron_ids = [int(k) for k in coactivation.coactivation_data.keys()]
+        model_neurons = inference.sae.hidden_dim
+        if max(coact_neuron_ids) != model_neurons - 1:
+            logger.warning(
+                f"   ⚠️ MISMATCH: Model has {model_neurons} neurons, coactivation references up to {max(coact_neuron_ids)}"
+            )
+            logger.warning(
+                f"   → Solution: Regenerate coactivation.json in the latest run, then upload the run artifacts to GCS"
+            )
+        else:
+            logger.info(
+                f"   ✅ Aligned: Model ({model_neurons} neurons) matches coactivation data"
+            )
+    logger.info("=" * 80 + "\n")
 
     with st.spinner("Loading semantic search model..."):
         semantic_search_model = load_semantic_search_model()

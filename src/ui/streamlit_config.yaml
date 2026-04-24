@@ -25,7 +25,6 @@ model:
 # Data configuration
 data:
   # Yelp data paths
-  parquet_dir: "../../Yelp-JSON/yelp_parquet"
   db_path: "../../Yelp-JSON/yelp.duckdb"
   
   # Data filters (must match training)

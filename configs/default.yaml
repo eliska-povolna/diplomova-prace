@@ -1,11 +1,9 @@
 # Default configuration for ELSA + TopK SAE training pipeline
-# Hyperparameters match src/yelp_initial_exploration/ reference code
 #
 # Usage: python src/train.py --config configs/default.yaml
 
 # Data configuration
 data:
-  parquet_dir: "../../Yelp-JSON/yelp_parquet"
   db_path: "../../Yelp-JSON/yelp.duckdb"
   state_filter: "PA"                    # Set to "CA", "PA", null for full dataset
   min_review_count: 20
@@ -19,7 +17,7 @@ data:
 # ELSA model configuration
 elsa:
   latent_dim: 512
-  learning_rate: 0.0003              # 3e-4
+  learning_rate: 3e-4
   batch_size: 1024
   num_epochs: 25
   patience: 10
@@ -30,12 +28,12 @@ elsa:
 sae:
   width_ratio: 2                        # hidden_dim = width_ratio * latent_dim (reduced from 4 to 2: 1024 neurons instead of 2048)
   k: 32                                 # Sparsity: keep top-k activations
-  learning_rate: 0.0003              # 3e-4
-  l1_coef: 0.0003                    # 3e-4
+  learning_rate: 3e-4
+  l1_coef: 3e-4
   batch_size: 1024
   num_epochs: 50
   patience: 10
-  min_delta: 0.0001                  # 1e-4
+  min_delta: 1e-4
   device: "cpu"                        # or "cuda"
 
 # Output configuration
