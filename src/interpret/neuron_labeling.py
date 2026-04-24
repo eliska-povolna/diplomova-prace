@@ -17,6 +17,16 @@ logger = logging.getLogger(__name__)
 
 STOP_CATEGORIES = {"Restaurants", "Food"}
 
+
+def _rank_categories(
+    category_counts: dict, max_tags_per_neuron: int = 3
+) -> list[str]:
+    """Return top categories, preferring specific labels over generic stop categories."""
+    ranked = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
+    specific = [(cat, score) for cat, score in ranked if cat not in STOP_CATEGORIES]
+    chosen = specific if specific else ranked
+    return [tag for tag, _count in chosen[:max_tags_per_neuron]]
+
 # Try to import secrets helper for Streamlit integration
 try:
     from src.ui.services.secrets_helper import get_google_api_key
@@ -175,7 +185,7 @@ class TagBasedLabeler(NeuronLabeler):
                 continue
 
             # Create label
-            tag_names = _rank_categories(category_counts)
+            tag_names = _rank_categories(category_counts, self.max_tags_per_neuron)
             label = " and ".join(tag_names)
             labels[neuron_idx] = label[:100]  # Limit length
 
@@ -332,13 +342,6 @@ Representative user reviews:
         """Label neurons using Gemini API."""
         labels = {}
 
-        def _rank_categories(category_counts: dict) -> list[str]:
-            ranked = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
-            specific = [
-                (cat, score) for cat, score in ranked if cat not in STOP_CATEGORIES
-            ]
-            chosen = specific if specific else ranked
-            return [tag for tag, _count in chosen[: self.max_tags_per_neuron]]
         total = len(neuron_profiles)
         successes = 0
 

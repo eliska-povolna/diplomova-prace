@@ -196,29 +196,30 @@ def show_actual_results(results: dict):
             metrics_data = []
 
             # Ranking metrics at k=20
-            for metric_name in [
-                "recall",
-                "precision",
-                "hit_rate",
-                "ndcg",
-                "mrr",
-                "map",
-            ]:
-                if metric_name in ranking_metrics:
-                    metric_key = (
-                        "@20"
-                        if isinstance(ranking_metrics[metric_name], dict)
-                        else None
+            metric_sources = [
+                ("recall", "RECALL@20"),
+                ("precision", "PRECISION@20"),
+                ("hr", "HIT RATE@20"),  # Primary key from evaluation pipeline
+                ("ndcg", "NDCG@20"),
+                ("mrr", "MRR@20"),
+                ("map", "MAP@20"),
+            ]
+
+            for metric_name, metric_label in metric_sources:
+                metric_values = ranking_metrics.get(metric_name)
+                # Backward-compatible fallback
+                if metric_values is None and metric_name == "hr":
+                    metric_values = ranking_metrics.get("hit_rate")
+
+                if isinstance(metric_values, dict):
+                    value = metric_values.get("@20", 0)
+                    metrics_data.append(
+                        {
+                            "Metric": metric_label,
+                            "Value": f"{value:.4f}",
+                            "Score": value,
+                        }
                     )
-                    if isinstance(ranking_metrics[metric_name], dict):
-                        value = ranking_metrics[metric_name].get("@20", 0)
-                        metrics_data.append(
-                            {
-                                "Metric": f"{metric_name.upper()}@20",
-                                "Value": f"{value:.4f}",
-                                "Score": value,
-                            }
-                        )
 
             # Coverage and entropy
             if "coverage" in ranking_metrics:

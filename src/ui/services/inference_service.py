@@ -849,12 +849,15 @@ class InferenceService:
 
         with torch.no_grad():
             scores = z_final @ self.elsa._A_norm.T
-            # When filtering is active, fetch more to ensure we get enough valid items
-            # Use a heuristic: if filtering, assume ~70% will be valid, so fetch ~1.5x
-            fetch_size = int(top_k * 1.5) if valid_item_ids else top_k
-            top_scores, top_indices = torch.topk(
-                scores, k=min(fetch_size, scores.shape[0])
-            )
+            if valid_item_ids:
+                # For filtered recommendation lists, rank all items first so we can
+                # reliably fill top_k even when many candidates are filtered out.
+                top_indices = torch.argsort(scores, descending=True)
+                top_scores = scores[top_indices]
+            else:
+                top_scores, top_indices = torch.topk(
+                    scores, k=min(top_k, scores.shape[0])
+                )
 
             # Get SAE activations for attribution
             h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze(0)

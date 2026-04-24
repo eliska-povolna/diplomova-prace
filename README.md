@@ -334,8 +334,13 @@ sae:
 - In cloud runs, the same artifacts are uploaded to GCS automatically when `GCS_BUCKET_NAME` is configured.
 - `checkpoints/` — Trained models
 - `metrics/` — Training logs
-- `summary.json` — Training config + results
+- `summary.json` — Training config + the canonical evaluation metrics used by the Results page
+- `data/shared_data_manifest.json` — Pointer to the shared preprocessing cache used by the run
+- `data/train_user_ids.json`, `data/test_user_ids.json`, `data/val_user_ids.json` — Run-specific split artifacts
+- `data/test_holdout_input.npz`, `data/test_holdout_target.npz` — Exact replay artifacts for deterministic post-hoc evaluation
 - `precomputed_ui_cache/` — Optional UI cache for word clouds, neuron stats, and test user embeddings
+
+Heavy shared preprocessing artifacts are stored once under `outputs/_shared_preprocessed/<cache_key>/` and referenced from each run, rather than duplicated into every run directory.
 
 **Expected duration:** 5-30 minutes (depends on data size and hardware)
 
@@ -359,6 +364,7 @@ python -m src.label
 - **Matrix-based**: builds a category-neuron association matrix from the real sparse activations and applies TF-IDF to find the categories that best characterize each neuron while staying grounded in that neuron's top-activating businesses. This is the statistical baseline.
 - **LLM-based**: sends the strongest examples and their categories to Google Gemini, which returns a semantic label in plain language. This usually produces the most natural descriptions, but it depends on the API key and is slower than the other methods. The prompt templates live in [src/interpret/prompts.py](src/interpret/prompts.py#L3) for neuron labels and [src/interpret/prompts.py](src/interpret/prompts.py#L17) for superfeature labels.
 - **Review-based LLM**: extends the LLM prompt with top useful review snippets from the highest-activating businesses, so the label can capture atmosphere and user-experience details that categories alone miss.
+  This method requires the saved review artifact to contain `business_id`, `text`, `useful`, and `stars`.
 
 **Optional LLM API:**
 - `GOOGLE_API_KEY` in `.env` or `.streamlit/secrets.toml` (for Gemini-based neuron labeling)
@@ -379,13 +385,13 @@ python -m src.label
 
 ### Stage 4: Evaluate
 
-Compute ranking and model quality metrics on test set:
+Re-run deterministic ranking and model quality evaluation for a saved run:
 
 ```bash
 python -m src.evaluate
 ```
 
-This auto-detects the latest complete run and evaluates on the test set.
+This auto-detects the latest complete run and validates it on the saved test split. The canonical metrics shown in the Results page still come from the training-time `summary.json`; `src.evaluate` is the post-hoc verifier / refresher.
 
 **What it computes:**
 - **Ranking metrics** @ K=5, 10, 20:
@@ -401,10 +407,14 @@ This auto-detects the latest complete run and evaluates on the test set.
 **Advanced usage:**
 ```bash
 python -m src.evaluate --checkpoint outputs/YYYYMMDD_HHMMSS --split test
+python -m src.evaluate --checkpoint outputs/YYYYMMDD_HHMMSS --split test --sync-summary --sync-experiment-manifest
 ```
 
 **Output:**
-- `outputs/YYYYMMDD_HHMMSS/evaluation_test.json` — All metrics
+- `outputs/YYYYMMDD_HHMMSS/evaluation_test.json` — Post-hoc evaluation results
+- Optionally refreshes `summary.json` and the experiment manifest when `--sync-summary` / `--sync-experiment-manifest` are used
+
+`src.evaluate` prefers the exact saved holdout replay artifacts from the training run. If those artifacts are missing, it falls back to reconstructed holdout evaluation and marks the result as non-canonical.
 
 **Analysis:**
 See [Evaluation Analysis Notebook](#notebooks-for-exploration) for detailed visualizations and interpretation.
@@ -678,6 +688,8 @@ Deployed version: [https://explainable-steerable-poi-recommendations.streamlit.a
 - Steering sliders for each neuron
 - Concept steering from saved matrix-based concept mappings
 - Superfeature steering from saved LLM-grouped feature families
+- Steering updates the existing activation chart in place
+- Steering updates the recommendation list and map from the same saved recommendation state
 - Top-K recommendations list
 - POI details (name, category, rating, reviews)
 - Photo gallery (if Yelp photos available)

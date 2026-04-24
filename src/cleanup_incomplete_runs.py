@@ -110,7 +110,9 @@ def cleanup_incomplete_runs(
     logger.info(f"Found {len(incomplete_runs)} incomplete training runs")
 
     space_freed = 0
+    would_free = 0
     deleted_count = 0
+    would_delete_count = 0
     kept_count = 0
 
     for idx, run_dir in enumerate(incomplete_runs):
@@ -127,6 +129,10 @@ def cleanup_incomplete_runs(
 
         logger.info(f"  [{action}] {run_dir.name} ({size_mb:.1f} MB)")
 
+        if not is_recent:
+            would_delete_count += 1
+            would_free += size_mb
+
         if delete and not is_recent:
             try:
                 logger.info(f"     Deleting {run_dir.name}...")
@@ -141,8 +147,10 @@ def cleanup_incomplete_runs(
     summary = {
         "total_incomplete": len(incomplete_runs),
         "deleted": deleted_count,
+        "would_delete": would_delete_count,
         "kept": kept_count,
         "space_freed_mb": round(space_freed, 1),
+        "would_free_mb": round(would_free, 1),
     }
 
     if delete:
@@ -152,7 +160,7 @@ def cleanup_incomplete_runs(
         logger.info(f"  Space freed: {space_freed:.1f} MB")
     else:
         logger.info(
-            f"\n(Dry-run mode) Would delete {deleted_count} runs and free {space_freed:.1f} MB"
+            f"\n(Dry-run mode) Would delete {would_delete_count} runs and free {would_free:.1f} MB"
         )
         logger.info("Run with --delete to actually remove the incomplete runs")
 
