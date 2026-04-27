@@ -79,7 +79,9 @@ def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
         name = path.name
         if len(name) == 15 and name.isdigit():
             return name
-        else: logger.warning("Run timestamp was not parsed successfully.")
+        elif path[:-15].isdigit():
+            return path[:-15]
+        else: logger.warning(f"Run timestamp was not parsed successfully: {name}.")
     except Exception:
         return None
     return None
