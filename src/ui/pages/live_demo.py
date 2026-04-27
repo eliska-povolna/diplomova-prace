@@ -8,7 +8,7 @@ import json
 import logging
 from io import BytesIO
 from typing import Dict, List, Optional
-
+from scipy.sparse import csr_matrix
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
@@ -220,6 +220,7 @@ def render_steering_tabs(
     inference,
     data,
     activations: List[Dict],
+    global_alpha
 ) -> None:
     """Render neuron steering and concept steering in separate tabs."""
     tab_neuron, tab_concept = st.tabs(["Neuron Steering", "Concept Steering"])
@@ -230,6 +231,7 @@ def render_steering_tabs(
             inference=inference,
             data=data,
             activations=activations,
+            global_alpha=global_alpha
         )
 
     with tab_concept:
@@ -246,6 +248,7 @@ def _render_steering_and_recommendations(
     inference,
     data,
     activations: List[Dict],
+    global_alpha
 ) -> None:
     """Generate recommendations with interactive feature steering controls."""
     info_section(
@@ -260,12 +263,12 @@ def _render_steering_and_recommendations(
 
     st.markdown(
         """
-Steer your preferences using this formula:
+Steer your preferences using this formula in the latent space:
 `z_final = (1 - alpha) * z_user + alpha * z_steered`
 
 - You can set your preference for these concepts using the sliders below.
 - `alpha` controls how strongly steering influences the final ranking (if it is set to 0, no steering will be applied.)
-- You can see the current and steered activation value of activations under each slider.
+- You can see the current and steered activation value under each slider.
 - For each label, concept presence ratio is computed, so you can see whether that feature is actually present in the recommendation set. (Unavailable for LLM features.)
 """
     )
@@ -315,7 +318,7 @@ Steer your preferences using this formula:
                 st.markdown(f"**{formatted_label}**")
                 slider_col, learn_col = st.columns([5, 1])
                 with slider_col:
-                    target_activation = st.slider(
+                    user_profile = st.slider(
                         "Set your preference:",
                         min_value=-1.0,
                         max_value=2.0,
@@ -339,8 +342,8 @@ Steer your preferences using this formula:
                         if interpretability_page:
                             st.switch_page(interpretability_page)
 
-                if abs(target_activation - current_val) > 1e-9:
-                    merged_neuron_values[neuron_idx] = float(target_activation)
+                if abs(user_profile - current_val) > 1e-9:
+                    merged_neuron_values[neuron_idx] = float(user_profile)
                 else:
                     merged_neuron_values.pop(neuron_idx, None)
                 if len(merged_neuron_values) > 0:
@@ -348,7 +351,7 @@ Steer your preferences using this formula:
                         blended_activation = inference.get_steered_neuron_activation(
                             selected_user,
                             neuron_idx,
-                            float(target_activation),
+                            float(user_profile),
                         )
                     except Exception as e:
                         logger.error("Could not compute blended activation.")
@@ -359,7 +362,7 @@ Steer your preferences using this formula:
                         )
                     )
 
-                if abs(float(target_activation) - prior_value) > 1e-9:
+                if abs(float(user_profile) - prior_value) > 1e-9:
                     slider_patch_applied = True
 
     st.session_state[sliders_sync_key] = False
@@ -1014,9 +1017,6 @@ def show():
                         )
 
                         # Create sparse CSR matrix from POI indices (1 row, n_items columns)
-                        import numpy as np
-                        from scipy.sparse import csr_matrix
-
                         row = np.zeros(len(poi_indices), dtype=int)  # All row 0
                         col = np.array(poi_indices, dtype=int)  # POI indices as columns
                         data_vals = np.ones(len(poi_indices), dtype=np.float32)
@@ -1106,6 +1106,7 @@ def show():
             inference=inference,
             data=data,
             activations=activations,
+            global_alpha=global_alpha
         )
         displayed_recommendations = st.session_state.get(
             _demo_state_key(selected_user, "displayed_recommendations"),
