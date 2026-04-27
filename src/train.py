@@ -992,7 +992,7 @@ def precompute_user_csr_matrices(
             for gcs_path in gcs_paths:
                 blob = cloud_storage.bucket.blob(gcs_path)
                 blob.upload_from_filename(str(local_path))
-                logger.info(f"âś… Uploaded to gs://{gcs_bucket_name}/{gcs_path}")
+                logger.info(f"✓ Uploaded to gs://{gcs_bucket_name}/{gcs_path}")
         except Exception as e:
             logger.warning(f"⚠️ Cloud upload failed (app will use local file): {e}")
 

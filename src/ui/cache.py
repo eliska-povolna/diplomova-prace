@@ -854,7 +854,7 @@ def _load_local_experiment_results(outputs_base: Path) -> Dict:
             )
             logger.warning(results["startup_notice"])
 
-        logger.info("âś… Loaded experiment manifest from local: %s", experiment_dir)
+        logger.info("✓ Loaded experiment manifest from local: %s", experiment_dir)
         return results
 
     raise _strict_runtime_error(
@@ -1106,7 +1106,7 @@ def load_config(config_path: Path) -> Dict:
     # Include state_filter in config for DataService
     config["state_filter"] = raw_config.get("data", {}).get("state_filter")
 
-    logger.info(f"âś… Loaded config from {config_path}")
+    logger.info(f"✓ Loaded config from {config_path}")
     logger.info(
         f"   Device: {config['device']}, Latent dim: {config['latent_dim']}, SAE k: {config['k']}"
     )
@@ -1250,7 +1250,7 @@ def get_precomputed_cache_dir() -> Optional[Path]:
     for output_dir in output_dirs:
         cache_dir = output_dir / "precomputed_ui_cache" / "neuron_wordclouds"
         if cache_dir.exists():
-            logger.info(f"âś“ Found precomputed cache at {cache_dir}")
+            logger.info(f"✓ Found precomputed cache at {cache_dir}")
             return cache_dir
 
     logger.info("No precomputed cache found (app will compute on-demand)")
@@ -1396,7 +1396,7 @@ def load_semantic_search_model():
         from sentence_transformers import SentenceTransformer
 
         model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("âś… Semantic search model loaded and cached")
+        logger.info("✓ Semantic search model loaded and cached")
         return model
     except Exception as e:
         logger.warning(f"Could not load semantic search model: {e}")
@@ -1418,7 +1418,7 @@ def cache_all_label_embeddings(labels_service, max_neuron: int):
     # Return cached version if available
     if cache_key in st.session_state and st.session_state[cache_key] is not None:
         logger.info(
-            f"âś… Using cached label embeddings: {len(st.session_state[cache_key])} embeddings"
+            f"✓ Using cached label embeddings: {len(st.session_state[cache_key])} embeddings"
         )
         return st.session_state[cache_key]
 
@@ -1465,7 +1465,7 @@ def cache_all_label_embeddings(labels_service, max_neuron: int):
         # Cache in session state
         st.session_state[cache_key] = embeddings_dict
         logger.info(
-            f"âś… Cached {len(embeddings_dict)} label embeddings in session state"
+            f"✓ Cached {len(embeddings_dict)} label embeddings in session state"
         )
         return embeddings_dict
 

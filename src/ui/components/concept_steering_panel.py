@@ -1,48 +1,96 @@
 """Concept and superfeature steering UI for Streamlit.
 
-This panel reads saved interpretability artifacts and applies steering at inference time.
-It does not retrain models or regenerate labels.
+This panel reads saved interpretability artifacts and prepares draft steering
+updates. It does not retrain models or regenerate labels.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, Optional, Tuple
 
 import streamlit as st
 
-from src.ui.steering_state import get_steering_config, set_steering_config
+from src.ui.steering_state import get_steering_config
 
 logger = logging.getLogger(__name__)
 
 
-def _merge_neuron_values(
-    existing_neuron_values: Dict[int, float],
-    patch_neuron_values: Dict[int, float],
+def _format_similarity_explanation(similarity: float) -> str:
+    """Return short interpretation text for cosine similarity."""
+    if similarity >= 0.75:
+        return "Very strong semantic match"
+    if similarity >= 0.55:
+        return "Strong semantic match"
+    if similarity >= 0.35:
+        return "Moderate semantic match"
+    if similarity >= 0.15:
+        return "Weak semantic match"
+    if similarity >= 0.0:
+        return "Very weak semantic match"
+    return "Opposite semantic direction"
+
+
+def _build_adjusted_weights(
+    base_weights: Dict[int, float],
+    key_prefix: str,
 ) -> Dict[int, float]:
-    """Merge steering updates into the canonical neuron map.
+    """Build neuron steering weights from per-neuron UI controls."""
+    if not base_weights:
+        return {}
 
-    Patch semantics:
-    - Incoming values overwrite existing neuron targets.
-    - Near-zero values remove neurons from the final map.
-    - Invalid keys/values are ignored.
+    global_scale = st.slider(
+        "Overall concept strength",
+        min_value=0.0,
+        max_value=2.0,
+        value=1.0,
+        step=0.05,
+        key=f"{key_prefix}::global_scale",
+        help="Scales all neurons from this concept before adding them to draft.",
+    )
 
-    This keeps concept/superfeature steering and manual neuron slider edits
-    additive, so both mechanisms operate on the same canonical state.
-    """
-    merged = dict(existing_neuron_values or {})
-    for raw_idx, raw_value in (patch_neuron_values or {}).items():
-        try:
-            neuron_idx = int(raw_idx)
-            weight = float(raw_value)
-        except (TypeError, ValueError):
-            continue
+    max_neurons = min(20, len(base_weights))
+    visible_neurons = st.slider(
+        "Neurons to fine-tune",
+        min_value=1,
+        max_value=max_neurons,
+        value=min(8, max_neurons),
+        step=1,
+        key=f"{key_prefix}::visible_neurons",
+        help="Shows top neurons by absolute weight for manual control.",
+    )
 
-        if abs(weight) < 1e-9:
-            merged.pop(neuron_idx, None)
-        else:
-            merged[neuron_idx] = weight
-    return merged
+    sorted_items = sorted(
+        ((int(idx), float(weight)) for idx, weight in base_weights.items()),
+        key=lambda item: abs(item[1]),
+        reverse=True,
+    )
+    selected_items = sorted_items[:visible_neurons]
+
+    adjusted = dict(base_weights)
+    with st.expander("Fine-tune individual neuron influence", expanded=False):
+        st.caption(
+            "Set multiplier per neuron. 1.0 keeps original concept weight, "
+            "0.0 removes neuron from this concept patch."
+        )
+        for neuron_idx, base_weight in selected_items:
+            multiplier = st.slider(
+                f"Neuron {neuron_idx} (base {base_weight:+.3f})",
+                min_value=0.0,
+                max_value=2.0,
+                value=1.0,
+                step=0.05,
+                key=f"{key_prefix}::neuron_scale::{neuron_idx}",
+            )
+            adjusted[neuron_idx] = float(base_weight) * float(multiplier)
+
+    output = {}
+    for neuron_idx, weight in adjusted.items():
+        scaled = float(weight) * float(global_scale)
+        if abs(scaled) >= 1e-9:
+            output[int(neuron_idx)] = scaled
+
+    return output
 
 
 def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
@@ -110,23 +158,23 @@ def render_concept_steering_panel(
     config: dict,
     session_state,
     selected_user: str | None = None,
-):
-    """Render concept/superfeature steering and apply it live."""
+) -> Optional[Dict[int, float]]:
+    """Render concept steering selector and return draft neuron updates."""
     labels_service = session_state.get("labels")
     selected_user = selected_user or session_state.get("current_user_id")
 
     if not labels_service:
         st.error("Labeling service not initialized.")
-        return
+        return None
     if not selected_user:
         st.info("Select a user first to try concept steering.")
-        return
+        return None
 
     try:
         from src.models.concept_steering import ConceptSteering
     except ImportError:
         st.error("Concept steering search dependencies are not installed.")
-        return
+        return None
 
     st.markdown("## Concept Steering")
     st.caption(
@@ -140,12 +188,16 @@ Search for a concept in plain language, inspect the matching concepts or grouped
 and apply steering through the same hidden-space mechanism used for direct neuron steering.
 """
     )
+    st.caption(
+        "Similarity is cosine similarity between your query embedding and concept label "
+        "embedding, usually in range -1 to 1, where higher means closer semantics."
+    )
 
     selected_method = labels_service.selected_method
     search_index = _build_search_index(labels_service, selected_method)
     if not search_index:
         st.info("No concepts or labels available for this method yet.")
-        return
+        return None
 
     search_cache_key = f"concept_search::{selected_method}"
     cached = session_state.get(search_cache_key)
@@ -176,16 +228,17 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         st.info(
             "Enter a concept to search the saved concept mappings, superfeatures, or neuron labels."
         )
-        return
+        return None
 
     results = search_engine.find_related_neurons(query, top_k=top_k)
     if not results:
         st.warning("No matching concepts found.")
-        return
+        return None
 
     chosen_entity = None
-    chosen_weights = {}
+    chosen_weights: Dict[int, float] = {}
     chosen_type = "concept"
+    chosen_similarity = 0.0
     existing_config = get_steering_config(session_state, selected_user) or {}
     active_alpha = float(existing_config.get("alpha", 0.3))
 
@@ -203,7 +256,8 @@ and apply steering through the same hidden-space mechanism used for direct neuro
             st.write(f"**{resolved_label}**")
             st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
         with columns[2]:
-            st.write(f"{similarity:.3f}")
+            st.write(f"Similarity: {similarity:.3f}")
+            st.caption(_format_similarity_explanation(float(similarity)))
         with columns[3]:
             if st.checkbox(
                 "Select concept",
@@ -213,39 +267,46 @@ and apply steering through the same hidden-space mechanism used for direct neuro
                 chosen_entity = str(entity_id)
                 chosen_weights = neuron_weights
                 chosen_type = entity_type
+                chosen_similarity = float(similarity)
 
     st.caption(f"Using global steering alpha: {active_alpha:.2f}")
 
     if not chosen_weights:
-        st.info("Select one result to apply steering.")
-        return
+        st.info("Select one result to add concept weights into steering draft.")
+        return None
 
-    if st.button("Apply Concept Steering", key=f"apply_concept_{selected_method}"):
-        merged_neuron_values = _merge_neuron_values(
-            dict(existing_config.get("neuron_values") or {}),
-            chosen_weights,
-        )
+    adjusted_weights = _build_adjusted_weights(
+        chosen_weights,
+        key_prefix=f"concept_adjust::{selected_method}::{chosen_entity}",
+    )
 
-        source = chosen_type
-
-        provenance = dict(existing_config.get("provenance") or {})
-        provenance = {
-            **provenance,
-            "method": selected_method,
-            "entity_id": chosen_entity,
-            "entity_type": chosen_type,
-            "query": query,
+    auto_scale_similarity = st.checkbox(
+        "Auto-scale by similarity",
+        value=True,
+        key=f"concept_auto_scale_similarity::{selected_method}",
+        help="If enabled, concept neuron weights are multiplied by the selected match similarity.",
+    )
+    if auto_scale_similarity:
+        adjusted_weights = {
+            int(neuron_idx): float(weight) * float(chosen_similarity)
+            for neuron_idx, weight in adjusted_weights.items()
+            if abs(float(weight) * float(chosen_similarity)) >= 1e-9
         }
-        set_steering_config(
-            session_state,
-            selected_user,
-            neuron_values=merged_neuron_values,
-            alpha=active_alpha,
-            source=source,
-            provenance=provenance,
+        st.caption(
+            f"Similarity scaling applied: x {chosen_similarity:.3f} to all selected concept weights."
         )
-        session_state[f"live_demo::{selected_user}::sync_sliders_from_config"] = True
+
+    st.caption(
+        f"Prepared draft patch: {len(adjusted_weights)} neurons after scaling controls."
+    )
+
+    if st.button(
+        "Add Selected Concept to Draft", key=f"apply_concept_{selected_method}"
+    ):
         st.success(
-            f"Applied {chosen_type} steering using {len(chosen_weights)} targets "
-            f"(merged config now has {len(merged_neuron_values)} neurons)."
+            f"Added {chosen_type} steering draft with {len(adjusted_weights)} neuron targets. "
+            "Click Apply Steering below tabs to recompute recommendations."
         )
+        return dict(adjusted_weights)
+
+    return None

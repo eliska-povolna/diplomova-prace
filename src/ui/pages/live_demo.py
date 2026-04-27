@@ -78,6 +78,27 @@ def _demo_state_key(selected_user: str, suffix: str) -> str:
     return f"live_demo::{selected_user}::{suffix}"
 
 
+def merge_steering_vectors(
+    neuron_values: Dict[int, float],
+    concept_neuron_values: Dict[int, float],
+) -> Dict[int, float]:
+    """Combine steering sources by summing neuron-level contributions."""
+    merged = dict(neuron_values or {})
+    for raw_idx, raw_value in (concept_neuron_values or {}).items():
+        try:
+            neuron_idx = int(raw_idx)
+            weight = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+
+        merged[neuron_idx] = float(merged.get(neuron_idx, 0.0)) + weight
+
+        if abs(merged[neuron_idx]) < 1e-9:
+            merged.pop(neuron_idx, None)
+
+    return merged
+
+
 def _set_demo_recommendation_state(
     selected_user: str,
     *,
@@ -143,6 +164,10 @@ def _clear_demo_steering_state(selected_user: str) -> None:
     st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = None
     st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
     st.session_state[_demo_state_key(selected_user, "steering_hash")] = ""
+    st.session_state[_demo_state_key(selected_user, "draft_neuron_values")] = {}
+    st.session_state[_demo_state_key(selected_user, "draft_concept_neuron_values")] = {}
+    st.session_state[_demo_state_key(selected_user, "draft_source")] = None
+    st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
     st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
     st.session_state.current_recommendations = base
     st.session_state.steering_modified = False
@@ -218,39 +243,37 @@ def _render_active_features_section(
 def render_steering_tabs(
     selected_user: str,
     inference,
-    data,
     activations: List[Dict],
-    global_alpha
 ) -> None:
-    """Render neuron steering and concept steering in separate tabs."""
+    """Render neuron/concept steering tabs that only update draft state."""
     tab_neuron, tab_concept = st.tabs(["Neuron Steering", "Concept Steering"])
 
     with tab_neuron:
-        _render_steering_and_recommendations(
+        _render_neuron_steering_draft(
             selected_user=selected_user,
             inference=inference,
-            data=data,
             activations=activations,
-            global_alpha=global_alpha
         )
 
     with tab_concept:
-        render_concept_steering_panel(
+        concept_draft = render_concept_steering_panel(
             inference_service=inference,
             config=getattr(inference, "config", {}),
             session_state=st.session_state,
             selected_user=selected_user,
         )
+        if concept_draft:
+            st.session_state[
+                _demo_state_key(selected_user, "draft_concept_neuron_values")
+            ] = dict(concept_draft)
 
 
-def _render_steering_and_recommendations(
+def _render_neuron_steering_draft(
     selected_user: str,
     inference,
-    data,
     activations: List[Dict],
-    global_alpha
 ) -> None:
-    """Generate recommendations with interactive feature steering controls."""
+    """Render neuron sliders that only write pending draft steering values."""
     info_section(
         "Steer Your Preferences",
         "Set target activations for your top features. The model blends baseline and steered "
@@ -275,9 +298,6 @@ Steer your preferences using this formula in the latent space:
 
     active_config = get_steering_config(st.session_state, selected_user) or {}
     existing_neuron_values = dict(active_config.get("neuron_values") or {})
-    active_source = str(active_config.get("source", "neuron"))
-    active_provenance = dict(active_config.get("provenance") or {})
-
     try:
         current_activations = inference.get_user_steering(selected_user)
     except ValueError as e:
@@ -288,10 +308,11 @@ Steer your preferences using this formula in the latent space:
     top_features = activations[:num_features_to_display]
     cols_per_row = 3
 
-    merged_neuron_values = dict(existing_neuron_values)
+    draft_key = _demo_state_key(selected_user, "draft_neuron_values")
+    existing_draft_values = dict(st.session_state.get(draft_key, {}) or {})
+    merged_draft_values = dict(existing_draft_values)
     sliders_sync_key = _demo_state_key(selected_user, "sync_sliders_from_config")
     sync_sliders = bool(st.session_state.get(sliders_sync_key, False))
-    slider_patch_applied = False
 
     for row_idx in range(0, len(top_features), cols_per_row):
         cols = st.columns(cols_per_row)
@@ -307,7 +328,12 @@ Steer your preferences using this formula in the latent space:
                 current_activations.get(neuron_idx, feature.get("activation", 0.0))
             )
             slider_key = f"slider_{neuron_idx}_{selected_user}"
-            prior_value = float(existing_neuron_values.get(neuron_idx, current_val))
+            active_or_current_value = float(
+                existing_neuron_values.get(neuron_idx, current_val)
+            )
+            prior_value = float(
+                existing_draft_values.get(neuron_idx, active_or_current_value)
+            )
             prior_value = max(-1.0, min(2.0, prior_value))
             if sync_sliders or slider_key not in st.session_state:
                 st.session_state[slider_key] = prior_value
@@ -341,50 +367,36 @@ Steer your preferences using this formula in the latent space:
                         if interpretability_page:
                             st.switch_page(interpretability_page)
 
-                if abs(user_profile - current_val) > 1e-9:
-                    merged_neuron_values[neuron_idx] = float(user_profile)
+                if abs(float(user_profile) - active_or_current_value) > 1e-9:
+                    merged_draft_values[neuron_idx] = float(user_profile)
                 else:
-                    merged_neuron_values.pop(neuron_idx, None)
-                if len(merged_neuron_values) > 0:
+                    merged_draft_values.pop(neuron_idx, None)
+
+                if len(existing_neuron_values) > 0:
+                    blended_activation = current_val
                     try:
                         blended_activation = inference.get_steered_neuron_activation(
                             selected_user,
                             neuron_idx,
                             float(user_profile),
                         )
-                    except Exception as e:
+                    except Exception:
                         logger.error("Could not compute blended activation.")
 
                     st.caption(
-                        (   
+                        (
                             f"📊 Activation value: {current_val:.2f} → activation: {blended_activation:.2f}"
                         )
                     )
 
-                if abs(float(user_profile) - prior_value) > 1e-9:
-                    slider_patch_applied = True
+    st.session_state[draft_key] = merged_draft_values
+    if merged_draft_values:
+        st.caption(f"Pending neuron draft updates: {len(merged_draft_values)}")
 
     st.session_state[sliders_sync_key] = False
     st.divider()
 
-    source = "neuron" if slider_patch_applied else active_source
-    provenance = dict(active_provenance)
-    if slider_patch_applied:
-        provenance["edited_in"] = "neuron_panel"
-
-    steering_config = set_steering_config(
-        st.session_state,
-        selected_user,
-        neuron_values=merged_neuron_values,
-        alpha=global_alpha,
-        source=source,
-        provenance=provenance,
-    )
-
-    # Flag that steering was just updated, so display code reruns
-    if slider_patch_applied > 0:
-        st.session_state[_demo_state_key(selected_user, "steering_just_updated")] = True
-        st.rerun()
+    steering_config = active_config
 
     if steering_config:
         try:
@@ -415,7 +427,11 @@ Steer your preferences using this formula in the latent space:
         )
         st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
 
+
+def _recompute_recommendations_shared(selected_user: str, inference, data) -> None:
+    """Compute/display recommendation state based on active steering config only."""
     try:
+        steering_config = get_steering_config(st.session_state, selected_user)
         steering_hash_key = _demo_state_key(selected_user, "steering_hash")
         current_hash = steering_config_hash(steering_config)
         previous_hash = st.session_state.get(steering_hash_key, "")
@@ -428,7 +444,6 @@ Steer your preferences using this formula in the latent space:
         valid_item_ids = data.get_valid_item_ids()
 
         baseline_recommendations = current_base
-        is_first_load = baseline_recommendations is None
         if baseline_recommendations is None:
             logger.info("Computing baseline recommendations (first load)")
             num_recommendations = st.session_state.get(
@@ -1087,6 +1102,9 @@ def show():
 
         active_config = get_steering_config(st.session_state, selected_user) or {}
         active_alpha = float(active_config.get("alpha", 0.3))
+        draft_key = _demo_state_key(selected_user, "draft_neuron_values")
+        if draft_key not in st.session_state:
+            st.session_state[draft_key] = {}
 
         global_alpha = st.slider(
             "Global steering alpha",
@@ -1096,24 +1114,121 @@ def show():
             step=0.05,
             help="Shared steering strength used by both neuron and concept steering.",
         )
-        st.caption(f"Current shared alpha: {global_alpha:.2f}")
+        st.caption(f"The influence of steering: {global_alpha/100:.2f} %")
         # ===================================================================
-        # Section 2: Steering Sliders & Recommendations (isolated fragment)
+        # Section 2: Steering Inputs (draft only)
         # ===================================================================
         render_steering_tabs(
             selected_user=selected_user,
             inference=inference,
-            data=data,
             activations=activations,
-            global_alpha=global_alpha
         )
+
+        draft_neuron_values = dict(st.session_state.get(draft_key, {}) or {})
+        concept_draft_key = _demo_state_key(selected_user, "draft_concept_neuron_values")
+        draft_concept_neuron_values = dict(
+            st.session_state.get(concept_draft_key, {}) or {}
+        )
+        has_pending_neuron_draft = bool(draft_neuron_values)
+        has_pending_concept_draft = bool(draft_concept_neuron_values)
+        has_pending_alpha = bool(active_config) and abs(global_alpha - active_alpha) > 1e-9
+        has_pending_changes = (
+            has_pending_neuron_draft or has_pending_concept_draft or has_pending_alpha
+        )
+
+        if has_pending_neuron_draft:
+            st.caption(
+                f"Pending steering draft: {len(draft_neuron_values)} neuron update(s)."
+            )
+        if has_pending_concept_draft:
+            st.caption(
+                f"Pending concept draft: {len(draft_concept_neuron_values)} neuron contribution(s)."
+            )
+
+        if st.button(
+            "Apply Steering",
+            key=f"apply_steering_{selected_user}",
+            disabled=not has_pending_changes,
+            width="stretch",
+        ):
+            active_neuron_values = dict(active_config.get("neuron_values") or {})
+            neuron_contributions: Dict[int, float] = {}
+            for raw_idx, raw_value in draft_neuron_values.items():
+                try:
+                    neuron_idx = int(raw_idx)
+                    draft_value = float(raw_value)
+                except (TypeError, ValueError):
+                    continue
+                baseline_value = float(active_neuron_values.get(neuron_idx, 0.0))
+                neuron_contributions[neuron_idx] = draft_value - baseline_value
+
+            merged_after_neuron = merge_steering_vectors(
+                active_neuron_values,
+                neuron_contributions,
+            )
+            # Neuron and concept steering are combined by summing their contributions
+            # into a single steering vector applied before recommendation recomputation.
+            merged_neuron_values = merge_steering_vectors(
+                merged_after_neuron,
+                draft_concept_neuron_values,
+            )
+
+            draft_source = st.session_state.get(
+                _demo_state_key(selected_user, "draft_source")
+            )
+            if has_pending_neuron_draft and has_pending_concept_draft:
+                source = "combined"
+            elif has_pending_concept_draft:
+                source = "concept"
+            elif has_pending_neuron_draft:
+                source = "neuron"
+            else:
+                source = str(draft_source or active_config.get("source", "neuron"))
+
+            provenance = dict(active_config.get("provenance") or {})
+            provenance.update(
+                dict(
+                    st.session_state.get(
+                        _demo_state_key(selected_user, "draft_provenance"), {}
+                    )
+                    or {}
+                )
+            )
+            if has_pending_neuron_draft:
+                provenance["edited_in"] = "neuron_panel"
+
+            set_steering_config(
+                st.session_state,
+                selected_user,
+                neuron_values=merged_neuron_values,
+                alpha=global_alpha,
+                source=source,
+                provenance=provenance,
+            )
+            st.session_state[_demo_state_key(selected_user, "force_recompute")] = True
+            st.session_state[draft_key] = {}
+            st.session_state[concept_draft_key] = {}
+            st.session_state[_demo_state_key(selected_user, "draft_source")] = None
+            st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
+            st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
+            st.rerun()
+
+        # ===================================================================
+        # Section 3: Shared Recommendations Compute Block
+        # ===================================================================
+        _recompute_recommendations_shared(
+            selected_user=selected_user,
+            inference=inference,
+            data=data,
+        )
+
         displayed_recommendations = st.session_state.get(
             _demo_state_key(selected_user, "displayed_recommendations"),
             [],
         )
         filtered_recommendations = displayed_recommendations[:num_recommendations]
 
-        # Section 3: Map Visualization (ALWAYS renders instantly with recommendations)
+        # Section 4: Map Visualization (ALWAYS renders instantly with recommendations)
         # ===================================================================
         _render_map_section(
             selected_user=selected_user,
@@ -1124,7 +1239,7 @@ def show():
         )
 
         # ===================================================================
-        # Section 4: POI Cards (Recommendations)
+        # Section 5: POI Cards (Recommendations)
         # ===================================================================
         _render_poi_cards_section(
             data=data,
@@ -1139,7 +1254,7 @@ def show():
         )
 
         # ===================================================================
-        # Section 5: User History Display (uses cached data from pre-load)
+        # Section 6: User History Display (uses cached data from pre-load)
         # ===================================================================
         if show_history:
             _render_history_section(

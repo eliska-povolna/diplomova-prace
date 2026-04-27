@@ -1406,7 +1406,7 @@ def label_neurons(
             labels = labeler.label_neurons(neuron_profiles, business_metadata)
             all_labels["llm-review-based"] = labels
 
-            logger.info(f"âś“ Labeled {len(labels)} neurons")
+            logger.info(f"✓ Labeled {len(labels)} neurons")
             for nid, label in list(labels.items())[:5]:
                 logger.info(f"  Neuron {nid}: {label}")
         except Exception as e:
