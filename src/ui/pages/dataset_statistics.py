@@ -107,9 +107,79 @@ def _cached_activity(_data, scope: str, state: Optional[str], city: Optional[str
 
 
 @st.cache_data(show_spinner=False)
-def _cached_sample_businesses(_data, scope: str, state: Optional[str], city: Optional[str]):
+def _cached_missing_values(
+    _data, scope: str, state: Optional[str], city: Optional[str]
+):
+    """Get missing/empty values count for each column in the dataset."""
     try:
-        return _data.get_sample_business_rows(scope=scope, state=state, city=city, limit=12)
+        # Get sample data to analyze missing values
+        businesses = _data.get_sample_business_rows(
+            scope=scope, state=state, city=city, limit=10000
+        )
+        reviews = _data.get_sample_review_rows(
+            scope=scope,
+            state=state,
+            city=city,
+            year_min=None,
+            year_max=None,
+            rating_min=None,
+            rating_max=None,
+            limit=10000,
+        )
+
+        # Calculate missing values for each dataframe
+        missing_data = []
+
+        # Businesses missing values
+        if not businesses.empty:
+            for col in businesses.columns:
+                missing_count = (
+                    businesses[col].isna().sum() + (businesses[col] == "").sum()
+                )
+                total = len(businesses)
+                missing_pct = (missing_count / total * 100) if total > 0 else 0
+                missing_data.append(
+                    {
+                        "Table": "Businesses",
+                        "Column": col,
+                        "Missing Count": missing_count,
+                        "Total Rows": total,
+                        "Missing %": f"{missing_pct:.2f}%",
+                    }
+                )
+
+        # Reviews missing values
+        if not reviews.empty:
+            for col in reviews.columns:
+                missing_count = reviews[col].isna().sum() + (reviews[col] == "").sum()
+                total = len(reviews)
+                missing_pct = (missing_count / total * 100) if total > 0 else 0
+                missing_data.append(
+                    {
+                        "Table": "Reviews",
+                        "Column": col,
+                        "Missing Count": missing_count,
+                        "Total Rows": total,
+                        "Missing %": f"{missing_pct:.2f}%",
+                    }
+                )
+
+        return pd.DataFrame(missing_data)
+    except Exception as e:
+        st.warning(f"Could not analyze missing values: {e}")
+        return pd.DataFrame(
+            columns=["Table", "Column", "Missing Count", "Total Rows", "Missing %"]
+        )
+
+
+@st.cache_data(show_spinner=False)
+def _cached_sample_businesses(
+    _data, scope: str, state: Optional[str], city: Optional[str]
+):
+    try:
+        return _data.get_sample_business_rows(
+            scope=scope, state=state, city=city, limit=12
+        )
     except Exception:
         return pd.DataFrame()
 
@@ -166,9 +236,7 @@ def show() -> None:
         return
 
     st.title("Dataset Statistics")
-    st.caption(
-        "Interactive exploration of source data."
-    )
+    st.caption("Interactive exploration of source data.")
     scope = "global"
 
     state_df = _cached_state_dist(data)
@@ -216,12 +284,15 @@ def show() -> None:
     kpi_cols[1].metric("Users", f"{int(summary.get('n_users', 0)):,}")
     kpi_cols[2].metric("Items", f"{int(summary.get('n_items', 0)):,}")
     kpi_cols[3].metric("Interactions", f"{int(summary.get('n_interactions', 0)):,}")
-    kpi_cols[4].metric("Sparsity (positive)", f"{float(summary.get('density_pct', 0.0)):.4f}%")
+    kpi_cols[4].metric(
+        "Sparsity (positive)", f"{float(summary.get('density_pct', 0.0)):.4f}%"
+    )
     kpi_cols[5].metric(
         "Year span",
         (
             f"{int(summary['min_year'])}-{int(summary['max_year'])}"
-            if summary.get("min_year") is not None and summary.get("max_year") is not None
+            if summary.get("min_year") is not None
+            and summary.get("max_year") is not None
             else "N/A"
         ),
     )
@@ -278,7 +349,11 @@ def show() -> None:
                 color="avg_rating",
                 orientation="h",
                 title="Top Cities by Business Count",
-                labels={"n_businesses": "Businesses", "city": "City", "avg_rating": "Avg rating"},
+                labels={
+                    "n_businesses": "Businesses",
+                    "city": "City",
+                    "avg_rating": "Avg rating",
+                },
             )
             fig.update_layout(height=420)
             st.plotly_chart(fig, width="stretch")
@@ -399,3 +474,21 @@ def show() -> None:
             st.dataframe(sample_review_df, width="stretch", hide_index=True)
     else:
         st.caption("Sample tables are paused for faster initial page load.")
+
+    st.subheader("Data Quality: Missing Values")
+    st.caption("Analysis of empty/missing values for each column in the main tables.")
+    missing_values_df = _cached_missing_values(
+        data, scope, selected_state, selected_city
+    )
+    if not missing_values_df.empty:
+        st.dataframe(
+            missing_values_df,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Missing Count": st.column_config.NumberColumn(format="%d"),
+                "Missing %": st.column_config.TextColumn(),
+            },
+        )
+    else:
+        st.info("No missing values data available.")

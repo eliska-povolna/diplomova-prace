@@ -215,7 +215,9 @@ def _resolve_elsa_checkpoint_path(
             )
             return checkpoint_path
         except Exception as e:
-            logger.debug("Skipping incompatible ELSA checkpoint %s: %s", checkpoint_path, e)
+            logger.debug(
+                "Skipping incompatible ELSA checkpoint %s: %s", checkpoint_path, e
+            )
 
     raise FileNotFoundError(
         "Could not resolve a compatible ELSA checkpoint for --skip-elsa. "
@@ -259,7 +261,9 @@ def _load_elsa_from_checkpoint(
             "latent_dim": int(elsa_cfg["latent_dim"]),
         },
     )
-    logger.info("Loaded ELSA checkpoint and materialized into this run: %s", checkpoint_path)
+    logger.info(
+        "Loaded ELSA checkpoint and materialized into this run: %s", checkpoint_path
+    )
     return (
         model,
         float("nan"),
@@ -319,7 +323,9 @@ def _resolve_sae_checkpoint_path(
             )
             return checkpoint_path
         except Exception as e:
-            logger.debug("Skipping incompatible SAE checkpoint %s: %s", checkpoint_path, e)
+            logger.debug(
+                "Skipping incompatible SAE checkpoint %s: %s", checkpoint_path, e
+            )
 
     raise FileNotFoundError(
         "Could not resolve a compatible SAE checkpoint for --skip-sae. "
@@ -371,7 +377,9 @@ def _load_sae_from_checkpoint(
             "latent_dim": int(elsa_cfg["latent_dim"]),
         },
     )
-    logger.info("Loaded SAE checkpoint and materialized into this run: %s", checkpoint_path)
+    logger.info(
+        "Loaded SAE checkpoint and materialized into this run: %s", checkpoint_path
+    )
     return (
         model,
         float("nan"),
@@ -508,7 +516,10 @@ def _run_experiment_sweep(args: argparse.Namespace) -> None:
             if reuse_checkpoint and reuse_checkpoint.exists():
                 command.append("--skip-elsa")
                 command.extend(["--elsa-checkpoint", str(reuse_checkpoint)])
-                logger.info("Reusing ELSA checkpoint for matching signature: %s", reuse_checkpoint)
+                logger.info(
+                    "Reusing ELSA checkpoint for matching signature: %s",
+                    reuse_checkpoint,
+                )
             elif args.skip_elsa:
                 command.append("--skip-elsa")
             if args.skip_sae:
@@ -816,12 +827,16 @@ def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
         ]:
             _upload_file(
                 metadata_file,
-                f"{gcs_prefix}/data/{metadata_file.name}"
-                if metadata_file.parent.name == "data"
-                else f"{gcs_prefix}/{metadata_file.name}",
-                "application/json"
-                if metadata_file.suffix.lower() == ".json"
-                else "application/octet-stream",
+                (
+                    f"{gcs_prefix}/data/{metadata_file.name}"
+                    if metadata_file.parent.name == "data"
+                    else f"{gcs_prefix}/{metadata_file.name}"
+                ),
+                (
+                    "application/json"
+                    if metadata_file.suffix.lower() == ".json"
+                    else "application/octet-stream"
+                ),
             )
 
         logger.info(
@@ -1020,13 +1035,13 @@ def persist_test_user_artifacts(
         for user_id, count in interaction_counts.head(top_k).items()
     ]
 
-    train_ids_path.write_text(json.dumps([str(uid) for uid in train_user_ids], indent=2))
+    train_ids_path.write_text(
+        json.dumps([str(uid) for uid in train_user_ids], indent=2)
+    )
     test_ids_path.write_text(json.dumps([str(uid) for uid in test_user_ids], indent=2))
     val_ids_path.write_text(json.dumps([str(uid) for uid in val_user_ids], indent=2))
     top_users_path.write_text(json.dumps(top_users, indent=2))
-    evaluation_protocol_path.write_text(
-        json.dumps(evaluation_protocol or {}, indent=2)
-    )
+    evaluation_protocol_path.write_text(json.dumps(evaluation_protocol or {}, indent=2))
 
     holdout_artifacts: dict[str, Path] = {}
     if holdout_input_csr is not None and holdout_target_csr is not None:
@@ -1699,8 +1714,10 @@ def main() -> None:
                 shared_cache_dir,
             )
 
-        preprocessing_payload, preprocessing_source, _ = prepare_shared_preprocessing_cache(
-            config_dict, require_existing=args.skip_preprocessing
+        preprocessing_payload, preprocessing_source, _ = (
+            prepare_shared_preprocessing_cache(
+                config_dict, require_existing=args.skip_preprocessing
+            )
         )
         preprocessing_manifest = preprocessing_payload["manifest"]
         reviews = preprocessing_payload["reviews"]
@@ -1915,7 +1932,9 @@ def main() -> None:
                 seed=config["data"]["seed"],
             )
 
-            eval_k_values = config.get("evaluation", {}).get("k_values", [5, 10, 20, 50])
+            eval_k_values = config.get("evaluation", {}).get(
+                "k_values", [5, 10, 20, 50]
+            )
             holdout_diagnostics = compute_holdout_diagnostics(
                 X_eval_input_csr,
                 X_eval_target_csr,
@@ -2124,7 +2143,9 @@ def main() -> None:
                 "cache_key": preprocessing_cache_key,
                 "cache_dir": str(shared_cache_dir),
                 "source": preprocessing_source,
-                "manifest_path": str(shared_preprocessing_manifest_path(shared_cache_dir)),
+                "manifest_path": str(
+                    shared_preprocessing_manifest_path(shared_cache_dir)
+                ),
                 "manifest": preprocessing_manifest,
             },
             "reproducibility": {
@@ -2133,9 +2154,7 @@ def main() -> None:
                 "train_test_split_seed": seed,
                 "holdout_split_seed": seed,
             },
-            "artifacts": {
-                key: str(path) for key, path in test_user_artifacts.items()
-            },
+            "artifacts": {key: str(path) for key, path in test_user_artifacts.items()},
             "evaluation_protocol": {
                 "split": "per-user holdout",
                 "holdout_ratio": holdout_ratio,
@@ -2171,7 +2190,9 @@ def main() -> None:
             logger.info("Saved shared data manifest to %s", shared_manifest_file)
         except Exception as e:
             logger.error(f"Failed to save data for neuron labeling: {e}")
-            logger.warning("Continuing without saved data manifest (labeling fallback may be limited)")
+            logger.warning(
+                "Continuing without saved data manifest (labeling fallback may be limited)"
+            )
 
         # 🔄 PRECOMPUTE USER CSR MATRICES (post-training step)
         # This enables fast user history lookup in the app without querying DB each time
@@ -2229,6 +2250,26 @@ def main() -> None:
         write_latest_run_pointer(output_dir)
         logger.info(f"✓ Run {run_id} registered as completed")
 
+        # Upload artifacts to cloud for Streamlit deployment
+        try:
+            from src.cloud_upload_utils import upload_run_artifacts
+
+            experiment_manifest_dir = (
+                output_dir.parent if output_dir.parent.name == "experiments" else None
+            )
+            if upload_run_artifacts(
+                output_dir, experiment_manifest_dir, skip_if_exists=True
+            ):
+                logger.info("✓ Artifacts successfully uploaded to cloud")
+            else:
+                logger.warning(
+                    "⚠️ Could not upload all artifacts to cloud (training succeeded locally)"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Could not upload to cloud: {e} (training succeeded locally)"
+            )
+
     except Exception as e:
         logger.exception(f"Training failed with error: {e}")
         # Register run as failed
@@ -2238,5 +2279,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

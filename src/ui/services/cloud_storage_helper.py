@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import pickle
+import mimetypes
 from pathlib import Path
 from typing import Dict, Optional, Any
 
@@ -156,6 +157,49 @@ class CloudStorageHelper:
 
             logger.info(
                 f"✅ Uploaded {local_path.name} → gs://{self.bucket_name}/{gcs_path}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upload {local_path} to GCS: {e}")
+            return False
+
+    def upload_file(
+        self,
+        local_path: str,
+        gcs_path: str,
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict] = None,
+    ) -> bool:
+        """Upload an arbitrary file to GCS.
+
+        Args:
+            local_path: Local file path
+            gcs_path: Destination object path in bucket
+            content_type: Optional MIME type override
+            metadata: Optional object metadata
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            source_path = Path(local_path)
+            if not source_path.exists() or not source_path.is_file():
+                logger.error(f"Local file does not exist: {source_path}")
+                return False
+
+            if content_type is None:
+                guessed_type, _ = mimetypes.guess_type(str(source_path))
+                content_type = guessed_type or "application/octet-stream"
+
+            blob = self.bucket.blob(gcs_path)
+            blob.upload_from_filename(str(source_path), content_type=content_type)
+
+            if metadata:
+                blob.metadata = metadata
+                blob.patch()
+
+            logger.info(
+                f"✅ Uploaded {source_path.name} → gs://{self.bucket_name}/{gcs_path}"
             )
             return True
         except Exception as e:

@@ -601,13 +601,49 @@ def validate_cloud_run_artifacts(selected_output_dir: Optional[str]) -> Dict[str
     return report
 
 
+def _has_all_required_artifacts(run_dir: Path) -> bool:
+    """Check if a run directory has all required strict-mode artifacts."""
+    required_paths = [
+        run_dir / "summary.json",
+        run_dir / "mappings" / "item2index.pkl",
+        run_dir / "precomputed" / "user_csr_matrices.pkl",
+        run_dir / "data" / "test_users_top50.json",
+        run_dir / "checkpoints" / "elsa_best.pt",
+        run_dir / "neuron_coactivation.json",
+        run_dir / "neuron_category_metadata.json",
+    ]
+    for required_path in required_paths:
+        if not required_path.exists():
+            return False
+
+    # Check for SAE checkpoint
+    sae_candidates = sorted((run_dir / "checkpoints").glob("sae_r*_k*_best.pt"))
+    if not sae_candidates:
+        fallback_sae = run_dir / "checkpoints" / "sae_best.pt"
+        if not fallback_sae.exists():
+            return False
+
+    # Check for neuron interpretation labels
+    labels_dir = run_dir / "neuron_interpretations"
+    if not labels_dir.exists() or not labels_dir.is_dir():
+        return False
+    label_files = list(labels_dir.glob("labels_*.pkl"))
+    if not label_files:
+        return False
+
+    return True
+
+
 def _build_experiment_results(
     manifest: dict,
     *,
     source: str,
     experiment_dir: Path,
 ) -> Optional[Dict]:
-    """Normalize an experiment manifest into the structure expected by the UI."""
+    """Normalize an experiment manifest into the structure expected by the UI.
+
+    Skips runs that don't have all required artifacts for strict mode.
+    """
 
     def _ndcg_at_20(summary: Optional[dict]) -> float:
         ranking_metrics = (
@@ -639,6 +675,15 @@ def _build_experiment_results(
 
         run["summary"] = summary
         run["ndcg_at_20"] = _ndcg_at_20(summary)
+
+        # Skip runs that don't have all required artifacts
+        run_dir_str = run.get("run_dir")
+        if run_dir_str:
+            run_dir = Path(run_dir_str)
+            if not _has_all_required_artifacts(run_dir):
+                logger.debug("Skipping incomplete run (missing artifacts): %s", run_dir)
+                continue
+
         runs.append(run)
 
     if not runs:

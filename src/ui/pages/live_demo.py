@@ -241,7 +241,6 @@ def render_steering_tabs(
         )
 
 
-@st.fragment
 def _render_steering_and_recommendations(
     selected_user: str,
     inference,
@@ -392,6 +391,10 @@ Steer your preferences using this formula:
         source=source,
         provenance=provenance,
     )
+
+    # Flag that steering was just updated, so display code reruns
+    if slider_patch_applied or len(merged_neuron_values) > 0:
+        st.session_state[_demo_state_key(selected_user, "steering_just_updated")] = True
 
     if steering_config:
         try:
@@ -932,8 +935,8 @@ def show():
         st.subheader("Output Parameters")
 
         # Responsive card layout: user sets cards per row, system calculates width
-        # Use conservative 800px width (accounts for sidebar variability)
-        available_width = 800
+        # Use 960px width for larger cards (20% increase from 800px)
+        available_width = 960
         recs_per_row = st.slider(
             "Cards per row", min_value=1, max_value=5, value=3, step=1
         )
@@ -1158,6 +1161,12 @@ def show():
                 card_width_px=card_width_px,
                 photo_height_px=photo_height_px,
             )
+
+        # ===================================================================
+        # Section 6: Model Consistency Check (Debug)
+        # ===================================================================
+        with st.expander("🔍 Model Consistency Check (Debug)", expanded=False):
+            _render_neuron_consistency_check(inference)
 
 
 # =============================================================================
@@ -1835,3 +1844,86 @@ def get_feature_color(index: int) -> str:
         "darkpurple",
     ]
     return colors[index % len(colors)]
+
+
+def _render_neuron_consistency_check(inference) -> None:
+    """
+    Diagnostic panel to verify neuron labels match the SAE model.
+
+    Checks:
+    - SAE hidden_dim vs labels_cache coverage
+    - Sample random neurons and show their labels
+    - Alert if major inconsistencies detected
+    """
+    try:
+        # Get model and label dimensions
+        sae_hidden_dim = inference.sae.hidden_dim if inference.sae else 0
+        labels_cache = inference.labels.labels_cache if inference.labels else {}
+        num_labeled_neurons = len(labels_cache)
+        coverage_pct = (
+            (num_labeled_neurons / sae_hidden_dim * 100) if sae_hidden_dim > 0 else 0
+        )
+
+        # Display overview metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("SAE Hidden Dim", sae_hidden_dim)
+        col2.metric("Labeled Neurons", num_labeled_neurons)
+        col3.metric("Coverage %", f"{coverage_pct:.1f}%")
+
+        # Alert if coverage is low
+        if coverage_pct < 80:
+            st.warning(
+                f"⚠️ **Low label coverage**: Only {coverage_pct:.1f}% of neurons have labels. "
+                f"Some recommendations may show 'Feature N' instead of semantic labels."
+            )
+        elif coverage_pct == 100:
+            st.success("✅ **Full coverage**: All neurons have labels.")
+
+        # Show labeling method and source
+        if inference.labels:
+            method = inference.labels.selected_method or "unknown"
+            st.caption(f"**Labeling method**: `{method}`")
+
+        # Sample neurons: show 5 random labeled neurons
+        if labels_cache:
+            st.subheader("Sample Neurons")
+            import random
+
+            sample_size = min(5, len(labels_cache))
+            sample_neurons = random.sample(list(labels_cache.items()), sample_size)
+
+            sample_data = []
+            for neuron_idx_str, label in sample_neurons:
+                try:
+                    neuron_idx = int(neuron_idx_str)
+                    sample_data.append(
+                        {
+                            "Neuron #": neuron_idx,
+                            "Label": label,
+                        }
+                    )
+                except ValueError:
+                    pass
+
+            if sample_data:
+                st.dataframe(
+                    sample_data,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Neuron #": st.column_config.NumberColumn(width=80),
+                        "Label": st.column_config.TextColumn(),
+                    },
+                )
+
+        # Unlabeled neurons info
+        if sae_hidden_dim > num_labeled_neurons:
+            unlabeled_count = sae_hidden_dim - num_labeled_neurons
+            st.info(
+                f"ℹ️ **{unlabeled_count} neurons** ({100 - coverage_pct:.1f}%) do not have explicit labels. "
+                f"They will be displayed as 'Feature N' in the UI."
+            )
+
+    except Exception as e:
+        st.error(f"Failed to check neuron consistency: {e}")
+        logger.exception("Neuron consistency check failed")

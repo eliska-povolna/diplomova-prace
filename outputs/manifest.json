@@ -1203,12 +1203,305 @@
       "created": "2026-04-27T02:35:34.288541",
       "stages": {
         "train": {
-          "status": "pending",
+          "status": "completed",
           "timestamp": "2026-04-27T02:35:34.288570",
           "config": {
             "skip_preprocessing": true
           },
-          "metadata": {}
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_023534"
+          },
+          "completed": "2026-04-27T03:08:14.262924"
+        }
+      }
+    },
+    "20260427_030923": {
+      "created": "2026-04-27T03:09:23.877110",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T03:09:23.877131",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_030923"
+          },
+          "completed": "2026-04-27T03:23:12.985772"
+        }
+      }
+    },
+    "20260427_032356": {
+      "created": "2026-04-27T03:23:56.965242",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T03:23:56.965273",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_032356"
+          },
+          "completed": "2026-04-27T03:37:06.795159"
+        }
+      }
+    },
+    "20260427_033806": {
+      "created": "2026-04-27T03:38:06.441478",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T03:38:06.441521",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_033806"
+          },
+          "completed": "2026-04-27T03:53:57.070399"
+        }
+      }
+    },
+    "20260427_035432": {
+      "created": "2026-04-27T03:54:32.987520",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T03:54:32.987533",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_035432"
+          },
+          "completed": "2026-04-27T04:03:47.914379"
+        }
+      }
+    },
+    "20260427_040409": {
+      "created": "2026-04-27T04:04:09.381362",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T04:04:09.381374",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 100,
+            "final_output_dir": "outputs\\20260427_040409"
+          },
+          "completed": "2026-04-27T04:20:31.070973"
+        }
+      }
+    },
+    "20260427_042054": {
+      "created": "2026-04-27T04:20:54.509266",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T04:20:54.509324",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_042054"
+          },
+          "completed": "2026-04-27T04:29:55.527774"
+        }
+      }
+    },
+    "20260427_043017": {
+      "created": "2026-04-27T04:30:17.438562",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T04:30:17.438576",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_043017"
+          },
+          "completed": "2026-04-27T04:39:18.581103"
+        }
+      }
+    },
+    "20260427_043953": {
+      "created": "2026-04-27T04:39:53.535386",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T04:39:53.535406",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_043953"
+          },
+          "completed": "2026-04-27T04:46:09.863934"
+        }
+      }
+    },
+    "20260427_044635": {
+      "created": "2026-04-27T04:46:35.579957",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T04:46:35.579966",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_044635"
+          },
+          "completed": "2026-04-27T04:52:52.765505"
+        }
+      }
+    },
+    "20260427_045317": {
+      "created": "2026-04-27T04:53:17.604080",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T04:53:17.604094",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_045317"
+          },
+          "completed": "2026-04-27T04:59:29.065719"
+        }
+      }
+    },
+    "20260427_045953": {
+      "created": "2026-04-27T04:59:53.705705",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T04:59:53.705717",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_045953"
+          },
+          "completed": "2026-04-27T05:10:16.658366"
+        }
+      }
+    },
+    "20260427_051040": {
+      "created": "2026-04-27T05:10:40.792989",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T05:10:40.793004",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_051040"
+          },
+          "completed": "2026-04-27T05:21:18.940537"
+        }
+      }
+    },
+    "20260427_052148": {
+      "created": "2026-04-27T05:21:48.534489",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T05:21:48.534507",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_052148"
+          },
+          "completed": "2026-04-27T05:32:53.106562"
+        }
+      }
+    },
+    "20260427_053320": {
+      "created": "2026-04-27T05:33:20.089528",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T05:33:20.089550",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_053320"
+          },
+          "completed": "2026-04-27T05:49:04.348884"
+        }
+      }
+    },
+    "20260427_054942": {
+      "created": "2026-04-27T05:49:42.613218",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T05:49:42.613247",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_054942"
+          },
+          "completed": "2026-04-27T06:05:50.367227"
+        }
+      }
+    },
+    "20260427_060628": {
+      "created": "2026-04-27T06:06:28.385648",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T06:06:28.385682",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_060628"
+          },
+          "completed": "2026-04-27T06:22:24.620212"
         }
       }
     }
