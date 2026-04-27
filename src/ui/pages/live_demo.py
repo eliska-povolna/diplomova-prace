@@ -393,8 +393,9 @@ Steer your preferences using this formula:
     )
 
     # Flag that steering was just updated, so display code reruns
-    if slider_patch_applied or len(merged_neuron_values) > 0:
+    if slider_patch_applied > 0:
         st.session_state[_demo_state_key(selected_user, "steering_just_updated")] = True
+        st.rerun()
 
     if steering_config:
         try:
@@ -430,7 +431,9 @@ Steer your preferences using this formula:
         current_hash = steering_config_hash(steering_config)
         previous_hash = st.session_state.get(steering_hash_key, "")
         steering_changed = current_hash != previous_hash
-
+        force = st.session_state.get(
+            _demo_state_key(selected_user, "force_recompute"), False
+        )
         base_cache_key = _demo_state_key(selected_user, "base_recommendations")
         current_base = st.session_state.get(base_cache_key)
         valid_item_ids = data.get_valid_item_ids()
@@ -450,7 +453,7 @@ Steer your preferences using this formula:
                     valid_item_ids=valid_item_ids,
                 )
 
-        if steering_changed or current_base is None:
+        if steering_changed or current_base is None or force:
             logger.info(
                 "Computing steered recommendations (steering changed or first load)"
             )
@@ -553,6 +556,7 @@ Steer your preferences using this formula:
                 selected_user,
                 active_steering_config=steering_config,
             )
+        st.session_state[_demo_state_key(selected_user, "force_recompute")] = False
     except Exception as e:
         st.error(f"Failed to generate recommendations: {e}")
         logger.exception("Recommendation generation failed")
@@ -951,23 +955,9 @@ def show():
             f"📐 Width: {card_width_px}px | Photo: {card_width_px}×{photo_height_px}px"
         )
 
-        # Get actual max features from inference service hidden dimension
-        # But use the user's non-zero neurons count as the max instead of all neurons
-        try:
-            user_z = inference.user_latents.get(selected_user)
-            if user_z is not None:
-                # Count non-zero activations for this user
-                top_activations = inference.get_top_activations(user_z, k=64)
-                max_features = len(top_activations) if top_activations else 9
-            else:
-                max_features = 9
-        except Exception:
-            max_features = (
-                inference.sae.hidden_dim if inference and inference.sae else 64
-            )
-
+        max_features = 32  # it is difficult to retrieve the actual number of activated neurons, but most neurons activate under 20 features
         num_features = st.slider(
-            "Features to display",
+            "Features to display (only nonzero features are shown)",
             min_value=5,
             max_value=max(5, max_features),
             value=min(9, max_features),
@@ -1742,7 +1732,7 @@ def draw_poi_card(
                 delta_html = f'<span style="color:red; font-weight: bold;">{arrow}{arrow_value}</span>'
             else:
                 delta_html = f'<span style="color:gray;">{arrow}</span>'
-            delta_footer_html = f" • Position change: {delta_html}"
+            delta_footer_html = f"{delta_html}  positions changed  "
 
         # Build content section (rating, category, why, score, link)
         content_parts = []
@@ -1799,9 +1789,7 @@ def draw_poi_card(
         url = poi.get("url", "")
         footer_html = ""
         if url:
-            footer_html = (
-                f'<a href="{url}" target="_blank">View on Yelp →</a>{delta_footer_html}'
-            )
+            footer_html = f'{delta_footer_html}   <a href="{url}" target="_blank">View on Yelp →</a>'
 
         # Build complete card as HTML
         business_name = poi.get("name", "Unknown")

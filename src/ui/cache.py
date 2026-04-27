@@ -907,7 +907,7 @@ def _load_gcs_experiment_results() -> Optional[Dict]:
                 )
                 logger.warning(results["startup_notice"])
 
-            logger.info("âś… Loaded experiment manifest from GCS: %s", experiment_id)
+            logger.info("Loaded experiment manifest from GCS: %s", experiment_id)
             return results
 
         raise _strict_runtime_error(
@@ -1337,18 +1337,9 @@ def load_training_results(
     config: Dict,
     selected_output_dir: Optional[str] = None,
 ) -> Optional[Dict]:
-    """Load strict latest-experiment results and block startup on contract failure."""
+    """Load latest-experiment results and block startup on contract failure."""
     local_error: Optional[Exception] = None
     gcs_error: Optional[Exception] = None
-
-    try:
-        local_results = _load_local_experiment_results(Path("outputs"))
-        if local_results:
-            return local_results
-    except Exception as e:
-        local_error = e
-        logger.warning("Local strict experiment loading failed: %s", e)
-
     try:
         gcs_results = _load_gcs_experiment_results()
         if gcs_results:
@@ -1356,6 +1347,13 @@ def load_training_results(
     except Exception as e:
         gcs_error = e
         logger.warning("GCS strict experiment loading failed: %s", e)
+    try:
+        local_results = _load_local_experiment_results(Path("outputs"))
+        if local_results:
+            return local_results
+    except Exception as e:
+        local_error = e
+        logger.warning("Local strict experiment loading failed: %s", e)
 
     issues = [
         "Strict best-run mode could not resolve the latest experiment manifest.",

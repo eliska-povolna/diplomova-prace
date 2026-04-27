@@ -84,14 +84,16 @@ try:
     init_session_state()
     config = load_config(config_path)
 
-    with st.spinner("Loading strict experiment results..."):
+    with st.spinner("Loading experiment results..."):
         training_results = load_training_results(config, None)
     startup_notice = (training_results or {}).get("startup_notice")
     if startup_notice:
         st.warning(startup_notice)
         st.session_state["startup_notice"] = startup_notice
 
-    default_run_dir = training_results.get("default_run_dir") if training_results else None
+    default_run_dir = (
+        training_results.get("default_run_dir") if training_results else None
+    )
     if not default_run_dir:
         raise RuntimeError("No best run found in the latest experiment manifest.")
 
