@@ -7,6 +7,7 @@ that maximally activate each neuron.
 
 import json
 import logging
+import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -80,24 +81,82 @@ class WordcloudService:
             logger.error(f"Failed to load category metadata: {e}")
 
     def _load_labels(self, labels_path: Path):
-        """Load neuron labels from JSON file."""
+        """Load neuron labels from a file or a labels artifact directory.
+
+        Supported inputs:
+        - JSON file (`neuron_labels.json`, `labels.json`, etc.)
+        - Pickle file (`labels_*.pkl`)
+        - Directory containing run-scoped label artifacts (`neuron_interpretations/`)
+        """
         if not labels_path.exists():
             logger.warning(f"Labels not found: {labels_path}")
             return
 
+        if labels_path.is_dir():
+            self._load_labels_from_directory(labels_path)
+            return
+
         try:
-            with open(labels_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            if labels_path.suffix.lower() == ".pkl":
+                with open(labels_path, "rb") as f:
+                    data = pickle.load(f)
+            else:
+                with open(labels_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
             # Handle both flat dict and nested "neuron_labels" structure
-            if "neuron_labels" in data:
+            if isinstance(data, dict) and "neuron_labels" in data:
                 self.labels = data["neuron_labels"]
+            elif isinstance(data, dict) and "methods" in data:
+                methods = data.get("methods") or {}
+                selected_method = str(data.get("selected_method") or "weighted-category")
+                selected_payload = methods.get(selected_method)
+                if selected_payload is None and methods:
+                    selected_payload = next(iter(methods.values()))
+                if isinstance(selected_payload, dict):
+                    self.labels = {str(k): str(v) for k, v in selected_payload.items()}
+                else:
+                    self.labels = {}
             else:
-                self.labels = data
+                self.labels = (
+                    {str(k): str(v) for k, v in data.items()}
+                    if isinstance(data, dict)
+                    else {}
+                )
 
             logger.info(f"Loaded labels for {len(self.labels)} neurons")
         except Exception as e:
             logger.error(f"Failed to load labels: {e}")
+
+    def _load_labels_from_directory(self, labels_dir: Path) -> None:
+        """Load labels from a run-scoped neuron_interpretations directory."""
+        # Preferred order: explicit JSON summary, then weighted-category PKL, then first PKL.
+        candidates: List[Path] = []
+        for filename in ("neuron_labels.json", "labels.json"):
+            candidate = labels_dir / filename
+            if candidate.exists():
+                candidates.append(candidate)
+
+        weighted_pkl = labels_dir / "labels_weighted-category.pkl"
+        if weighted_pkl.exists():
+            candidates.append(weighted_pkl)
+
+        for pkl_file in sorted(labels_dir.glob("labels_*.pkl")):
+            if pkl_file not in candidates:
+                candidates.append(pkl_file)
+
+        if not candidates:
+            logger.warning("No label artifacts found in %s", labels_dir)
+            return
+
+        for candidate in candidates:
+            before = len(self.labels)
+            self._load_labels(candidate)
+            if len(self.labels) > 0:
+                logger.info("Loaded labels from %s", candidate)
+                return
+            if len(self.labels) == before:
+                continue
 
     def get_neuron_label(self, neuron_id: int) -> str:
         """Get readable label for a neuron."""

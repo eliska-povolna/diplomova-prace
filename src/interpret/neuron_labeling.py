@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Optional
@@ -206,6 +207,7 @@ class LLMBasedLabeler(NeuronLabeler):
         max_retries: int = 3,
         rate_limit_delay: float = 1.0,
         progress_log_every: int = 25,
+        request_timeout_sec: float = 60.0,
     ):
         super().__init__("llm-based")
 
@@ -217,6 +219,7 @@ class LLMBasedLabeler(NeuronLabeler):
         self.max_retries = max_retries
         self.rate_limit_delay = rate_limit_delay
         self.progress_log_every = progress_log_every
+        self.request_timeout_sec = request_timeout_sec
 
         # Setup API
         if api_key is None:
@@ -234,7 +237,34 @@ class LLMBasedLabeler(NeuronLabeler):
 
         genai.configure(api_key=api_key)
         self.model_name = select_gemini_model(genai, model_name)
-        logger.info(f"Gemini API configured. Model: {self.model_name}")
+        logger.info(
+            "Gemini API configured. Model=%s timeout=%ss retries=%s",
+            self.model_name,
+            self.request_timeout_sec,
+            self.max_retries,
+        )
+
+    def _generate_content_with_timeout(self, model, user_message: str):
+        """Run Gemini generation with a hard timeout so labeling cannot hang silently."""
+
+        def _call():
+            return model.generate_content(
+                user_message,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=self.temperature,
+                    max_output_tokens=100,
+                ),
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_call)
+            try:
+                return future.result(timeout=self.request_timeout_sec)
+            except FuturesTimeoutError as exc:
+                future.cancel()
+                raise TimeoutError(
+                    f"Gemini request exceeded {self.request_timeout_sec}s timeout"
+                ) from exc
 
     def _format_max_activating(
         self,
@@ -307,13 +337,7 @@ Representative user reviews:
                     system_instruction=NEURON_LABEL_SYSTEM_PROMPT,
                 )
 
-                response = model.generate_content(
-                    user_message,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=self.temperature,
-                        max_output_tokens=100,
-                    ),
-                )
+                response = self._generate_content_with_timeout(model, user_message)
 
                 if response.text:
                     text = response.text.strip()
@@ -346,10 +370,12 @@ Representative user reviews:
         successes = 0
 
         logger.info(
-            "Starting %s labeling for %s neurons with Gemini model %s",
+            "Starting %s labeling for %s neurons with Gemini model %s (timeout=%ss, retries=%s)",
             self.name,
             total,
             self.model_name,
+            self.request_timeout_sec,
+            self.max_retries,
         )
 
         for position, (neuron_idx, profile) in enumerate(
@@ -376,6 +402,14 @@ Representative user reviews:
                 continue
 
             max_text = self._format_max_activating(max_items, business_metadata)
+            neuron_start = time.perf_counter()
+            logger.info(
+                "[%s] Labeling neuron %s (%s/%s)...",
+                self.name,
+                neuron_idx,
+                position,
+                total,
+            )
             label = self._interpret_single(neuron_idx, max_text)
 
             if label:
@@ -383,6 +417,14 @@ Representative user reviews:
                 successes += 1
             else:
                 labels[neuron_idx] = "Unknown"
+            elapsed = time.perf_counter() - neuron_start
+            logger.info(
+                "[%s] Neuron %s done in %.1fs -> %s",
+                self.name,
+                neuron_idx,
+                elapsed,
+                labels[neuron_idx],
+            )
 
             if (
                 position == 1
@@ -470,6 +512,14 @@ class ReviewBasedLLMLabeler(LLMBasedLabeler):
             max_text = self._format_max_activating(max_items, business_metadata)
             review_text = self._format_reviews(max_items, business_metadata)
 
+            neuron_start = time.perf_counter()
+            logger.info(
+                "[%s] Labeling neuron %s (%s/%s)...",
+                self.name,
+                neuron_idx,
+                position,
+                total,
+            )
             label = self._interpret_single(
                 neuron_idx,
                 max_text,
@@ -478,6 +528,14 @@ class ReviewBasedLLMLabeler(LLMBasedLabeler):
             labels[neuron_idx] = label or "Unknown"
             if label:
                 successes += 1
+            elapsed = time.perf_counter() - neuron_start
+            logger.info(
+                "[%s] Neuron %s done in %.1fs -> %s",
+                self.name,
+                neuron_idx,
+                elapsed,
+                labels[neuron_idx],
+            )
             if (
                 position == 1
                 or position == total

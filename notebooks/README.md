@@ -1,56 +1,24 @@
-# Notebooks
+# Notebooks (Historical / Outdated)
 
-Interactive Jupyter notebooks for data exploration, model training, neuron interpretation, and evaluation analysis.
+These notebooks were used during exploration and prototyping and are now considered
+historical artifacts. They may not reflect the current production pipeline, run-artifact
+contracts, or local/cloud runtime behavior.
 
-## Pipeline Notebooks
+## Current Supported Workflow
 
-Run in order after executing the command-line pipeline stages:
+Use the main project workflow from the root `README.md`:
 
-| Notebook | Prerequisites | Purpose |
-|---|---|---|
-| `00_preprocessing.ipynb` | DuckDB database initialized | Build the CSR interaction matrix and ID mappings |
-| `01_data_exploration.ipynb` | DuckDB database initialized | Explore Yelp dataset: statistics, geographic distribution, interaction sparsity |
-| `02_training.ipynb` | Data preprocessed (`python -m src.preprocess_data`) | Train ELSA + TopK SAE models with interactive monitoring |
-| `03_neuron_labeling_demo.ipynb` | Models trained (`python -m src.label`) | Interpret and visualize learned neuron features interactively |
-| `04_evaluation_analysis.ipynb` | Evaluation complete (`python -m src.evaluate`) | Compare ELSA vs SAE+ELSA metrics, visualize results |
+1. CLI pipeline for preprocessing, training, labeling, and evaluation (`python -m src.*`).
+2. Streamlit app for interactive analysis and inspection:
+   - `Dataset Statistics` page for data exploration
+   - `Results` page for evaluation metrics and comparisons
+   - `Live Demo` and `Interpretability` for steering and feature analysis
 
-## Setup
+## Notebook Status
 
-Before running notebooks, complete the pipeline stages in `../README.md`:
+- `01_data_exploration.ipynb`: replaced by Streamlit `Dataset Statistics`
+- `02_training.ipynb`: historical training exploration
+- `03_neuron_labeling_demo.ipynb`: historical interpretability exploration
+- `04_evaluation_analysis.ipynb`: historical evaluation exploration
 
-```bash
-# 1. Setup database (one-time)
-python -m src.setup_database --json-dir ~/Downloads/Yelp-JSON/yelp_dataset
-
-# 2. Preprocess data
-python -m src.preprocess_data --config configs/default.yaml
-
-# Optional: combine setup + preprocess in one command
-python -m src.preprocess_data --config configs/default.yaml --setup-database --json-dir ~/Downloads/Yelp-JSON/yelp_dataset
-
-# 3. Train models
-python -m src.train --config configs/default.yaml
-
-# 4. Label neurons
-python -m src.label
-
-# 5. Evaluate
-python -m src.evaluate --checkpoint outputs/YYYYMMDD_HHMMSS --split test
-```
-
-## Running
-
-**Option A: VS Code (recommended)**
-- Open any `.ipynb` file directly with VS Code's Jupyter extension
-
-**Option B: Jupyter Lab/Notebook**
-```bash
-cd notebooks
-jupyter lab
-```
-
-## Notes
-
-- All notebooks import from `src/` (sys.path is set in first cell)
-- Outputs are saved to `../outputs/` (project root)
-- Run notebooks in sequence; each depends on previous pipeline stages
+If you open these notebooks, treat outputs and code as exploratory references only.

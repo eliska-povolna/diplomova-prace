@@ -1040,6 +1040,61 @@
             "final_output_dir": "outputs\\20260423_222635"
           },
           "completed": "2026-04-23T23:14:54.660074"
+        },
+        "evaluate": {
+          "status": "completed",
+          "timestamp": "2026-04-24T22:50:22.205236",
+          "config": {},
+          "metadata": {
+            "split": "test",
+            "n_users_evaluated": 7465,
+            "model": "SAE+ELSA",
+            "split_source": "recomputed_split_fallback",
+            "replay_mode": "reconstructed_fallback",
+            "elsa_only_ndcg__at_5": 0.0,
+            "elsa_only_ndcg__at_10": 0.0,
+            "elsa_only_ndcg__at_20": 0.0,
+            "elsa_only_recall__at_5": 0.0,
+            "elsa_only_recall__at_10": 0.0,
+            "elsa_only_recall__at_20": 0.0,
+            "elsa_only_precision__at_5": 0.0,
+            "elsa_only_precision__at_10": 0.0,
+            "elsa_only_precision__at_20": 0.0,
+            "elsa_only_mrr__at_5": 0.0,
+            "elsa_only_mrr__at_10": 0.0,
+            "elsa_only_mrr__at_20": 0.0,
+            "elsa_only_hr__at_5": 0.0,
+            "elsa_only_hr__at_10": 0.0,
+            "elsa_only_hr__at_20": 0.0,
+            "elsa_only_map__at_5": 0.0,
+            "elsa_only_map__at_10": 0.0,
+            "elsa_only_map__at_20": 0.0,
+            "sae_plus_elsa_ndcg__at_5": 0.0,
+            "sae_plus_elsa_ndcg__at_10": 0.0,
+            "sae_plus_elsa_ndcg__at_20": 0.0,
+            "sae_plus_elsa_recall__at_5": 0.0,
+            "sae_plus_elsa_recall__at_10": 0.0,
+            "sae_plus_elsa_recall__at_20": 0.0,
+            "sae_plus_elsa_precision__at_5": 0.0,
+            "sae_plus_elsa_precision__at_10": 0.0,
+            "sae_plus_elsa_precision__at_20": 0.0,
+            "sae_plus_elsa_mrr__at_5": 0.0,
+            "sae_plus_elsa_mrr__at_10": 0.0,
+            "sae_plus_elsa_mrr__at_20": 0.0,
+            "sae_plus_elsa_hr__at_5": 0.0,
+            "sae_plus_elsa_hr__at_10": 0.0,
+            "sae_plus_elsa_hr__at_20": 0.0,
+            "sae_plus_elsa_map__at_5": 0.0,
+            "sae_plus_elsa_map__at_10": 0.0,
+            "sae_plus_elsa_map__at_20": 0.0,
+            "sae_plus_elsa_coverage": 0.915109825685922,
+            "sae_plus_elsa_entropy": 0.8765856073870433,
+            "sae_plus_elsa_latency_mean_ms": 2.3485898971557617,
+            "sae_plus_elsa_latency_p50_ms": 1.9829273223876953,
+            "sae_plus_elsa_latency_p95_ms": 3.9340257644653307,
+            "sae_plus_elsa_latency_max_ms": 9.793519973754883
+          },
+          "completed": "2026-04-24T22:52:01.517378"
         }
       }
     },
@@ -1056,6 +1111,104 @@
             "error": "Could not reconstruct final k-core user ordering: 265216 user IDs vs CSR rows 37323"
           },
           "completed": "2026-04-23T23:16:54.418901"
+        }
+      }
+    },
+    "20260426_221323": {
+      "created": "2026-04-26T22:13:23.216462",
+      "stages": {
+        "train": {
+          "status": "pending",
+          "timestamp": "2026-04-26T22:13:23.216488",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {}
+        }
+      }
+    },
+    "20260427_001341": {
+      "created": "2026-04-27T00:13:41.208307",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T00:13:41.208335",
+          "config": {
+            "skip_preprocessing": false
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_001341"
+          },
+          "completed": "2026-04-27T01:25:51.309764"
+        }
+      }
+    },
+    "20260427_012718": {
+      "created": "2026-04-27T01:27:18.213219",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T01:27:18.213239",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_012718"
+          },
+          "completed": "2026-04-27T01:43:43.033158"
+        }
+      }
+    },
+    "20260427_014459": {
+      "created": "2026-04-27T01:44:59.563553",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T01:44:59.563649",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_014459"
+          },
+          "completed": "2026-04-27T02:03:38.702053"
+        }
+      }
+    },
+    "20260427_020525": {
+      "created": "2026-04-27T02:05:25.240055",
+      "stages": {
+        "train": {
+          "status": "completed",
+          "timestamp": "2026-04-27T02:05:25.240268",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {
+            "elsa_epochs": 40,
+            "sae_epochs": 50,
+            "final_output_dir": "outputs\\20260427_020525"
+          },
+          "completed": "2026-04-27T02:34:21.948530"
+        }
+      }
+    },
+    "20260427_023534": {
+      "created": "2026-04-27T02:35:34.288541",
+      "stages": {
+        "train": {
+          "status": "pending",
+          "timestamp": "2026-04-27T02:35:34.288570",
+          "config": {
+            "skip_preprocessing": true
+          },
+          "metadata": {}
         }
       }
     }

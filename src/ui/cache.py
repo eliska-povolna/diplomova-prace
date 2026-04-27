@@ -1,11 +1,13 @@
-"""Streamlit caching and session state management."""
+﻿"""Streamlit caching and session state management."""
 
 import json
 import os
 import logging
+import pickle
 import tempfile
+import math
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import streamlit as st
@@ -82,6 +84,420 @@ def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
     return None
 
 
+def _strict_runtime_error(title: str, issues: List[str]) -> RuntimeError:
+    issue_text = "\n".join(f"- {issue}" for issue in issues if issue)
+    return RuntimeError(f"{title}\n{issue_text}")
+
+
+def _find_latest_local_experiment_dir(outputs_base: Path) -> Path:
+    latest_pointer = outputs_base / "LATEST_EXPERIMENT.txt"
+    if latest_pointer.exists():
+        try:
+            pointer_text = latest_pointer.read_text(encoding="utf-8").strip()
+            pointer_dir = Path(pointer_text)
+        except Exception as e:
+            raise _strict_runtime_error(
+                "Failed to read latest experiment pointer.",
+                [f"path={latest_pointer}", f"error={e}"],
+            ) from e
+
+        if not pointer_dir.exists():
+            raise _strict_runtime_error(
+                "Latest experiment directory does not exist.",
+                [f"pointer={latest_pointer}", f"resolved_dir={pointer_dir}"],
+            )
+        return pointer_dir
+
+    experiments_base = outputs_base / "experiments"
+    if not experiments_base.exists():
+        raise _strict_runtime_error(
+            "Missing experiments directory for strict best-run mode.",
+            [f"expected_dir={experiments_base}"],
+        )
+
+    experiment_dirs = sorted([d for d in experiments_base.iterdir() if d.is_dir()])
+    if not experiment_dirs:
+        raise _strict_runtime_error(
+            "No experiment directories found for strict best-run mode.",
+            [f"experiments_dir={experiments_base}"],
+        )
+    return experiment_dirs[-1]
+
+
+def _list_local_experiment_dirs(outputs_base: Path) -> List[Path]:
+    """List local experiment directories in newest-first order.
+
+    If LATEST_EXPERIMENT.txt exists and resolves to a valid directory, it is
+    treated as the first candidate, followed by remaining experiment dirs.
+    """
+    candidates: List[Path] = []
+    latest_pointer = outputs_base / "LATEST_EXPERIMENT.txt"
+
+    if latest_pointer.exists():
+        try:
+            pointer_text = latest_pointer.read_text(encoding="utf-8").strip()
+            pointer_dir = Path(pointer_text)
+            if pointer_dir.exists() and pointer_dir.is_dir():
+                candidates.append(pointer_dir)
+        except Exception:
+            # Pointer parsing issues are handled by strict loaders as diagnostic context.
+            pass
+
+    experiments_base = outputs_base / "experiments"
+    if experiments_base.exists():
+        experiment_dirs = sorted(
+            [d for d in experiments_base.iterdir() if d.is_dir()],
+            reverse=True,
+        )
+        for exp_dir in experiment_dirs:
+            if exp_dir not in candidates:
+                candidates.append(exp_dir)
+
+    return candidates
+
+
+def _load_json_file(path: Path) -> Dict[str, Any]:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception as e:
+        raise _strict_runtime_error(
+            "Failed to parse JSON artifact.",
+            [f"path={path}", f"error={e}"],
+        ) from e
+    if not isinstance(payload, dict):
+        raise _strict_runtime_error(
+            "Invalid JSON artifact payload type.",
+            [f"path={path}", f"type={type(payload).__name__}"],
+        )
+    return payload
+
+
+def _validate_precomputed_matrices_payload(
+    payload: Any,
+    *,
+    run_id: str,
+    expected_n_items: Optional[int],
+    source_path: Path,
+) -> None:
+    if not isinstance(payload, dict):
+        raise _strict_runtime_error(
+            "Invalid precomputed matrix payload.",
+            [f"path={source_path}", f"type={type(payload).__name__}"],
+        )
+
+    required_keys = {"run_id", "n_items", "matrices"}
+    if not required_keys.issubset(payload.keys()):
+        raise _strict_runtime_error(
+            "Invalid precomputed matrix payload schema (strict mode requires metadata envelope).",
+            [
+                f"path={source_path}",
+                f"expected_keys={sorted(required_keys)}",
+                f"actual_keys={sorted(payload.keys())}",
+            ],
+        )
+
+    payload_run_id = str(payload.get("run_id"))
+    if payload_run_id != run_id:
+        raise _strict_runtime_error(
+            "Precomputed matrix run_id mismatch.",
+            [
+                f"path={source_path}",
+                f"expected_run_id={run_id}",
+                f"actual_run_id={payload_run_id}",
+            ],
+        )
+
+    try:
+        payload_n_items = int(payload.get("n_items"))
+    except (TypeError, ValueError):
+        raise _strict_runtime_error(
+            "Invalid precomputed matrix n_items metadata.",
+            [f"path={source_path}", f"n_items={payload.get('n_items')}"],
+        ) from None
+
+    if expected_n_items is not None and payload_n_items != expected_n_items:
+        raise _strict_runtime_error(
+            "Precomputed matrix metadata mismatch.",
+            [
+                f"path={source_path}",
+                f"expected_n_items={expected_n_items}",
+                f"actual_n_items={payload_n_items}",
+            ],
+        )
+
+    matrices = payload.get("matrices")
+    if not isinstance(matrices, dict) or not matrices:
+        raise _strict_runtime_error(
+            "Precomputed matrix payload has no matrices.",
+            [f"path={source_path}"],
+        )
+
+    for user_id, matrix in matrices.items():
+        shape = getattr(matrix, "shape", None)
+        if not shape or len(shape) != 2:
+            raise _strict_runtime_error(
+                "Invalid user matrix shape.",
+                [f"path={source_path}", f"user={user_id}", f"shape={shape}"],
+            )
+        if int(shape[1]) != payload_n_items:
+            raise _strict_runtime_error(
+                "User matrix shape mismatch.",
+                [
+                    f"path={source_path}",
+                    f"user={user_id}",
+                    f"expected_second_dim={payload_n_items}",
+                    f"actual_shape={shape}",
+                ],
+            )
+
+
+def _validate_item2index_mapping(
+    item2index: Any,
+    *,
+    source_path: Path,
+    expected_n_items: int,
+) -> None:
+    """Validate strict run-scoped item2index integrity.
+
+    Contract:
+    - mapping size equals expected_n_items
+    - values are integer indices
+    - indices are unique
+    - index range is contiguous [0, expected_n_items - 1]
+    """
+    if not isinstance(item2index, dict) or not item2index:
+        raise _strict_runtime_error(
+            "Run-scoped item2index mapping is empty or invalid.",
+            [f"path={source_path}"],
+        )
+
+    if len(item2index) != expected_n_items:
+        raise _strict_runtime_error(
+            "Run-scoped item2index mapping size mismatch.",
+            [
+                f"path={source_path}",
+                f"expected_n_items={expected_n_items}",
+                f"actual_mapping_size={len(item2index)}",
+            ],
+        )
+
+    normalized_indices: List[int] = []
+    non_int_examples: List[str] = []
+    for business_id, raw_idx in item2index.items():
+        try:
+            idx = int(raw_idx)
+            normalized_indices.append(idx)
+        except (TypeError, ValueError):
+            non_int_examples.append(f"{business_id}:{raw_idx}")
+            if len(non_int_examples) >= 5:
+                break
+
+    if non_int_examples:
+        raise _strict_runtime_error(
+            "Run-scoped item2index has non-integer indices.",
+            [
+                f"path={source_path}",
+                f"examples={non_int_examples}",
+            ],
+        )
+
+    unique_count = len(set(normalized_indices))
+    if unique_count != len(normalized_indices):
+        raise _strict_runtime_error(
+            "Run-scoped item2index has duplicate index values.",
+            [
+                f"path={source_path}",
+                f"mapping_size={len(normalized_indices)}",
+                f"unique_indices={unique_count}",
+            ],
+        )
+
+    min_idx = min(normalized_indices)
+    max_idx = max(normalized_indices)
+    expected_max = expected_n_items - 1
+    if min_idx != 0 or max_idx != expected_max:
+        raise _strict_runtime_error(
+            "Run-scoped item2index index range mismatch.",
+            [
+                f"path={source_path}",
+                f"expected_min=0",
+                f"expected_max={expected_max}",
+                f"actual_min={min_idx}",
+                f"actual_max={max_idx}",
+            ],
+        )
+
+
+def load_run_artifact_bundle(selected_output_dir: Optional[str]) -> Dict[str, Any]:
+    """Resolve and validate strict run-scoped artifacts (local or downloaded from GCS)."""
+    if not selected_output_dir:
+        raise _strict_runtime_error(
+            "Strict best-run mode requires an explicit selected run.",
+            ["selected_output_dir is empty"],
+        )
+
+    run_id = _extract_run_timestamp(selected_output_dir)
+    if not run_id:
+        run_id = Path(str(selected_output_dir)).name
+    if not run_id:
+        raise _strict_runtime_error(
+            "Could not resolve run_id from selected output directory.",
+            [f"selected_output_dir={selected_output_dir}"],
+        )
+
+    run_dir = Path(str(selected_output_dir))
+    if not run_dir.exists():
+        cloud_storage = _get_cloud_storage_helper()
+        if not cloud_storage:
+            raise _strict_runtime_error(
+                "Run directory is missing and GCS is not configured.",
+                [
+                    f"selected_output_dir={selected_output_dir}",
+                    "GCS_BUCKET_NAME is not set",
+                ],
+            )
+
+        temp_root = Path(tempfile.mkdtemp(prefix=f"diplomov_run_{run_id}_"))
+        gcs_base = f"models/{run_id}"
+        required_files = [
+            "summary.json",
+            "mappings/item2index.pkl",
+            "precomputed/user_csr_matrices.pkl",
+            "data/test_users_top50.json",
+            "neuron_coactivation.json",
+            "neuron_category_metadata.json",
+            "checkpoints/elsa_best.pt",
+        ]
+        missing = []
+        for relative_path in required_files:
+            ok = _download_gcs_file(
+                cloud_storage,
+                f"{gcs_base}/{relative_path}",
+                temp_root / relative_path,
+            )
+            if not ok:
+                missing.append(
+                    f"gs://{cloud_storage.bucket_name}/{gcs_base}/{relative_path}"
+                )
+
+        checkpoints_prefix = f"{gcs_base}/checkpoints/"
+        checkpoints_ok = _download_gcs_prefix(
+            cloud_storage,
+            checkpoints_prefix,
+            temp_root / "checkpoints",
+        )
+        labels_ok = _download_gcs_prefix(
+            cloud_storage,
+            f"{gcs_base}/neuron_interpretations/",
+            temp_root / "neuron_interpretations",
+        )
+        if not checkpoints_ok:
+            missing.append(f"gs://{cloud_storage.bucket_name}/{checkpoints_prefix}")
+        if not labels_ok:
+            missing.append(
+                f"gs://{cloud_storage.bucket_name}/{gcs_base}/neuron_interpretations/"
+            )
+
+        if missing:
+            raise _strict_runtime_error(
+                "Missing required run artifacts in cloud storage.",
+                missing,
+            )
+
+        run_dir = temp_root
+
+    issues: List[str] = []
+    required_local_paths = [
+        run_dir / "summary.json",
+        run_dir / "mappings" / "item2index.pkl",
+        run_dir / "precomputed" / "user_csr_matrices.pkl",
+        run_dir / "data" / "test_users_top50.json",
+        run_dir / "checkpoints" / "elsa_best.pt",
+        run_dir / "neuron_coactivation.json",
+        run_dir / "neuron_category_metadata.json",
+    ]
+    for required_path in required_local_paths:
+        if not required_path.exists():
+            issues.append(f"missing_path={required_path}")
+
+    sae_candidates = sorted((run_dir / "checkpoints").glob("sae_r*_k*_best.pt"))
+    if not sae_candidates:
+        fallback_sae = run_dir / "checkpoints" / "sae_best.pt"
+        if fallback_sae.exists():
+            sae_candidates = [fallback_sae]
+    if not sae_candidates:
+        issues.append(
+            f"missing_path={run_dir / 'checkpoints'} (expected sae_r*_k*_best.pt or sae_best.pt)"
+        )
+
+    labels_dir = run_dir / "neuron_interpretations"
+    if not labels_dir.exists():
+        issues.append(f"missing_path={labels_dir}")
+    else:
+        label_files = list(labels_dir.glob("labels_*.pkl"))
+        if not label_files:
+            issues.append(f"missing_labels={labels_dir} (expected labels_*.pkl)")
+
+    if issues:
+        raise _strict_runtime_error(
+            "Strict best-run artifact audit failed.",
+            issues,
+        )
+
+    summary = _load_json_file(run_dir / "summary.json")
+    try:
+        expected_n_items = int((summary.get("data") or {}).get("n_items"))
+    except (TypeError, ValueError):
+        raise _strict_runtime_error(
+            "Run summary is missing valid data.n_items metadata.",
+            [
+                f"path={run_dir / 'summary.json'}",
+                f"value={(summary.get('data') or {}).get('n_items')}",
+            ],
+        ) from None
+
+    try:
+        with (run_dir / "mappings" / "item2index.pkl").open("rb") as f:
+            item2index = pickle.load(f)
+    except Exception as e:
+        raise _strict_runtime_error(
+            "Failed to load run-scoped item2index mapping.",
+            [f"path={run_dir / 'mappings' / 'item2index.pkl'}", f"error={e}"],
+        ) from e
+
+    _validate_item2index_mapping(
+        item2index,
+        source_path=run_dir / "mappings" / "item2index.pkl",
+        expected_n_items=expected_n_items,
+    )
+
+    precomputed_path = run_dir / "precomputed" / "user_csr_matrices.pkl"
+    try:
+        with precomputed_path.open("rb") as f:
+            precomputed_payload = pickle.load(f)
+    except Exception as e:
+        raise _strict_runtime_error(
+            "Failed to load precomputed user matrices.",
+            [f"path={precomputed_path}", f"error={e}"],
+        ) from e
+
+    _validate_precomputed_matrices_payload(
+        precomputed_payload,
+        run_id=run_id,
+        expected_n_items=expected_n_items,
+        source_path=precomputed_path,
+    )
+
+    return {
+        "run_id": run_id,
+        "run_dir": str(run_dir),
+        "summary": summary,
+        "expected_n_items": expected_n_items,
+        "sae_checkpoint": str(sae_candidates[0]),
+    }
+
+
 def _download_gcs_file(cloud_storage, gcs_path: str, local_path: Path) -> bool:
     """Download one GCS object to a local path."""
     try:
@@ -119,6 +535,72 @@ def _download_gcs_prefix(cloud_storage, gcs_prefix: str, local_root: Path) -> bo
         return False
 
 
+def validate_cloud_run_artifacts(selected_output_dir: Optional[str]) -> Dict[str, Any]:
+    """Validate presence of required strict-run artifacts in GCS (non-mutating)."""
+    run_id = (
+        _extract_run_timestamp(selected_output_dir)
+        or Path(str(selected_output_dir or "")).name
+    )
+    if not run_id:
+        return {"status": "invalid", "missing": ["run_id could not be resolved"]}
+
+    cloud_storage = _get_cloud_storage_helper()
+    if not cloud_storage:
+        return {"status": "skipped", "run_id": run_id, "reason": "GCS not configured"}
+
+    gcs_base = f"models/{run_id}"
+    required_paths = [
+        f"{gcs_base}/summary.json",
+        f"{gcs_base}/mappings/item2index.pkl",
+        f"{gcs_base}/precomputed/user_csr_matrices.pkl",
+        f"{gcs_base}/data/test_users_top50.json",
+        f"{gcs_base}/checkpoints/elsa_best.pt",
+        f"{gcs_base}/neuron_coactivation.json",
+        f"{gcs_base}/neuron_category_metadata.json",
+    ]
+    missing: List[str] = []
+    present: List[str] = []
+    for path in required_paths:
+        try:
+            if cloud_storage.exists(path):
+                present.append(path)
+            else:
+                missing.append(path)
+        except Exception:
+            missing.append(path)
+
+    try:
+        label_files = [
+            p
+            for p in cloud_storage.list_files(
+                prefix=f"{gcs_base}/neuron_interpretations/"
+            )
+            if p.endswith(".pkl") and Path(p).name.startswith("labels_")
+        ]
+    except Exception:
+        label_files = []
+    if not label_files:
+        missing.append(f"{gcs_base}/neuron_interpretations/labels_*.pkl")
+
+    status = "ok" if not missing else "missing"
+    report = {
+        "status": status,
+        "run_id": run_id,
+        "bucket": cloud_storage.bucket_name,
+        "missing": missing,
+        "present_count": len(present),
+    }
+    if missing:
+        logger.warning(
+            "Cloud strict-run artifact check (%s) missing paths: %s",
+            run_id,
+            missing,
+        )
+    else:
+        logger.info("Cloud strict-run artifact check (%s): complete", run_id)
+    return report
+
+
 def _build_experiment_results(
     manifest: dict,
     *,
@@ -126,10 +608,13 @@ def _build_experiment_results(
     experiment_dir: Path,
 ) -> Optional[Dict]:
     """Normalize an experiment manifest into the structure expected by the UI."""
-    def _ndcg_at_10(summary: Optional[dict]) -> float:
-        ranking_metrics = summary.get("ranking_metrics", {}) if isinstance(summary, dict) else {}
+
+    def _ndcg_at_20(summary: Optional[dict]) -> float:
+        ranking_metrics = (
+            summary.get("ranking_metrics", {}) if isinstance(summary, dict) else {}
+        )
         try:
-            return float(ranking_metrics.get("ndcg", {}).get("@10", float("-inf")))
+            return float(ranking_metrics.get("ndcg", {}).get("@20", float("-inf")))
         except (TypeError, ValueError):
             return float("-inf")
 
@@ -153,13 +638,19 @@ def _build_experiment_results(
                         )
 
         run["summary"] = summary
-        run["ndcg_at_10"] = _ndcg_at_10(summary)
+        run["ndcg_at_20"] = _ndcg_at_20(summary)
         runs.append(run)
 
     if not runs:
         return None
 
-    runs = sorted(runs, key=lambda run: run.get("ndcg_at_10", float("-inf")), reverse=True)
+    runs = [run for run in runs if math.isfinite(run.get("ndcg_at_20", float("-inf")))]
+    if not runs:
+        return None
+
+    runs = sorted(
+        runs, key=lambda run: run.get("ndcg_at_20", float("-inf")), reverse=True
+    )
     best_run = runs[0]
     for idx, run in enumerate(runs):
         run["is_best_run"] = idx == 0
@@ -178,52 +669,59 @@ def _build_experiment_results(
             "experiment_dir": str(experiment_dir),
             "manifest": manifest,
             "best_run_dir": best_run.get("run_dir"),
-            "selection_metric": "ndcg@10",
+            "selection_metric": "ndcg@20",
         },
         "runs": runs,
     }
 
 
-def _load_local_experiment_results(outputs_base: Path) -> Optional[Dict]:
-    latest_pointer = outputs_base / "LATEST_EXPERIMENT.txt"
-    experiment_dir = None
+def _load_local_experiment_results(outputs_base: Path) -> Dict:
+    candidates = _list_local_experiment_dirs(outputs_base)
+    if not candidates:
+        raise _strict_runtime_error(
+            "No experiment directories found for strict best-run mode.",
+            [f"experiments_dir={outputs_base / 'experiments'}"],
+        )
 
-    if latest_pointer.exists():
+    issues: List[str] = []
+    for idx, experiment_dir in enumerate(candidates):
+        manifest_path = experiment_dir / "manifest.json"
+        if not manifest_path.exists():
+            issues.append(
+                f"missing_manifest experiment_dir={experiment_dir} path={manifest_path}"
+            )
+            continue
+
         try:
-            experiment_dir = Path(latest_pointer.read_text(encoding="utf-8").strip())
+            manifest = _load_json_file(manifest_path)
         except Exception as e:
-            logger.warning("Failed to read LATEST_EXPERIMENT.txt: %s", e)
+            issues.append(f"invalid_manifest experiment_dir={experiment_dir} error={e}")
+            continue
 
-    if not experiment_dir or not experiment_dir.exists():
-        experiments_base = outputs_base / "experiments"
-        if experiments_base.exists():
-            experiment_dirs = [
-                d
-                for d in experiments_base.iterdir()
-                if d.is_dir() and (d / "manifest.json").exists()
-            ]
-            if experiment_dirs:
-                experiment_dir = sorted(experiment_dirs, key=lambda d: d.name)[-1]
+        results = _build_experiment_results(
+            manifest,
+            source="Local Experiment",
+            experiment_dir=experiment_dir,
+        )
+        if not results:
+            issues.append(f"no_usable_runs manifest={manifest_path}")
+            continue
 
-    if not experiment_dir or not experiment_dir.exists():
-        return None
+        if idx > 0:
+            latest = candidates[0]
+            results["startup_notice"] = (
+                "Latest experiment is not yet usable (likely still running). "
+                f"Falling back to previous completed experiment: {experiment_dir.name} "
+                f"(latest candidate was {latest.name})."
+            )
+            logger.warning(results["startup_notice"])
 
-    manifest_path = experiment_dir / "manifest.json"
-    if not manifest_path.exists():
-        return None
+        logger.info("âś… Loaded experiment manifest from local: %s", experiment_dir)
+        return results
 
-    try:
-        with manifest_path.open("r", encoding="utf-8") as f:
-            manifest = json.load(f)
-    except Exception as e:
-        logger.warning("Failed to load experiment manifest %s: %s", manifest_path, e)
-        return None
-
-    logger.info("✅ Loaded experiment manifest from local: %s", experiment_dir)
-    return _build_experiment_results(
-        manifest,
-        source="Local Experiment",
-        experiment_dir=experiment_dir,
+    raise _strict_runtime_error(
+        "No usable completed runs found in local experiment manifests.",
+        issues[:20],
     )
 
 
@@ -245,21 +743,56 @@ def _load_gcs_experiment_results() -> Optional[Dict]:
                 experiment_ids.add(parts[1])
 
         if not experiment_ids:
-            return None
+            raise _strict_runtime_error(
+                "No experiment manifests found in GCS (strict mode).",
+                [f"bucket={gcs_bucket_name}", "prefix=experiments/"],
+            )
 
-        latest_experiment_id = sorted(experiment_ids)[-1]
-        manifest = cloud_storage.read_json(
-            f"experiments/{latest_experiment_id}/manifest.json"
-        )
-        logger.info("✅ Loaded experiment manifest from GCS: %s", latest_experiment_id)
-        return _build_experiment_results(
-            manifest,
-            source="GCS Experiment",
-            experiment_dir=Path(f"experiments/{latest_experiment_id}"),
+        sorted_ids = sorted(experiment_ids, reverse=True)
+        issues: List[str] = []
+        for idx, experiment_id in enumerate(sorted_ids):
+            try:
+                manifest = cloud_storage.read_json(
+                    f"experiments/{experiment_id}/manifest.json"
+                )
+            except Exception as e:
+                issues.append(f"read_error experiment_id={experiment_id} error={e}")
+                continue
+
+            if not isinstance(manifest, dict):
+                issues.append(f"invalid_payload experiment_id={experiment_id}")
+                continue
+
+            results = _build_experiment_results(
+                manifest,
+                source="GCS Experiment",
+                experiment_dir=Path(f"experiments/{experiment_id}"),
+            )
+            if not results:
+                issues.append(f"no_usable_runs experiment_id={experiment_id}")
+                continue
+
+            if idx > 0:
+                latest = sorted_ids[0]
+                results["startup_notice"] = (
+                    "Latest GCS experiment is not yet usable (likely still running). "
+                    f"Falling back to previous completed experiment: {experiment_id} "
+                    f"(latest candidate was {latest})."
+                )
+                logger.warning(results["startup_notice"])
+
+            logger.info("âś… Loaded experiment manifest from GCS: %s", experiment_id)
+            return results
+
+        raise _strict_runtime_error(
+            "No usable completed runs found in GCS experiment manifests.",
+            [f"bucket={gcs_bucket_name}", *issues[:20]],
         )
     except Exception as e:
-        logger.debug("GCS experiment results unavailable: %s", e)
-        return None
+        raise _strict_runtime_error(
+            "Failed to load latest experiment manifest from GCS.",
+            [f"bucket={gcs_bucket_name}", f"error={e}"],
+        ) from e
 
 
 def _load_summary_from_run_dir(run_dir: Path) -> Optional[Dict]:
@@ -434,7 +967,7 @@ def load_config(config_path: Path) -> Dict:
     # Include state_filter in config for DataService
     config["state_filter"] = raw_config.get("data", {}).get("state_filter")
 
-    logger.info(f"✅ Loaded config from {config_path}")
+    logger.info(f"âś… Loaded config from {config_path}")
     logger.info(
         f"   Device: {config['device']}, Latent dim: {config['latent_dim']}, SAE k: {config['k']}"
     )
@@ -457,152 +990,27 @@ def load_inference_service(
     files, NOT from config. This ensures consistency regardless of how data is
     filtered or configured on the inference machine.
     """
-    # Prefer the run selected in the Results page, then fall back to config.
-    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
-    ckpt_base = (
-        Path(selected_output_dir)
-        if selected_output_dir
-        else Path(config["model_checkpoint_dir"])
-    )
+    bundle = load_run_artifact_bundle(selected_output_dir)
+    run_dir = Path(bundle["run_dir"])
+    checkpoint_dir = run_dir / "checkpoints"
 
-    if selected_output_dir and not ckpt_base.exists():
-        logger.warning("Selected checkpoint dir does not exist: %s", ckpt_base)
-        ckpt_base = Path(config["model_checkpoint_dir"])
-
-    # Find latest checkpoint - search in multiple patterns
-
-    logger.info(f"Looking for checkpoints starting from: {ckpt_base}")
-
-    checkpoint_dir = None
-
-    # Strategy 1: Check if base path itself has checkpoint files
-    if (ckpt_base / "elsa_best.pt").exists():
-        # Find SAE checkpoint with flexible naming (sae_r*_k*_best.pt pattern)
-        sae_files = list(ckpt_base.glob("sae_r*_k*_best.pt"))
-        if sae_files or (ckpt_base / "sae_best.pt").exists():
-            checkpoint_dir = ckpt_base
-            logger.info(f"Found checkpoints directly in {ckpt_base}")
-
-    # Strategy 2: Check for checkpoints/ subdirectory
-    if not checkpoint_dir and (ckpt_base / "checkpoints").exists():
-        ckpt_subdir = ckpt_base / "checkpoints"
-        if (ckpt_subdir / "elsa_best.pt").exists():
-            sae_files = list(ckpt_subdir.glob("sae_r*_k*_best.pt"))
-            if sae_files or (ckpt_subdir / "sae_best.pt").exists():
-                checkpoint_dir = ckpt_subdir
-                logger.info(f"Found checkpoints in {checkpoint_dir}")
-
-    # Strategy 3: Search timestamp subdirectories for checkpoints/
-    if not checkpoint_dir and ckpt_base.exists():
-        subdirs = sorted([d for d in ckpt_base.iterdir() if d.is_dir()], reverse=True)
-        for subdir in subdirs:
-            # Try subdir/checkpoints/ first (most common pattern)
-            if (subdir / "checkpoints").exists():
-                ckpt_subdir = subdir / "checkpoints"
-                if (ckpt_subdir / "elsa_best.pt").exists():
-                    sae_files = list(ckpt_subdir.glob("sae_r*_k*_best.pt"))
-                    if sae_files or (ckpt_subdir / "sae_best.pt").exists():
-                        checkpoint_dir = ckpt_subdir
-                        logger.info(f"Found checkpoints in {checkpoint_dir}")
-                        break
-            # Try subdir directly as fallback
-            if not checkpoint_dir and (subdir / "elsa_best.pt").exists():
-                sae_files = list(subdir.glob("sae_r*_k*_best.pt"))
-                if sae_files or (subdir / "sae_best.pt").exists():
-                    checkpoint_dir = subdir
-                    logger.info(f"Found checkpoints in {checkpoint_dir}")
-                    break
-
-        if not checkpoint_dir:
-            cloud_storage = _get_cloud_storage_helper()
-            if cloud_storage:
-                target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
-                    cloud_storage
-                )
-                if target_timestamp:
-                    gcs_checkpoint_prefix = f"models/{target_timestamp}/checkpoints/"
-                    temp_checkpoint_dir = Path(
-                        tempfile.mkdtemp(prefix="diplomov_pr_ce_ckpts_")
-                    )
-                    if _download_gcs_prefix(
-                        cloud_storage, gcs_checkpoint_prefix, temp_checkpoint_dir
-                    ):
-                        checkpoint_dir = temp_checkpoint_dir
-                        logger.info(
-                            f"✅ Loaded checkpoints from GCS: gs://{cloud_storage.bucket_name}/{gcs_checkpoint_prefix}"
-                        )
-
-        if not checkpoint_dir:
-            logger.error("No checkpoint subdirs found")
-            if ckpt_base.exists():
-                logger.error(f"Searched: {[d.name for d in subdirs]}")
-                for subdir in subdirs[:3]:  # Show contents of first 3 dirs
-                    contents = list(subdir.iterdir())
-                    logger.error(f"  {subdir.name}/: {[c.name for c in contents]}")
-
-            error_msg = (
-                "❌ Model Checkpoints Not Found\n\n"
-                f"Could not find `elsa_best.pt` or `sae_best.pt` in:\n"
-                f"`{ckpt_base}`\n\n"
-                "**On Streamlit Cloud:**\n"
-                "The app now expects checkpoints in GCS under `models/<timestamp>/checkpoints/`.\n\n"
-                "**To fix:**\n"
-                "1. Ensure training uploads checkpoints to GCS\n"
-                "2. Set `GCS_BUCKET_NAME` in Cloud secrets\n"
-                "3. Redeploy the app\n\n"
-                "**Local development:**\n"
-                "If running locally, ensure the `outputs/` directory has trained model files."
-            )
-            if HAS_STREAMLIT:
-                st.error(error_msg)
-            raise RuntimeError(f"No model checkpoints found in {ckpt_base}")
-
-    if not checkpoint_dir:
-        error_msg = (
-            "❌ Model Checkpoint Directory Not Found\n\n"
-            f"The configured checkpoint directory does not exist:\n"
-            f"`{ckpt_base}`\n\n"
-            "**To fix:**\n"
-            f"1. Check that `configs/default.yaml` has correct `model_checkpoint_dir`\n"
-            f"2. Ensure trained model files are present in `outputs/*/checkpoints/`"
-        )
-        if HAS_STREAMLIT:
-            st.error(error_msg)
-        raise RuntimeError(
-            f"Checkpoint directory does not exist or has no valid checkpoints: {ckpt_base}"
-        )
-
-    # Find SAE checkpoint with flexible naming
-    sae_ckpt = None
-    sae_files = list(checkpoint_dir.glob("sae_r*_k*_best.pt"))
-    if sae_files:
-        sae_ckpt = sae_files[0]  # Use first match if multiple exist
-    elif (checkpoint_dir / "sae_best.pt").exists():
-        sae_ckpt = checkpoint_dir / "sae_best.pt"
-
-    if not sae_ckpt:
-        raise RuntimeError(f"SAE checkpoint not found in {checkpoint_dir}")
-
-    # Load models
     elsa_ckpt = checkpoint_dir / "elsa_best.pt"
+    sae_ckpt = Path(bundle["sae_checkpoint"])
 
-    logger.info(f"Loading ELSA from {elsa_ckpt}")
-    logger.info(f"Loading SAE from {sae_ckpt}")
-
-    # Load labels service
-    labels = load_labeling_service(config, selected_output_dir=selected_output_dir)
-
-    # Load data service to pass to inference service
-    data_service = load_data_service(config, selected_output_dir=selected_output_dir)
+    logger.info("Loading strict best-run checkpoints from %s", checkpoint_dir)
+    logger.info("Loading ELSA from %s", elsa_ckpt)
+    logger.info("Loading SAE from %s", sae_ckpt)
 
     service = InferenceService(
-        elsa_ckpt, sae_ckpt, config, labels=labels, data_service=data_service
+        elsa_ckpt, sae_ckpt, config, labels=None, data_service=None
     )
     if HAS_STREAMLIT:
         if not hasattr(st.session_state, "_startup_diagnostics"):
             st.session_state._startup_diagnostics = {}
         st.session_state._startup_diagnostics["models_loaded"] = True
-    logger.info("✅ Models loaded successfully")
+        st.session_state._startup_diagnostics["run_id"] = bundle.get("run_id")
+        st.session_state._startup_diagnostics["n_items"] = service.n_items
+    logger.info("âś… Models loaded successfully")
     return service
 
 
@@ -610,117 +1018,22 @@ def load_inference_service(
 def load_data_service(
     config: Dict,
     selected_output_dir: Optional[str] = None,
+    expected_n_items: Optional[int] = None,
 ):
-    """
-    Load POI data once per session.
+    """Load strict run-scoped POI data service."""
+    logger.info("Initializing Data Service (strict best-run mode)")
+    bundle = load_run_artifact_bundle(selected_output_dir)
+    active_run_dir = Path(bundle["run_dir"])
+    item2index_path = active_run_dir / "mappings" / "item2index.pkl"
+    if not item2index_path.exists():
+        raise _strict_runtime_error(
+            "Strict best-run mode requires run-scoped mapping artifact.",
+            [f"missing_path={item2index_path}"],
+        )
 
-    Supports both cloud backend (Cloud SQL + Cloud Storage) and local backend.
-
-    The unified DataService automatically detects which backend to use:
-    - If Cloud SQL credentials (CLOUDSQL_INSTANCE, etc.) are present -> Uses Cloud SQL
-    - Otherwise -> Uses local DuckDB tables
-
-    The USE_CLOUD_STORAGE env var can force local-only mode if set to "false".
-
-    Falls back gracefully if local data isn't available (for Streamlit Cloud).
-    """
-
-    logger.info("🔄 Initializing Data Service...")
-
-    # Check if local data files exist before trying to initialize
     duckdb_path = Path(config["duckdb_path"])
     data_available_locally = duckdb_path.exists()
 
-    # Path to item2index mapping - search in multiple locations
-    # Priority:
-    # 1. Latest training output: outputs/YYYYMMDD_HHMMSS/mappings/item2index.pkl (FILTERED - post-k-core!)
-    # 2. Fallback: outputs/YYYYMMDD_HHMMSS/mappings/business2index_universal.pkl (universal - less ideal)
-    # 3. In parquet directory (legacy location)
-    # 4. Hardcoded path for backward compatibility
-    item2index_path = None
-    item2index_candidates = []
-    active_run_dir = Path(selected_output_dir) if selected_output_dir else None
-
-    if active_run_dir and active_run_dir.exists():
-        for candidate in [
-            active_run_dir / "mappings" / "item2index.pkl",
-            active_run_dir / "mappings" / "business2index_universal.pkl",
-        ]:
-            item2index_candidates.append(candidate)
-            if candidate.exists():
-                item2index_path = candidate
-                logger.info("✅ Using mapping from selected run: %s", item2index_path)
-                break
-
-    # Strategy 1A: Find latest FILTERED mapping (post-k-core) - PRIORITIZE THIS
-    outputs_base = Path(__file__).parent.parent.parent / "outputs"
-    if not item2index_path and outputs_base.exists():
-        # List timestamp directories, sorted newest first
-        timestamp_dirs = sorted(
-            [d for d in outputs_base.iterdir() if d.is_dir() and len(d.name) == 15],
-            reverse=True,
-        )  # YYYYMMDD_HHMMSS format
-        for ts_dir in timestamp_dirs:
-            # Try filtered mapping first (what model actually uses)
-            candidate = ts_dir / "mappings" / "item2index.pkl"
-            if candidate.exists():
-                item2index_path = candidate
-                logger.info(
-                    f"✓ Found filtered item2index.pkl (post-k-core): {item2index_path}"
-                )
-                break
-            item2index_candidates.append(candidate)
-
-    # Strategy 1B: Fallback to universal mapping (backward compat, but NOT ideal for index alignment)
-    if not item2index_path and outputs_base.exists():
-        timestamp_dirs = sorted(
-            [d for d in outputs_base.iterdir() if d.is_dir() and len(d.name) == 15],
-            reverse=True,
-        )
-        for ts_dir in timestamp_dirs:
-            candidate = ts_dir / "mappings" / "business2index_universal.pkl"
-            if candidate.exists():
-                item2index_path = candidate
-                logger.warning(
-                    f"⚠️ Using universal mapping (may have index mismatch): {item2index_path}"
-                )
-                break
-            item2index_candidates.append(candidate)
-
-    # Strategy 2: Try in preprocessed directory
-    if not item2index_path:
-        preprocess_dir = Path(config.get("preprocess_dir", ""))
-        for candidate in [
-            preprocess_dir / "item2index.pkl",  # Preprocessed data directory
-            preprocess_dir.parent / "item2index.pkl",  # Parent directory
-        ]:
-            item2index_candidates.append(candidate)
-            if candidate.exists():
-                item2index_path = candidate
-                logger.info(f"✓ Found item2index at: {item2index_path}")
-                break
-
-    # Strategy 3: Try hardcoded legacy path
-    if not item2index_path:
-        candidate = (
-            Path(__file__).parent.parent.parent
-            / "data"
-            / "processed_yelp_easystudy"
-            / "item2index.pkl"
-        )
-        item2index_candidates.append(candidate)
-        if candidate.exists():
-            item2index_path = candidate
-            logger.info(f"✓ Found item2index at: {item2index_path}")
-
-    if not item2index_path:
-        logger.warning(
-            f"⚠️ item2index.pkl/business2index_universal.pkl not found in any location. "
-            f"Tried: {[str(c) for c in item2index_candidates[:5]]}"
-        )
-        # Don't fail - item2index is optional, app can work without it
-
-    # Path to local photos folder (support common folder naming variants)
     project_root = Path(__file__).parent.parent.parent
     photo_candidates = [
         project_root / "yelp_photos",
@@ -728,7 +1041,6 @@ def load_data_service(
     ]
     local_photos_path = next((p for p in photo_candidates if p.exists()), None)
 
-    # Check for Cloud SQL credentials
     from src.ui.services.secrets_helper import get_cloudsql_config
 
     cloudsql_config = get_cloudsql_config()
@@ -742,76 +1054,35 @@ def load_data_service(
     )
 
     if not data_available_locally and not cloudsql_available:
-        # Neither local data nor Cloud SQL available
-        error_msg = (
-            "❌ Data Backend Not Available\n\n"
-            "Neither local data files nor Cloud SQL credentials found.\n\n"
-            "**To fix on Streamlit Cloud:**\n"
-            "1. Go to your app settings → **Secrets**\n"
-            "2. Add Cloud SQL configuration:\n"
-            "   - `CLOUDSQL_INSTANCE`: your-project:region:instance\n"
-            "   - `CLOUDSQL_DATABASE`: postgres\n"
-            "   - `CLOUDSQL_USER`: postgres\n"
-            "   - `CLOUDSQL_PASSWORD`: your-password\n\n"
-            "**To fix locally:**\n"
-            "Ensure `configs/default.yaml` has correct paths to:\n"
-            f"- DuckDB: {duckdb_path}\n"
-            "- Optional preprocessed mappings in data/preprocessed_yelp/"
-        )
-        if HAS_STREAMLIT:
-            st.error(error_msg)
-        logger.error(error_msg)
-        raise RuntimeError(
-            "Data backend not available. Configure Cloud SQL or ensure local data exists."
+        raise _strict_runtime_error(
+            "Data backend not available.",
+            [
+                f"duckdb_missing={duckdb_path}",
+                "cloudsql_credentials=missing",
+            ],
         )
 
-    # Initialize DataService (will try Cloud SQL first, then fallback to local)
-    try:
-        service = DataService(
-            duckdb_path=duckdb_path,
-            config=config,
-            item2index_path=item2index_path,
-            local_photos_dir=local_photos_path,
-            active_run_dir=active_run_dir,
-        )
-    except FileNotFoundError as e:
-        error_msg = (
-            f"❌ Local data files not found: {e}\n\n"
-            "Local data path is not accessible. This is expected on Streamlit Cloud.\n\n"
-            "**To use local data:**\n"
-            "Run locally with:\n"
-            "`streamlit run src/ui/main.py`\n\n"
-            "**To use Streamlit Cloud:**\n"
-            "Configure Cloud SQL credentials in Streamlit Cloud Secrets."
-        )
-        if HAS_STREAMLIT:
-            st.error(error_msg)
-        logger.error(error_msg)
-        raise RuntimeError(f"Data not available: {e}") from e
+    service = DataService(
+        duckdb_path=duckdb_path,
+        config=config,
+        item2index_path=item2index_path,
+        local_photos_dir=local_photos_path,
+        active_run_dir=active_run_dir,
+        expected_n_items=expected_n_items or bundle.get("expected_n_items"),
+        strict_run_artifacts=True,
+    )
 
-    # Report which backend is being used
     backend_info = getattr(service, "backend_type", "unknown")
-    if backend_info == "cloudsql":
-        if HAS_STREAMLIT:
-            if not hasattr(st.session_state, "_startup_diagnostics"):
-                st.session_state._startup_diagnostics = {}
-            st.session_state._startup_diagnostics["backend"] = "Cloud SQL"
-        logger.info("✅ Data Service using Cloud SQL backend")
-    else:
-        if HAS_STREAMLIT:
-            if not hasattr(st.session_state, "_startup_diagnostics"):
-                st.session_state._startup_diagnostics = {}
-            st.session_state._startup_diagnostics[
-                "backend"
-            ] = f"DuckDB ({service.num_pois} POIs)"
-            if local_photos_path:
-                st.session_state._startup_diagnostics[
-                    "photos"
-                ] = f"Local ({local_photos_path})"
-        logger.info(f"✅ Loaded {service.num_pois} POIs (Local Backend - DuckDB)")
-        if local_photos_path:
-            logger.info(f"📷 Local photos enabled: {local_photos_path}")
+    if HAS_STREAMLIT:
+        if not hasattr(st.session_state, "_startup_diagnostics"):
+            st.session_state._startup_diagnostics = {}
+        st.session_state._startup_diagnostics["backend"] = (
+            "Cloud SQL"
+            if backend_info == "cloudsql"
+            else f"DuckDB ({service.num_pois} POIs)"
+        )
 
+    logger.info("Data Service ready (%s backend)", backend_info)
     return service
 
 
@@ -840,7 +1111,7 @@ def get_precomputed_cache_dir() -> Optional[Path]:
     for output_dir in output_dirs:
         cache_dir = output_dir / "precomputed_ui_cache" / "neuron_wordclouds"
         if cache_dir.exists():
-            logger.info(f"✓ Found precomputed cache at {cache_dir}")
+            logger.info(f"âś“ Found precomputed cache at {cache_dir}")
             return cache_dir
 
     logger.info("No precomputed cache found (app will compute on-demand)")
@@ -850,88 +1121,35 @@ def get_precomputed_cache_dir() -> Optional[Path]:
 @st_cache_resource
 def load_labeling_service(
     config: Dict,
-    data_service=None,
+    _data_service=None,
     selected_output_dir: Optional[str] = None,
 ) -> LabelingService:
+    """Load strict run-scoped neuron labeling artifacts.
+
+    Notes:
+    - `_data_service` intentionally starts with underscore so Streamlit's
+      cache key builder does not try to hash the live DataService object.
     """
-    Load neuron labeling service.
+    bundle = load_run_artifact_bundle(selected_output_dir)
+    output_dir = Path(bundle["run_dir"])
+    interpretations_dir = output_dir / "neuron_interpretations"
+    if not interpretations_dir.exists():
+        raise _strict_runtime_error(
+            "Strict best-run mode requires neuron_interpretations artifacts.",
+            [f"missing_path={interpretations_dir}"],
+        )
 
-    Labels are lazy-loaded on first access (no startup delay).
-    If no LLM provider is available (no API keys), uses basic pre-computed labels.
-    Labels are loaded from saved artifacts only.
-    """
-    # Prefer the run selected in the Results page, then fall back to latest run.
-    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
-    output_dir = Path(selected_output_dir) if selected_output_dir else None
-
-    if output_dir and not output_dir.exists():
-        logger.warning("Selected output dir does not exist: %s", output_dir)
-        output_dir = None
-
-    latest_run_path = Path("outputs") / "LATEST_RUN.txt"
-
-    if (not output_dir or not output_dir.exists()) and latest_run_path.exists():
-        try:
-            with open(latest_run_path, "r", encoding="utf-8") as f:
-                output_dir_str = f.read().strip()
-            output_dir = Path(output_dir_str)
-            logger.debug(f"Found latest output dir: {output_dir}")
-        except Exception as e:
-            logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
-
-    # Fallback: find most recent timestamped directory
-    if not output_dir or not output_dir.exists():
-        outputs_base = Path("outputs")
-        if outputs_base.exists():
-            timestamped_dirs = [
-                d
-                for d in outputs_base.iterdir()
-                if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
-            ]
-            if timestamped_dirs:
-                output_dir = sorted(timestamped_dirs)[-1]
-                logger.debug(f"Using most recent output dir: {output_dir}")
-
-    if not output_dir or not output_dir.exists():
-        cloud_storage = _get_cloud_storage_helper()
-        if cloud_storage:
-            target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
-                cloud_storage
-            )
-            if target_timestamp:
-                temp_root = Path(tempfile.mkdtemp(prefix="diplomov_pr_ce_labels_"))
-                gcs_prefix = f"models/{target_timestamp}/neuron_interpretations/"
-                if _download_gcs_prefix(
-                    cloud_storage, gcs_prefix, temp_root / "neuron_interpretations"
-                ):
-                    output_dir = temp_root
-                    logger.info(
-                        f"✅ Loaded labels from GCS run: gs://{cloud_storage.bucket_name}/{gcs_prefix}"
-                    )
-
-    # Use the neuron_interpretations directory, which stores labels_*.pkl
-    labels_path = None
-    if output_dir:
-        interpretations_dir = output_dir / "neuron_interpretations"
-        method_files = sorted(interpretations_dir.glob("labels_*.pkl"))
-        if method_files:
-            labels_path = interpretations_dir
-            logger.info(f"✅ Using labels from run directory: {labels_path}")
-        else:
-            candidate = interpretations_dir / "neuron_labels.json"
-            if candidate.exists():
-                labels_path = candidate
-                logger.info(f"✅ Using labels from: {labels_path}")
-
-    # Fallback to default path
-    if not labels_path:
-        labels_path = Path("outputs") / "neuron_labels.json"
-        logger.debug(f"Using fallback labels path: {labels_path}")
+    method_files = sorted(interpretations_dir.glob("labels_*.pkl"))
+    if not method_files:
+        raise _strict_runtime_error(
+            "Missing run-scoped label files.",
+            [f"expected_pattern={interpretations_dir / 'labels_*.pkl'}"],
+        )
 
     service = LabelingService(
-        labels_json_path=labels_path,
+        labels_json_path=interpretations_dir,
         config=config,
-        data_service=data_service,
+        data_service=_data_service,
     )
     return service
 
@@ -941,99 +1159,29 @@ def load_wordcloud_service(
     config: Dict,
     selected_output_dir: Optional[str] = None,
 ) -> "WordcloudService":
-    """
-    Load wordcloud service for neuron feature visualization.
-
-    Provides wordcloud generation from neuron category data.
-    """
+    """Load wordcloud service from strict run-scoped artifacts."""
     try:
         from src.ui.services import WordcloudService
     except ImportError:
         logger.error("WordcloudService not available")
         return None
 
-    # Prefer the run selected in the Results page, then fall back to latest run.
-    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
-    output_dir = Path(selected_output_dir) if selected_output_dir else None
+    bundle = load_run_artifact_bundle(selected_output_dir)
+    output_dir = Path(bundle["run_dir"])
+    labels_path = output_dir / "neuron_interpretations"
+    metadata_path = output_dir / "neuron_category_metadata.json"
 
-    if output_dir and not output_dir.exists():
-        logger.warning("Selected output dir does not exist: %s", output_dir)
-        output_dir = None
-
-    latest_run_path = Path("outputs") / "LATEST_RUN.txt"
-
-    if (not output_dir or not output_dir.exists()) and latest_run_path.exists():
-        try:
-            with open(latest_run_path, "r") as f:
-                output_dir_str = f.read().strip()
-            output_dir = Path(output_dir_str)
-            logger.debug(f"Found latest output dir from LATEST_RUN.txt: {output_dir}")
-        except Exception as e:
-            logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
-
-    # Fallback: find most recent timestamped directory
-    if not output_dir or not output_dir.exists():
-        outputs_base = Path("outputs")
-        if outputs_base.exists():
-            timestamped_dirs = [
-                d
-                for d in outputs_base.iterdir()
-                if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
-            ]
-            if timestamped_dirs:
-                output_dir = sorted(timestamped_dirs)[-1]  # Most recent
-                logger.debug(f"Using most recent output dir: {output_dir}")
-
-    if not output_dir or not output_dir.exists():
-        cloud_storage = _get_cloud_storage_helper()
-        if cloud_storage:
-            target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
-                cloud_storage
-            )
-            if target_timestamp:
-                temp_root = Path(tempfile.mkdtemp(prefix="diplomov_pr_ce_wordclouds_"))
-                labels_prefix = f"models/{target_timestamp}/neuron_interpretations/"
-                if _download_gcs_prefix(
-                    cloud_storage,
-                    labels_prefix,
-                    temp_root / "neuron_interpretations",
-                ) and _download_gcs_file(
-                    cloud_storage,
-                    f"models/{target_timestamp}/neuron_category_metadata.json",
-                    temp_root / "neuron_category_metadata.json",
-                ):
-                    output_dir = temp_root
-                    logger.info(
-                        f"✅ Loaded interpretability artifacts from GCS run: gs://{cloud_storage.bucket_name}/models/{target_timestamp}/"
-                    )
-
-    # Look for label and metadata files
-    labels_path = None
-    metadata_path = None
-
-    if output_dir:
-        interpretations_dir = output_dir / "neuron_interpretations"
-        labels_path = interpretations_dir / "neuron_labels.json"
-        metadata_path = output_dir / "neuron_category_metadata.json"
-
-        if labels_path.exists():
-            logger.info(f"Found labels at: {labels_path}")
-        else:
-            logger.warning(f"Labels not found at: {labels_path}")
-            labels_path = None
-
-        if metadata_path.exists():
-            logger.info(f"Found metadata at: {metadata_path}")
-        else:
-            logger.warning(f"Metadata not found at: {metadata_path}")
-            metadata_path = None
+    if not metadata_path.exists():
+        raise _strict_runtime_error(
+            "Missing run-scoped neuron category metadata.",
+            [f"missing_path={metadata_path}"],
+        )
 
     service = WordcloudService(
-        category_metadata_path=metadata_path if metadata_path else None,
-        labels_path=labels_path,
+        category_metadata_path=metadata_path,
+        labels_path=labels_path if labels_path.exists() else None,
     )
-
-    logger.info("✅ Wordcloud service initialized")
+    logger.info("Wordcloud service initialized")
     return service
 
 
@@ -1042,77 +1190,19 @@ def load_coactivation_service(
     config: Dict,
     selected_output_dir: Optional[str] = None,
 ) -> Optional["CoactivationService"]:
-    """
-    Load co-activation service for neuron relationship visualization.
+    """Load strict run-scoped co-activation service."""
+    bundle = load_run_artifact_bundle(selected_output_dir)
+    output_dir = Path(bundle["run_dir"])
+    coactivation_path = output_dir / "neuron_coactivation.json"
 
-    Provides co-activation relationships between neurons.
-    """
-    # Prefer the run selected in the Results page, then fall back to latest run.
-    selected_run_timestamp = _extract_run_timestamp(selected_output_dir)
-    output_dir = Path(selected_output_dir) if selected_output_dir else None
-
-    if output_dir and not output_dir.exists():
-        logger.warning("Selected output dir does not exist: %s", output_dir)
-        output_dir = None
-
-    latest_run_path = Path("outputs") / "LATEST_RUN.txt"
-
-    if (not output_dir or not output_dir.exists()) and latest_run_path.exists():
-        try:
-            with open(latest_run_path, "r") as f:
-                output_dir_str = f.read().strip()
-            output_dir = Path(output_dir_str)
-            logger.debug(f"Found latest output dir from LATEST_RUN.txt: {output_dir}")
-        except Exception as e:
-            logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
-
-    # Fallback: find most recent timestamped directory
-    if not output_dir or not output_dir.exists():
-        outputs_base = Path("outputs")
-        if outputs_base.exists():
-            timestamped_dirs = [
-                d
-                for d in outputs_base.iterdir()
-                if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
-            ]
-            if timestamped_dirs:
-                output_dir = sorted(timestamped_dirs)[-1]  # Most recent
-                logger.debug(f"Using most recent output dir: {output_dir}")
-
-    if not output_dir or not output_dir.exists():
-        cloud_storage = _get_cloud_storage_helper()
-        if cloud_storage:
-            target_timestamp = selected_run_timestamp or _find_latest_model_timestamp(
-                cloud_storage
-            )
-            if target_timestamp:
-                temp_root = Path(
-                    tempfile.mkdtemp(prefix="diplomov_pr_ce_coactivation_")
-                )
-                if _download_gcs_file(
-                    cloud_storage,
-                    f"models/{target_timestamp}/neuron_coactivation.json",
-                    temp_root / "neuron_coactivation.json",
-                ):
-                    output_dir = temp_root
-                    logger.info(
-                        f"✅ Loaded coactivation data from GCS run: gs://{cloud_storage.bucket_name}/models/{target_timestamp}/"
-                    )
-
-    # Look for coactivation file
-    coactivation_path = None
-
-    if output_dir:
-        coactivation_path = output_dir / "neuron_coactivation.json"
-
-        if coactivation_path.exists():
-            logger.info(f"Found co-activation data at: {coactivation_path}")
-        else:
-            logger.debug(f"Co-activation file not found at: {coactivation_path}")
-            coactivation_path = None
+    if not coactivation_path.exists():
+        raise _strict_runtime_error(
+            "Missing run-scoped coactivation artifact.",
+            [f"missing_path={coactivation_path}"],
+        )
 
     service = CoactivationService(coactivation_path=coactivation_path)
-    logger.info("✅ Co-activation service initialized")
+    logger.info("Co-activation service initialized")
     return service
 
 
@@ -1121,108 +1211,37 @@ def load_training_results(
     config: Dict,
     selected_output_dir: Optional[str] = None,
 ) -> Optional[Dict]:
-    """
-    Load training results from GCS first, then local filesystem for offline use.
+    """Load strict latest-experiment results and block startup on contract failure."""
+    local_error: Optional[Exception] = None
+    gcs_error: Optional[Exception] = None
 
-    Tries in order:
-    1. Latest results from GCS (if GCS_BUCKET_NAME configured)
-    2. Latest results from local outputs/ directory as an offline fallback
+    try:
+        local_results = _load_local_experiment_results(Path("outputs"))
+        if local_results:
+            return local_results
+    except Exception as e:
+        local_error = e
+        logger.warning("Local strict experiment loading failed: %s", e)
 
-    Returns:
-        Dict with 'summary' and 'ranking_metrics' keys, or None if not found
-    """
-    import os
+    try:
+        gcs_results = _load_gcs_experiment_results()
+        if gcs_results:
+            return gcs_results
+    except Exception as e:
+        gcs_error = e
+        logger.warning("GCS strict experiment loading failed: %s", e)
 
-    results = {"summary": None, "ranking_metrics": None, "source": None}
-
-    # Prefer latest experiment sweep if one exists.
-    experiment_results = _load_gcs_experiment_results()
-    if not experiment_results:
-        experiment_results = _load_local_experiment_results(Path("outputs"))
-
-    if experiment_results:
-        if selected_output_dir:
-            experiment_results["selected_run_dir"] = selected_output_dir
-        return experiment_results
-
-    if selected_output_dir:
-        selected_run = _load_summary_from_run_dir(Path(selected_output_dir))
-        if selected_run:
-            return selected_run
-
-    # Try GCS first
-    gcs_bucket_name = os.getenv("GCS_BUCKET_NAME")
-    if gcs_bucket_name:
-        try:
-            from src.ui.services.cloud_storage_helper import CloudStorageHelper
-
-            cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
-
-            # List all model result directories in GCS
-            models_prefix = "models/"
-            blobs = cloud_storage.bucket.list_blobs(prefix=models_prefix)
-            timestamps = set()
-            for blob in blobs:
-                # Extract timestamp from path like "models/YYYYMMDD_HHMMSS/summary.json"
-                parts = blob.name.split("/")
-                if len(parts) >= 2:
-                    timestamp = parts[1]
-                    if len(timestamp) == 15:  # YYYYMMDD_HHMMSS format
-                        timestamps.add(timestamp)
-
-            if timestamps:
-                latest_timestamp = sorted(timestamps)[-1]
-                logger.info(f"Found latest training results in GCS: {latest_timestamp}")
-
-                # Download summary
-                try:
-                    summary_data = cloud_storage.read_json(
-                        f"models/{latest_timestamp}/summary.json"
-                    )
-                    results["summary"] = summary_data
-                    results["ranking_metrics"] = summary_data.get("ranking_metrics")
-                    results["source"] = "GCS"
-                    logger.info(
-                        f"✅ Loaded training results from GCS (timestamp: {latest_timestamp})"
-                    )
-                    return results
-                except Exception as e:
-                    logger.warning(f"Failed to download summary from GCS: {e}")
-
-        except Exception as e:
-            logger.debug(f"GCS results unavailable: {e}")
-
-    # Fall back to local filesystem
-    outputs_base = Path("outputs")
-    if outputs_base.exists():
-        timestamped_dirs = [
-            d
-            for d in outputs_base.iterdir()
-            if d.is_dir() and len(d.name) == 15  # Format: YYYYMMDD_HHMMSS
-        ]
-
-        if timestamped_dirs:
-            output_dir = sorted(timestamped_dirs)[-1]  # Most recent
-            summary_path = output_dir / "summary.json"
-
-            if summary_path.exists():
-                import json
-
-                try:
-                    with open(summary_path) as f:
-                        summary_data = json.load(f)
-                    results["summary"] = summary_data
-                    results["ranking_metrics"] = summary_data.get("ranking_metrics")
-                    results["source"] = "Local"
-                    logger.info(
-                        f"✅ Loaded training results from local (timestamp: {output_dir.name})"
-                    )
-                    return results
-                except Exception as e:
-                    logger.warning(f"Failed to load local summary: {e}")
-
-    logger.warning("No training results found (GCS or local)")
-    return None
+    issues = [
+        "Strict best-run mode could not resolve the latest experiment manifest.",
+    ]
+    if local_error:
+        issues.append(f"local_error={local_error}")
+    if gcs_error:
+        issues.append(f"gcs_error={gcs_error}")
+    raise _strict_runtime_error(
+        "Startup blocked: strict best-run contract failed.",
+        issues,
+    )
 
 
 @st_cache_resource
@@ -1240,7 +1259,7 @@ def load_semantic_search_model():
         from sentence_transformers import SentenceTransformer
 
         model = SentenceTransformer("all-MiniLM-L6-v2")
-        logger.info("✅ Semantic search model loaded and cached")
+        logger.info("âś… Semantic search model loaded and cached")
         return model
     except Exception as e:
         logger.warning(f"Could not load semantic search model: {e}")
@@ -1262,7 +1281,7 @@ def cache_all_label_embeddings(labels_service, max_neuron: int):
     # Return cached version if available
     if cache_key in st.session_state and st.session_state[cache_key] is not None:
         logger.info(
-            f"✅ Using cached label embeddings: {len(st.session_state[cache_key])} embeddings"
+            f"âś… Using cached label embeddings: {len(st.session_state[cache_key])} embeddings"
         )
         return st.session_state[cache_key]
 
@@ -1309,7 +1328,7 @@ def cache_all_label_embeddings(labels_service, max_neuron: int):
         # Cache in session state
         st.session_state[cache_key] = embeddings_dict
         logger.info(
-            f"✅ Cached {len(embeddings_dict)} label embeddings in session state"
+            f"âś… Cached {len(embeddings_dict)} label embeddings in session state"
         )
         return embeddings_dict
 

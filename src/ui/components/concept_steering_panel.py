@@ -11,7 +11,38 @@ from typing import Dict, List, Tuple
 
 import streamlit as st
 
+from src.ui.steering_state import get_steering_config, set_steering_config
+
 logger = logging.getLogger(__name__)
+
+
+def _merge_neuron_values(
+    existing_neuron_values: Dict[int, float],
+    patch_neuron_values: Dict[int, float],
+) -> Dict[int, float]:
+    """Merge steering updates into the canonical neuron map.
+
+    Patch semantics:
+    - Incoming values overwrite existing neuron targets.
+    - Near-zero values remove neurons from the final map.
+    - Invalid keys/values are ignored.
+
+    This keeps concept/superfeature steering and manual neuron slider edits
+    additive, so both mechanisms operate on the same canonical state.
+    """
+    merged = dict(existing_neuron_values or {})
+    for raw_idx, raw_value in (patch_neuron_values or {}).items():
+        try:
+            neuron_idx = int(raw_idx)
+            weight = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+
+        if abs(weight) < 1e-9:
+            merged.pop(neuron_idx, None)
+        else:
+            merged[neuron_idx] = weight
+    return merged
 
 
 def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
@@ -82,7 +113,6 @@ def render_concept_steering_panel(
 ):
     """Render concept/superfeature steering and apply it live."""
     labels_service = session_state.get("labels")
-    data_service = session_state.get("data")
     selected_user = selected_user or session_state.get("current_user_id")
 
     if not labels_service:
@@ -156,6 +186,8 @@ and apply steering through the same hidden-space mechanism used for direct neuro
     chosen_entity = None
     chosen_weights = {}
     chosen_type = "concept"
+    existing_config = get_steering_config(session_state, selected_user) or {}
+    active_alpha = float(existing_config.get("alpha", 0.3))
 
     for rank, (entity_id, label, similarity) in enumerate(results, 1):
         resolved_label, neuron_weights, entity_type = _resolve_result(
@@ -173,57 +205,47 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         with columns[2]:
             st.write(f"{similarity:.3f}")
         with columns[3]:
-            if st.checkbox("", key=f"concept_pick_{selected_method}_{entity_id}"):
+            if st.checkbox(
+                "Select concept",
+                key=f"concept_pick_{selected_method}_{entity_id}",
+                label_visibility="collapsed",
+            ):
                 chosen_entity = str(entity_id)
                 chosen_weights = neuron_weights
                 chosen_type = entity_type
 
-    alpha = st.slider(
-        "Steering strength",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.3,
-        step=0.05,
-        key=f"concept_alpha_{selected_method}",
-    )
+    st.caption(f"Using global steering alpha: {active_alpha:.2f}")
 
     if not chosen_weights:
         st.info("Select one result to apply steering.")
         return
 
     if st.button("Apply Concept Steering", key=f"apply_concept_{selected_method}"):
-        steering_config = {
-            "type": chosen_type,
-            "alpha": alpha,
-            "neuron_weights": chosen_weights,
-        }
-        if chosen_type == "concept":
-            steering_config["concept_id"] = chosen_entity
-        elif chosen_type == "superfeature":
-            steering_config["superfeature_id"] = chosen_entity.split(":", 1)[1]
-        else:
-            steering_config["neuron_values"] = chosen_weights
-
-        valid_item_ids = data_service.get_valid_item_ids() if data_service else None
-        recommendations = inference_service.get_recommendations_with_delta(
-            selected_user,
-            steering_config=steering_config,
-            top_k=20,
-            valid_item_ids=valid_item_ids,
+        merged_neuron_values = _merge_neuron_values(
+            dict(existing_config.get("neuron_values") or {}),
+            chosen_weights,
         )
-        if data_service:
-            poi_indices = [r.get("item_id") or r.get("poi_idx") for r in recommendations]
-            session_state[f"poi_details_map_{selected_user}"] = data_service.get_poi_details_batch(
-                poi_indices
-            )
-        session_state[f"live_demo::{selected_user}::steered_recommendations"] = recommendations
-        session_state[f"live_demo::{selected_user}::active_steering_config"] = steering_config
-        session_state[f"live_demo::{selected_user}::displayed_recommendations"] = recommendations
-        session_state[f"live_demo::{selected_user}::feature_chart_original"] = None
-        session_state[f"live_demo::{selected_user}::feature_chart_steered"] = None
-        session_state.current_recommendations = recommendations
-        session_state.steering_modified = True
-        session_state.current_steering_config = steering_config
+
+        source = chosen_type
+
+        provenance = dict(existing_config.get("provenance") or {})
+        provenance = {
+            **provenance,
+            "method": selected_method,
+            "entity_id": chosen_entity,
+            "entity_type": chosen_type,
+            "query": query,
+        }
+        set_steering_config(
+            session_state,
+            selected_user,
+            neuron_values=merged_neuron_values,
+            alpha=active_alpha,
+            source=source,
+            provenance=provenance,
+        )
+        session_state[f"live_demo::{selected_user}::sync_sliders_from_config"] = True
         st.success(
-            f"Applied {chosen_type} steering using {len(chosen_weights)} saved neuron targets."
+            f"Applied {chosen_type} steering using {len(chosen_weights)} targets "
+            f"(merged config now has {len(merged_neuron_values)} neurons)."
         )

@@ -800,7 +800,7 @@ def benchmark_inference(
     model_predictions: np.ndarray,
     n_samples: int = 100,
     device: str = "cpu",
-) -> Dict[str, float]:
+) -> Dict[str, float | list[float]]:
     """
     Benchmark inference latency from model predictions.
 
@@ -818,8 +818,9 @@ def benchmark_inference(
 
     Returns
     -------
-    Dict[str, float]
-        Keys: 'mean_ms', 'p95_ms', 'max_ms', 'p50_ms' (estimated latency in ms)
+    Dict[str, float | list[float]]
+        Keys: 'mean_ms', 'p95_ms', 'max_ms', 'p50_ms', 'samples_ms'
+        (estimated latency in ms)
     """
     import time
 
@@ -847,6 +848,7 @@ def benchmark_inference(
         "p50_ms": float(np.percentile(latencies, 50)),
         "p95_ms": float(np.percentile(latencies, 95)),
         "max_ms": float(np.max(latencies)),
+        "samples_ms": [float(v) for v in latencies.tolist()],
     }
 
 

@@ -17,7 +17,7 @@ from src.data.preprocessing import build_csr
 
 logger = logging.getLogger(__name__)
 
-PREPROCESSING_CACHE_VERSION = 1
+PREPROCESSING_CACHE_VERSION = 2
 PREPROCESSING_K_CORE = 5
 
 

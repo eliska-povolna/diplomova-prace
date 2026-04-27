@@ -1,4 +1,4 @@
-"""Live demo page — Interactive steering (main interactive page)."""
+"""Live demo page � Interactive steering (main interactive page)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,12 @@ import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image, ImageDraw
 
+from src.ui.steering_state import (
+    get_steering_config,
+    set_steering_config,
+    steering_config_hash,
+    to_inference_config,
+)
 from src.ui.utils import info_section
 from src.ui.utils.formatting import format_feature_id, format_features_list
 from src.ui.components.concept_steering_panel import render_concept_steering_panel
@@ -102,11 +108,19 @@ def _set_demo_recommendation_state(
     displayed = (
         steered_recommendations
         if active_config and steered_recommendations is not None
-        else st.session_state.get(_demo_state_key(selected_user, "steered_recommendations"))
-        if active_config
-        else base_recommendations
-        if base_recommendations is not None
-        else st.session_state.get(_demo_state_key(selected_user, "base_recommendations"), [])
+        else (
+            st.session_state.get(
+                _demo_state_key(selected_user, "steered_recommendations")
+            )
+            if active_config
+            else (
+                base_recommendations
+                if base_recommendations is not None
+                else st.session_state.get(
+                    _demo_state_key(selected_user, "base_recommendations"), []
+                )
+            )
+        )
     )
     st.session_state[_demo_state_key(selected_user, "displayed_recommendations")] = (
         displayed or []
@@ -119,12 +133,17 @@ def _set_demo_recommendation_state(
 
 
 def _clear_demo_steering_state(selected_user: str) -> None:
-    base = st.session_state.get(_demo_state_key(selected_user, "base_recommendations"), [])
+    base = st.session_state.get(
+        _demo_state_key(selected_user, "base_recommendations"), []
+    )
     st.session_state[_demo_state_key(selected_user, "steered_recommendations")] = []
+    set_steering_config(st.session_state, selected_user, neuron_values={})
     st.session_state[_demo_state_key(selected_user, "active_steering_config")] = None
     st.session_state[_demo_state_key(selected_user, "displayed_recommendations")] = base
     st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = None
     st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
+    st.session_state[_demo_state_key(selected_user, "steering_hash")] = ""
+    st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
     st.session_state.current_recommendations = base
     st.session_state.steering_modified = False
 
@@ -173,9 +192,16 @@ def _render_active_features_section(
                 _demo_state_key(selected_user, "feature_chart_steered")
             )
             if original_chart and steered_chart:
-                plot_feature_activations(steered_chart[:num_features], original_activations=original_chart[:num_features])
+                plot_feature_activations(
+                    steered_chart[:num_features],
+                    original_activations=original_chart[:num_features],
+                    chart_key_suffix=selected_user,
+                )
             else:
-                plot_feature_activations(all_activations[:num_features])
+                plot_feature_activations(
+                    all_activations[:num_features],
+                    chart_key_suffix=selected_user,
+                )
         else:
             st.info("No active features found")
 
@@ -222,239 +248,312 @@ def _render_steering_and_recommendations(
     data,
     activations: List[Dict],
 ) -> None:
-    """Generate recommendations with interactive feature steering controls.
-
-    Core steering experience: users adjust feature importance via sliders,
-    recommendations regenerate only when steering changes (cached for performance).
-
-    **Steering Mechanism**:
-    - Sliders: -1 (suppress), 0 (no change), +2 (emphasize)
-    - Alpha=0.3: 30% blend between baseline and steered recommendations
-    - Changes regenerate recommendations; cached for other page changes
-
-    **Performance**:
-    - First steering change: ~1-3s (inference compute)
-    - Cached: <100ms (reused recommendations)
-    - Slider interactions: <100ms (no recompute)
-
-    Args:
-        selected_user: Yelp user ID
-        inference: InferenceService with recommendations
-        data: DataService for item validation
-        activations: List of active features from _render_active_features_section
-    """
+    """Generate recommendations with interactive feature steering controls."""
     info_section(
-        "🎚️ Adjust Your Preferences",
-        "Use sliders to steer recommendations by adjusting feature activation. "
-        "Left (-1) = Avoid, Center (0) = No change, Right (+2) = Strongly prefer",
+        "Steer Your Preferences",
+        "Set target activations for your top features. The model blends baseline and steered "
+        "representations using alpha, then recomputes recommendations.",
     )
 
-    if activations and len(activations) > 0:
-        st.markdown(
-            """
-        Adjust feature importance to steer recommendations:
-        - **Left (-1)**: Strongly avoid this feature
-        - **Center (0)**: Use current feature importance
-        - **Right (+2)**: Strongly prefer this feature
+    if not activations:
+        st.info("No active features to steer")
+        return
+
+    st.markdown(
         """
+Steer your preferences using this formula:
+`z_final = (1 - alpha) * z_user + alpha * z_steered`
+
+- You can set your preference for these concepts using the sliders below.
+- `alpha` controls how strongly steering influences the final ranking (if it is set to 1, the activation value will be equal to the user's setting.)
+- You can see the current and steered activation value of activations under each slider.
+- For each label, concept presence ratio is computed, so you can see whether that feature is actually present in the recommendation set. (Unavailable for LLM features.)
+"""
+    )
+
+    active_config = get_steering_config(st.session_state, selected_user) or {}
+    existing_neuron_values = dict(active_config.get("neuron_values") or {})
+    active_alpha = float(active_config.get("alpha", 0.3))
+    active_source = str(active_config.get("source", "neuron"))
+    active_provenance = dict(active_config.get("provenance") or {})
+
+    global_alpha = st.slider(
+        "Global steering alpha",
+        min_value=0.0,
+        max_value=1.0,
+        value=active_alpha,
+        step=0.05,
+        help="Shared steering strength used by both neuron and concept steering.",
+    )
+    st.caption(f"Current shared alpha: {global_alpha:.2f}")
+
+    try:
+        current_activations = inference.get_user_steering(selected_user)
+    except ValueError as e:
+        logger.warning(f"Could not get current activations: {e}")
+        current_activations = {}
+
+    num_features_to_display = st.session_state.get("display_num_features", 9)
+    top_features = activations[:num_features_to_display]
+    cols_per_row = 3
+
+    merged_neuron_values = dict(existing_neuron_values)
+    sliders_sync_key = _demo_state_key(selected_user, "sync_sliders_from_config")
+    sync_sliders = bool(st.session_state.get(sliders_sync_key, False))
+    slider_patch_applied = False
+
+    for row_idx in range(0, len(top_features), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col_idx, col in enumerate(cols):
+            feature_idx = row_idx + col_idx
+            if feature_idx >= len(top_features):
+                continue
+
+            feature = top_features[feature_idx]
+            neuron_idx = feature["neuron_idx"]
+            label = feature["label"]
+            current_val = float(
+                current_activations.get(neuron_idx, feature.get("activation", 0.0))
+            )
+            slider_key = f"slider_{neuron_idx}_{selected_user}"
+            prior_value = float(existing_neuron_values.get(neuron_idx, current_val))
+            prior_value = max(-1.0, min(2.0, prior_value))
+            if sync_sliders or slider_key not in st.session_state:
+                st.session_state[slider_key] = prior_value
+
+            with col:
+                formatted_label = format_feature_id(neuron_idx, label)
+                st.markdown(f"**{formatted_label}**")
+                slider_col, learn_col = st.columns([5, 1])
+                with slider_col:
+                    target_activation = st.slider(
+                        "Set your preference:",
+                        min_value=-1.0,
+                        max_value=2.0,
+                        step=0.1,
+                        key=slider_key,
+                        help="If you want to see more of this feature, move the slider to the right. If less, move it to the left.",
+                    )
+                with learn_col:
+                    # Use st.switch_page with the stored page object and query params
+
+                    if st.button(
+                        "📚",
+                        key=f"learn_{neuron_idx}_{selected_user}",
+                        help="Learn more about this feature",
+                    ):
+                        # Store feature ID in session_state for interpretability page to read
+                        st.session_state["selected_feature_id"] = neuron_idx
+                        interpretability_page = st.session_state.get(
+                            "_interpretability_page"
+                        )
+                        if interpretability_page:
+                            st.switch_page(interpretability_page)
+
+                if abs(target_activation - current_val) > 1e-9:
+                    merged_neuron_values[neuron_idx] = float(target_activation)
+                else:
+                    merged_neuron_values.pop(neuron_idx, None)
+
+                try:
+                    blended_activation = inference.get_steered_neuron_activation(
+                        selected_user,
+                        neuron_idx,
+                        float(target_activation),
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not compute steered activation: {e}")
+                    blended_activation = ((1.0 - global_alpha) * current_val) + (
+                        global_alpha * float(target_activation)
+                    )
+
+                st.caption(
+                    (
+                        f"📊 Current: {current_val:.2f} → Steered to: {blended_activation:.2f}"
+                    )
+                )
+
+                if abs(float(target_activation) - prior_value) > 1e-9:
+                    slider_patch_applied = True
+
+    st.session_state[sliders_sync_key] = False
+    st.divider()
+
+    source = "neuron" if slider_patch_applied else active_source
+    provenance = dict(active_provenance)
+    if slider_patch_applied:
+        provenance["edited_in"] = "neuron_panel"
+
+    steering_config = set_steering_config(
+        st.session_state,
+        selected_user,
+        neuron_values=merged_neuron_values,
+        alpha=global_alpha,
+        source=source,
+        provenance=provenance,
+    )
+
+    if steering_config:
+        try:
+            original_activations = inference.get_user_steering(selected_user)
+            original_features = [
+                {
+                    **feat,
+                    "activation": original_activations.get(feat["neuron_idx"], 0.0),
+                }
+                for feat in top_features
+            ]
+            steered_activations = inference.get_steered_activations(
+                selected_user,
+                steering_config.get("neuron_values", {}),
+                k=len(top_features),
+            )
+            st.session_state[
+                _demo_state_key(selected_user, "feature_chart_original")
+            ] = original_features
+            st.session_state[
+                _demo_state_key(selected_user, "feature_chart_steered")
+            ] = steered_activations
+        except Exception as e:
+            logger.debug(f"Could not compute steered activations chart: {e}")
+    else:
+        st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = (
+            None
         )
+        st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
 
-        steering_updates = {}
+    try:
+        steering_hash_key = _demo_state_key(selected_user, "steering_hash")
+        current_hash = steering_config_hash(steering_config)
+        previous_hash = st.session_state.get(steering_hash_key, "")
+        steering_changed = current_hash != previous_hash
 
-        try:
-            current_activations = inference.get_user_steering(selected_user)
-        except ValueError as e:
-            logger.warning(f"Could not get current activations: {e}")
-            current_activations = {}
+        base_cache_key = _demo_state_key(selected_user, "base_recommendations")
+        current_base = st.session_state.get(base_cache_key)
+        valid_item_ids = data.get_valid_item_ids()
 
-        # Display sliders for top num_features only (read from session_state, doesn't trigger rerun)
-        num_features_to_display = st.session_state.get("display_num_features", 9)
-        top_features = activations[:num_features_to_display]
-        cols_per_row = 3
-
-        for row_idx in range(0, len(top_features), cols_per_row):
-            cols = st.columns(cols_per_row)
-
-            for col_idx, col in enumerate(cols):
-                feature_idx = row_idx + col_idx
-
-                if feature_idx < len(top_features):
-                    feature = top_features[feature_idx]
-                    neuron_idx = feature["neuron_idx"]
-                    label = feature["label"]
-
-                    current_val = current_activations.get(neuron_idx, 0.5)
-
-                    with col:
-                        formatted_label = format_feature_id(neuron_idx, label)
-
-                        # Feature slider with learn more button
-                        slider_col, learn_col = st.columns([4, 1])
-                        with slider_col:
-                            steering_value = st.slider(
-                                f"{formatted_label}",
-                                min_value=-1.0,
-                                max_value=2.0,
-                                value=0.0,
-                                step=0.1,
-                                key=f"slider_{neuron_idx}_{selected_user}",
-                                label_visibility="collapsed",
-                            )
-                        with learn_col:
-                            # Use st.switch_page with the stored page object and query params
-                            if st.button(
-                                "📚",
-                                key=f"learn_{neuron_idx}_{selected_user}",
-                                help="Learn more about this feature",
-                            ):
-                                # Store feature ID in session_state for interpretability page to read
-                                st.session_state["selected_feature_id"] = neuron_idx
-                                interpretability_page = st.session_state.get(
-                                    "_interpretability_page"
-                                )
-                                if interpretability_page:
-                                    st.switch_page(interpretability_page)
-
-                        # Add back the label on its own line
-                        st.caption(f"**{formatted_label}**")
-
-                        if steering_value != 0.0:
-                            try:
-                                steered_activation = (
-                                    inference.get_steered_neuron_activation(
-                                        selected_user, neuron_idx, steering_value
-                                    )
-                                )
-                                st.caption(
-                                    f"📊 Current: {current_val:.2f} → After steering: {steered_activation:.2f}"
-                                )
-                                steering_updates[neuron_idx] = steering_value
-                            except Exception as e:
-                                logger.debug(
-                                    f"Could not compute steered activation: {e}"
-                                )
-                                st.caption(
-                                    f"📊 Current: {current_val:.2f} → Steered to: {steering_value:.2f}"
-                                )
-                                steering_updates[neuron_idx] = steering_value
-                        else:
-                            st.caption(f"📊 Current: {current_val:.2f}")
-
-        st.divider()
-        if steering_updates:
-            try:
-                original_activations = inference.get_user_steering(selected_user)
-                original_features = [
-                    {
-                        **feat,
-                        "activation": original_activations.get(feat["neuron_idx"], 0.0),
-                    }
-                    for feat in top_features
-                ]
-                steered_activations = inference.get_steered_activations(
-                    selected_user, steering_updates, k=len(top_features)
-                )
-                st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = original_features
-                st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = steered_activations
-            except Exception as e:
-                logger.debug(f"Could not compute steered activations chart: {e}")
-        else:
-            st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = None
-            st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
-        # COMPUTE RECOMMENDATIONS - only on steering change or first load
-        try:
-            steering_cache_key = _demo_state_key(selected_user, "neuron_steering")
-            last_steering = st.session_state.get(steering_cache_key, {})
-            steering_changed = steering_updates != last_steering
-
-            base_cache_key = _demo_state_key(selected_user, "base_recommendations")
-            current_base = st.session_state.get(base_cache_key)
-
-            if steering_changed or current_base is None:
-                logger.info("Computing recommendations (steering changed or first load)")
-
-                valid_item_ids = data.get_valid_item_ids()
-                logger.debug(
-                    f"State filtering: {len(valid_item_ids)} valid items available"
-                )
-
+        baseline_recommendations = current_base
+        is_first_load = baseline_recommendations is None
+        if baseline_recommendations is None:
+            logger.info("Computing baseline recommendations (first load)")
+            num_recommendations = st.session_state.get(
+                "display_num_recommendations", 12
+            )
+            with st.spinner("📍 Loading recommendations and map..."):
                 baseline_recommendations = inference.get_recommendations_with_delta(
                     selected_user,
                     steering_config=None,
-                    top_k=20,
+                    top_k=num_recommendations,
                     valid_item_ids=valid_item_ids,
                 )
 
-                steering_config = None
-                recommendations_with_delta = baseline_recommendations
-                if steering_updates:
-                    st.info(f"Steering applied: {len(steering_updates)} features")
-                    steering_config = {
-                        "type": "neuron",
-                        "neuron_values": steering_updates,
-                        "alpha": 0.3,
-                    }
-                    recommendations_with_delta = inference.get_recommendations_with_delta(
-                        selected_user,
-                        steering_config=steering_config,
-                        top_k=20,
-                        valid_item_ids=valid_item_ids,
+        if steering_changed or current_base is None:
+            logger.info(
+                "Computing steered recommendations (steering changed or first load)"
+            )
+
+            recommendations_with_delta = baseline_recommendations
+            inference_steering = to_inference_config(steering_config)
+            if inference_steering:
+                num_steering_features = len(inference_steering.get("neuron_values", {}))
+                num_recommendations = st.session_state.get(
+                    "display_num_recommendations", 12
+                )
+                with st.spinner(
+                    f"🧮 Steering {num_steering_features} features, please wait..."
+                ):
+                    recommendations_with_delta = (
+                        inference.get_recommendations_with_delta(
+                            selected_user,
+                            steering_config=inference_steering,
+                            top_k=num_recommendations,
+                            valid_item_ids=valid_item_ids,
+                        )
                     )
 
-                poi_indices = [
-                    r.get("item_id") or r.get("poi_idx")
-                    for r in recommendations_with_delta
-                ]
-                poi_details_map = data.get_poi_details_batch(poi_indices)
+            cached_poi_details = dict(
+                st.session_state.get(f"poi_details_map_{selected_user}", {}) or {}
+            )
+            all_recommended_indices = [
+                r.get("item_id") or r.get("poi_idx")
+                for r in baseline_recommendations + recommendations_with_delta
+                if (r.get("item_id") or r.get("poi_idx")) is not None
+            ]
+            missing_indices = [
+                idx for idx in all_recommended_indices if idx not in cached_poi_details
+            ]
+            if missing_indices:
+                fetched = data.get_poi_details_batch(missing_indices)
+                cached_poi_details.update(fetched)
 
-                valid_recommendations = []
-                for reco in recommendations_with_delta:
-                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
-                    if poi_idx in poi_details_map:
-                        valid_recommendations.append(reco)
+            valid_recommendations = [
+                reco
+                for reco in recommendations_with_delta
+                if (reco.get("item_id") or reco.get("poi_idx")) in cached_poi_details
+            ]
+            valid_baseline = [
+                reco
+                for reco in baseline_recommendations
+                if (reco.get("item_id") or reco.get("poi_idx")) in cached_poi_details
+            ]
 
-                valid_baseline = []
-                for reco in baseline_recommendations:
-                    poi_idx = reco.get("item_id") or reco.get("poi_idx")
-                    if poi_idx in poi_details_map:
-                        valid_baseline.append(reco)
+            _set_demo_recommendation_state(
+                selected_user,
+                base_recommendations=valid_baseline,
+                steered_recommendations=(
+                    valid_recommendations if inference_steering else []
+                ),
+                active_steering_config=steering_config,
+                poi_details_map=cached_poi_details,
+            )
+            st.session_state[steering_hash_key] = current_hash
 
-                st.session_state[steering_cache_key] = steering_updates
-                _set_demo_recommendation_state(
-                    selected_user,
-                    base_recommendations=valid_baseline,
-                    steered_recommendations=valid_recommendations if steering_config else [],
-                    active_steering_config=steering_config,
-                    poi_details_map=poi_details_map,
+            if inference_steering:
+                up = sum(
+                    1 for r in valid_recommendations if r.get("position_delta", 0) < 0
                 )
-
-                filtered_count = len(recommendations_with_delta) - len(valid_recommendations)
-                logger.info(
-                    f"Filtered recommendations: {len(recommendations_with_delta)} total -> "
-                    f"{filtered_count} invalid -> {len(valid_recommendations)} valid"
+                down = sum(
+                    1 for r in valid_recommendations if r.get("position_delta", 0) > 0
                 )
-            else:
-                logger.debug("Using cached recommendations (steering unchanged)")
-                _set_demo_recommendation_state(
-                    selected_user,
-                    active_steering_config=(
-                        {
-                            "type": "neuron",
-                            "neuron_values": steering_updates,
-                            "alpha": 0.3,
-                        }
-                        if steering_updates
-                        else None
-                    ),
+                flat = sum(
+                    1 for r in valid_recommendations if r.get("position_delta", 0) == 0
                 )
-
-        except Exception as e:
-            st.error(f"Failed to generate recommendations: {e}")
-            logger.exception("Recommendation generation failed")
-            return
-
-    else:
-        st.info("No active features to steer")
+                base_score_by_item = {
+                    int(r.get("item_id") or r.get("poi_idx")): float(
+                        r.get("score", 0.0)
+                    )
+                    for r in valid_baseline
+                    if (r.get("item_id") or r.get("poi_idx")) is not None
+                }
+                score_deltas = []
+                for r in valid_recommendations:
+                    item_idx = r.get("item_id") or r.get("poi_idx")
+                    if item_idx in base_score_by_item:
+                        score_deltas.append(
+                            float(r.get("score", 0.0)) - base_score_by_item[item_idx]
+                        )
+                avg_delta = float(np.mean(score_deltas)) if score_deltas else 0.0
+                st.markdown("#### Steering Diagnostics")
+                st.caption(
+                    f"Changed features: {len(inference_steering.get('neuron_values', {}))} | "
+                    f"Rank delta: up {up}, down {down}, unchanged {flat} | "
+                    f"Avg score delta: {avg_delta:+.4f}"
+                )
+                if up == 0 and down == 0:
+                    st.info(
+                        "No rank change in the visible top-K. This usually means target activations are close to baseline "
+                        "or current alpha is too low for rank reordering."
+                    )
+        else:
+            logger.debug("Using cached recommendations (steering unchanged)")
+            _set_demo_recommendation_state(
+                selected_user,
+                active_steering_config=steering_config,
+            )
+    except Exception as e:
+        st.error(f"Failed to generate recommendations: {e}")
+        logger.exception("Recommendation generation failed")
+        return
 
 
 @st.fragment
@@ -482,16 +581,18 @@ def _render_poi_cards_section(
         responsive_cards_per_row = max(1, available_width // card_width_px)
         cols = st.columns(responsive_cards_per_row)
 
-        for display_idx, reco in enumerate(filtered_recommendations):
+        valid_card_rows = []
+        for reco in filtered_recommendations:
             poi_idx = reco.get("item_id") or reco.get("poi_idx")
+            if not poi_details_map or poi_idx not in poi_details_map:
+                logger.debug(
+                    "Skipping POI card for idx=%s (missing in batch POI details map)",
+                    poi_idx,
+                )
+                continue
+            valid_card_rows.append((reco, poi_details_map[poi_idx]))
 
-            # Use cached details if available (already fetched in batch)
-            # Otherwise fetch individually (fallback for edge cases)
-            if poi_details_map and poi_idx in poi_details_map:
-                poi_details = poi_details_map[poi_idx]
-            else:
-                poi_details = data.get_poi_details(poi_idx)
-
+        for display_idx, (reco, poi_details) in enumerate(valid_card_rows):
             with cols[display_idx % responsive_cards_per_row]:
                 try:
                     draw_poi_card(
@@ -714,13 +815,14 @@ def _render_map_section(
                         width=None,
                         height=500,
                         key=f"folium_{selected_user}_{data_hash[:12]}",
+                        returned_objects=[],
                     )
             except Exception as e:
                 logger.exception("Map rendering failed")
                 st.error("❌ Map rendering failed. Check logs for details.")
         else:
             st.info(
-                "📦 Install streamlit-folium for map visualization: `pip install streamlit-folium`"
+                "ℹ️ Install streamlit-folium for map visualization: `pip install streamlit-folium`"
             )
 
 
@@ -843,20 +945,32 @@ def show():
         photo_height_px = int(card_width_px * 0.733)
 
         st.caption(
-            f"📐 {recs_per_row} cards | Width: {card_width_px}px | Photo: {card_width_px}×{photo_height_px}px"
+            f"📐 Width: {card_width_px}px | Photo: {card_width_px}×{photo_height_px}px"
         )
 
         # Get actual max features from inference service hidden dimension
-        max_features = inference.sae.hidden_dim if inference and inference.sae else 64
+        # But use the user's non-zero neurons count as the max instead of all neurons
+        try:
+            user_z = inference.user_latents.get(selected_user)
+            if user_z is not None:
+                # Count non-zero activations for this user
+                top_activations = inference.get_top_activations(user_z, k=64)
+                max_features = len(top_activations) if top_activations else 9
+            else:
+                max_features = 9
+        except Exception:
+            max_features = (
+                inference.sae.hidden_dim if inference and inference.sae else 64
+            )
 
         num_features = st.slider(
             "Features to display",
             min_value=5,
-            max_value=max_features,
+            max_value=max(5, max_features),
             value=min(9, max_features),
             step=1,
         )
-        num_recommendations = st.slider("Recommendations", 5, 50, 20)
+        num_recommendations = st.slider("Recommendations", 5, 50, 12)
 
         # Store in session_state so fragments can read without rerunning
         st.session_state.display_num_features = num_features
@@ -865,7 +979,7 @@ def show():
         st.divider()
 
         # Actions
-        if st.button("Reset Steering", use_container_width=True):
+        if st.button("Reset Steering", width="stretch"):
             if selected_user:
                 _clear_demo_steering_state(selected_user)
             st.rerun()
@@ -1052,7 +1166,9 @@ def show():
 
 
 def plot_feature_activations(
-    activations: List[Dict], original_activations: List[Dict] = None
+    activations: List[Dict],
+    original_activations: List[Dict] = None,
+    chart_key_suffix: str = "global",
 ):
     """Plot horizontal bar chart of top feature activations with optional original comparison.
 
@@ -1125,7 +1241,7 @@ def plot_feature_activations(
         yaxis=dict(autorange="reversed"),  # Ensure all labels are visible
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch", key=f"activation_chart_{chart_key_suffix}")
 
 
 def build_folium_map(
@@ -1234,10 +1350,8 @@ def build_folium_map(
             f"Creating map centered at ({center_lat:.4f}, {center_lon:.4f}) with {len(pois)} recommendations and {len(past_visit_pois)} past visits"
         )
 
-        # Create map
-        m = folium.Map(
-            location=[center_lat, center_lon], zoom_start=13, tiles="OpenStreetMap"
-        )
+        # Create map (bounds are fitted after markers are added).
+        m = folium.Map(location=[center_lat, center_lon], tiles="OpenStreetMap")
 
         # Define color palette for rank badges (hex colors)
         hex_colors = [
@@ -1340,8 +1454,24 @@ def build_folium_map(
                 )
                 continue
 
-        logger.info(
-            f"✅ Map created with {len(pois)} recommendations and {len(past_visit_pois)} past visits"
+        # Fit bounds to recommendation points so all recommendation markers are visible.
+        min_lat, max_lat = min(lats), max(lats)
+        min_lon, max_lon = min(lons), max(lons)
+        if len(lats) > 1 and len(lons) > 1:
+            lat_pad = max(0.0025, (max_lat - min_lat) * 0.15)
+            lon_pad = max(0.0025, (max_lon - min_lon) * 0.15)
+            m.fit_bounds(
+                [
+                    [min_lat - lat_pad, min_lon - lon_pad],
+                    [max_lat + lat_pad, max_lon + lon_pad],
+                ]
+            )
+        else:
+            m.location = [center_lat, center_lon]
+            m.zoom_start = 14
+
+        logger.debug(
+            f"Map created with {len(pois)} recommendations and {len(past_visit_pois)} past visits"
         )
         return m
 
@@ -1433,14 +1563,17 @@ def draw_poi_card(
         return
 
     try:
-        # Fixed card dimensions proportional to photo height
+        # Fixed card dimensions proportional to photo height (20% smaller, but photo less tall for more text)
         # For a compact layout, use: header + photo + flexible content + footer
-        header_height_px = 40
-        footer_height_px = 30  # Fixed footer for Yelp button
-        content_min_height_px = 231  # Adjusted for footer
+        header_height_px = 32
+        footer_height_px = 26  # Fixed footer for Yelp button
+        content_min_height_px = 225  # Adjusted for footer + more text space
+        photo_height_px_scaled = int(
+            photo_height_px * 0.6
+        )  # 40% smaller height (less tall, not narrower)
         card_height_px = (
             header_height_px
-            + photo_height_px
+            + photo_height_px_scaled
             + content_min_height_px
             + footer_height_px
         )
@@ -1492,7 +1625,7 @@ def draw_poi_card(
         
         .poi-card-photo {{
             width: 100%;
-            height: {photo_height_px}px;
+            height: {photo_height_px_scaled}px;
             flex-shrink: 0;
             background-color: #e8e8e8;
             overflow: hidden;
@@ -1578,7 +1711,9 @@ def draw_poi_card(
         if not photo_loaded:
             # Show placeholder
             try:
-                placeholder = _create_placeholder_image(card_width_px, photo_height_px)
+                placeholder = _create_placeholder_image(
+                    card_width_px, photo_height_px_scaled
+                )
                 buffer = BytesIO()
                 placeholder.save(buffer, format="PNG")
                 b64_placeholder = base64.b64encode(buffer.getvalue()).decode("utf-8")
@@ -1587,66 +1722,83 @@ def draw_poi_card(
                 logger.debug(f"Failed to create placeholder: {e}")
                 photo_html = '<div style="font-size: 48px; text-align: center; line-height: 100%;">📷</div>'
 
-        # Build rank/delta display
-        rank_html = ""
+        # Build rank display (always visible in card header)
+        rank = recommendation.get("rank_after", 0)
+        rank_html = f'<span style="font-size: 18px; font-weight: bold; color: #1f77b4;">#{rank + 1}</span>'
+
+        # Build delta display for footer (if steering was applied)
+        delta_footer_html = ""
         if recommendation.get("show_delta"):
             arrow = recommendation.get("arrow", "→")
             arrow_value = recommendation.get("arrow_value", 0)
             arrow_color = recommendation.get("arrow_color", "gray")
 
             if arrow_color == "green":
-                rank_html = f'<span style="color:green;">{arrow}{arrow_value}</span>'
+                delta_html = f'<span style="color:green; font-weight: bold;">{arrow}{arrow_value}</span>'
             elif arrow_color == "red":
-                rank_html = f'<span style="color:red;">{arrow}{arrow_value}</span>'
+                delta_html = f'<span style="color:red; font-weight: bold;">{arrow}{arrow_value}</span>'
             else:
-                rank_html = f'<span style="color:gray;">#{recommendation.get("rank_after", 0) + 1}</span>'
-        else:
-            rank = recommendation.get("rank_after", 0)
-            rank_html = f'<span style="color:blue;">#{rank + 1}</span>'
+                delta_html = f'<span style="color:gray;">{arrow}</span>'
+            delta_footer_html = f" • Position change: {delta_html}"
 
         # Build content section (rating, category, why, score, link)
         content_parts = []
 
-        # Rating + reviews
+        # Rating + reviews with visual stars
         rating = poi.get("rating", 0.0)
         reviews = poi.get("review_count", 0)
-        content_parts.append(f"<div>⭐ {rating:.1f} • {reviews:,} reviews</div>")
+        # Create filled and empty stars (no half stars for clarity)
+        filled_stars = int(round(rating))  # Round to nearest whole star
+        empty_stars = max(0, 5 - filled_stars)
+        star_display = "★" * filled_stars + "☆" * empty_stars
+        content_parts.append(
+            f"<div>{star_display} {rating:.1f} • {reviews:,} reviews</div>"
+        )
 
         # Category
         category = poi.get("category", "")
         if category:
             content_parts.append(f"<div>📂 {category}</div>")
 
-        # Why (contributing neurons) - make features clickable
+        # Why (contributing neurons) - show top 3 each on own line with activation
         if recommendation.get("contributing_neurons"):
-            features = recommendation["contributing_neurons"][:1]
+            features = recommendation["contributing_neurons"][:3]  # Top 3
+            content_parts.append(
+                f"<div><b>Why This Recommendation:</b></div>"
+                f"<div style='font-size: 11px; color: #666; margin-bottom: 4px;'>"
+                f"Top latent features that contributed to this recommendation:</div>"
+            )
             for feat in features:
                 neuron_idx = feat.get("idx")
                 feature_label = feat.get("label") or f"Feature {neuron_idx}"
-                activation = feat.get("activation")
+                activation = feat.get("activation", 0)
+                # Format each on own line: "  #42: Italian (0.85)"
+                formatted = f"  #{neuron_idx}: {feature_label}"
+                if activation:
+                    formatted += f" ({activation:.2f})"
+                content_parts.append(
+                    f"<div style='font-size: 12px; margin: 2px 0;'>{formatted}</div>"
+                )
 
-                if activation is not None:
-                    formatted_feature = format_feature_id(
-                        neuron_idx, feature_label, activation
-                    )
-                else:
-                    formatted_feature = format_feature_id(neuron_idx, feature_label)
-
-                # Display contributing feature (use steering button to learn more)
-                clickable_feature = formatted_feature
-                content_parts.append(f"<div>🧠 Why: {clickable_feature}</div>")
-
-        # Score
+        # Score with info
         if show_scores and recommendation.get("score"):
-            content_parts.append(f"<div>Score: {recommendation['score']:.3f}</div>")
+            content_parts.append(
+                f"<div><b>Recommendation Score</b></div>"
+                f"<div style='font-size: 11px; color: #666; margin-bottom: 4px;'>"
+                f"Predicted relevance score (0-1 scale, higher is better):</div>"
+                f"<div style='font-size: 14px; color: #1f77b4; font-weight: bold;'>"
+                f"{recommendation['score']:.3f}</div>"
+            )
 
         content_html = "".join(content_parts)
 
-        # Yelp link (for footer, separate from scrollable content)
+        # Yelp link (for footer, separate from scrollable content) with position delta
         url = poi.get("url", "")
         footer_html = ""
         if url:
-            footer_html = f'<a href="{url}" target="_blank">View on Yelp →</a>'
+            footer_html = (
+                f'<a href="{url}" target="_blank">View on Yelp →</a>{delta_footer_html}'
+            )
 
         # Build complete card as HTML
         business_name = poi.get("name", "Unknown")
@@ -1663,8 +1815,6 @@ def draw_poi_card(
         """
 
         st.markdown(card_html, unsafe_allow_html=True)
-
-        # (Removed separate button - features are now clickable as inline links in "Why" section)
 
     except Exception as e:
         logger.debug(f"POI card error for {poi.get('name', 'Unknown')}: {e}")
@@ -1685,8 +1835,3 @@ def get_feature_color(index: int) -> str:
         "darkpurple",
     ]
     return colors[index % len(colors)]
-
-
-
-
-

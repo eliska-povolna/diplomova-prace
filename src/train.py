@@ -27,12 +27,13 @@ import time
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import yaml
 import torch
 import torch.optim as optim
+from scipy.sparse import csr_matrix
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 
@@ -131,6 +132,258 @@ def _save_yaml(path: Path, data: dict) -> None:
         yaml.safe_dump(data, f, sort_keys=False)
 
 
+def _build_elsa_signature(config_dict: dict) -> str:
+    """Build a stable signature for deciding whether ELSA can be reused."""
+    elsa = config_dict.get("elsa", {})
+    signature = {
+        "preprocessing_cache_key": build_preprocessing_cache_key(config_dict),
+        "latent_dim": elsa.get("latent_dim"),
+        "learning_rate": elsa.get("learning_rate"),
+        "batch_size": elsa.get("batch_size"),
+        "num_epochs": elsa.get("num_epochs"),
+        "patience": elsa.get("patience"),
+        "weight_decay": elsa.get("weight_decay"),
+        "seed": config_dict.get("data", {}).get("seed"),
+    }
+    return json.dumps(signature, sort_keys=True)
+
+
+def _load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or "model_state_dict" not in payload:
+        raise ValueError(f"Invalid checkpoint format: {checkpoint_path}")
+    return payload
+
+
+def _iter_candidate_output_runs(outputs_dir: Path) -> list[Path]:
+    if not outputs_dir.exists():
+        return []
+    runs = []
+    for path in outputs_dir.iterdir():
+        if path.is_dir() and len(path.name) == 15 and path.name[8] == "_":
+            runs.append(path)
+    return sorted(runs, key=lambda p: p.name, reverse=True)
+
+
+def _resolve_elsa_checkpoint_path(
+    args: argparse.Namespace,
+    *,
+    config: Config,
+    expected_n_items: int,
+) -> Path:
+    if args.elsa_checkpoint:
+        checkpoint_path = Path(args.elsa_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"--elsa-checkpoint does not exist: {checkpoint_path}"
+            )
+        payload = _load_checkpoint_payload(checkpoint_path)
+        metadata = payload.get("metadata", {}) or {}
+        n_items_meta = metadata.get("n_items")
+        latent_dim_meta = metadata.get("latent_dim")
+        expected_latent_dim = int(config["elsa"]["latent_dim"])
+        if n_items_meta not in (None, expected_n_items):
+            raise RuntimeError(
+                f"ELSA checkpoint n_items mismatch: expected {expected_n_items}, found {n_items_meta} in {checkpoint_path}"
+            )
+        if latent_dim_meta not in (None, expected_latent_dim):
+            raise RuntimeError(
+                f"ELSA checkpoint latent_dim mismatch: expected {expected_latent_dim}, found {latent_dim_meta} in {checkpoint_path}"
+            )
+        return checkpoint_path
+
+    outputs_dir = Path(config["output"]["base_dir"])
+    expected_latent_dim = int(config["elsa"]["latent_dim"])
+    for run_dir in _iter_candidate_output_runs(outputs_dir):
+        checkpoint_path = run_dir / "checkpoints" / "elsa_best.pt"
+        if not checkpoint_path.exists():
+            continue
+        try:
+            payload = _load_checkpoint_payload(checkpoint_path)
+            metadata = payload.get("metadata", {}) or {}
+            n_items_meta = metadata.get("n_items")
+            latent_dim_meta = metadata.get("latent_dim")
+            if n_items_meta not in (None, expected_n_items):
+                continue
+            if latent_dim_meta not in (None, expected_latent_dim):
+                continue
+            logger.info(
+                "Resolved reusable ELSA checkpoint: %s (n_items=%s, latent_dim=%s)",
+                checkpoint_path,
+                n_items_meta,
+                latent_dim_meta,
+            )
+            return checkpoint_path
+        except Exception as e:
+            logger.debug("Skipping incompatible ELSA checkpoint %s: %s", checkpoint_path, e)
+
+    raise FileNotFoundError(
+        "Could not resolve a compatible ELSA checkpoint for --skip-elsa. "
+        f"Expected n_items={expected_n_items}, latent_dim={expected_latent_dim}. "
+        "Provide --elsa-checkpoint explicitly or run one full training first."
+    )
+
+
+def _load_elsa_from_checkpoint(
+    *,
+    checkpoint_path: Path,
+    config: Config,
+    n_items: int,
+    checkpoint_mgr: CheckpointManager,
+    device: str,
+) -> tuple[ELSA, float, dict]:
+    elsa_cfg = config["elsa"]
+    model = ELSA(n_items, latent_dim=int(elsa_cfg["latent_dim"])).to(device)
+    payload = _load_checkpoint_payload(checkpoint_path)
+    metadata = payload.get("metadata", {}) or {}
+    n_items_meta = metadata.get("n_items")
+    latent_dim_meta = metadata.get("latent_dim")
+    if n_items_meta not in (None, n_items):
+        raise RuntimeError(
+            f"ELSA checkpoint n_items mismatch: expected {n_items}, found {n_items_meta} in {checkpoint_path}"
+        )
+    if latent_dim_meta not in (None, int(elsa_cfg["latent_dim"])):
+        raise RuntimeError(
+            f"ELSA checkpoint latent_dim mismatch: expected {elsa_cfg['latent_dim']}, found {latent_dim_meta} in {checkpoint_path}"
+        )
+
+    model.load_state_dict(payload["model_state_dict"])
+    model.eval()
+    checkpoint_mgr.save(
+        model,
+        epoch=payload.get("epoch"),
+        metrics=payload.get("metrics", {}),
+        name="elsa_best",
+        metadata={
+            "n_items": int(n_items),
+            "latent_dim": int(elsa_cfg["latent_dim"]),
+        },
+    )
+    logger.info("Loaded ELSA checkpoint and materialized into this run: %s", checkpoint_path)
+    return (
+        model,
+        float("nan"),
+        {
+            "best_epoch": int(payload.get("epoch") or 0),
+            "final_epoch": int(payload.get("epoch") or 0),
+            "training_time_sec": 0.0,
+            "early_stop_reason": "skipped_training_reused_checkpoint",
+        },
+    )
+
+
+def _resolve_sae_checkpoint_path(
+    args: argparse.Namespace,
+    *,
+    config: Config,
+) -> Path:
+    sae_cfg = config["sae"]
+    elsa_cfg = config["elsa"]
+    expected_width_ratio = int(sae_cfg["width_ratio"])
+    expected_k = int(sae_cfg["k"])
+    expected_latent_dim = int(elsa_cfg["latent_dim"])
+    expected_hidden_dim = expected_width_ratio * expected_latent_dim
+    expected_filename = f"sae_r{expected_width_ratio}_k{expected_k}_best.pt"
+
+    if args.sae_checkpoint:
+        checkpoint_path = Path(args.sae_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"--sae-checkpoint does not exist: {checkpoint_path}"
+            )
+        return checkpoint_path
+
+    outputs_dir = Path(config["output"]["base_dir"])
+    for run_dir in _iter_candidate_output_runs(outputs_dir):
+        checkpoint_path = run_dir / "checkpoints" / expected_filename
+        if not checkpoint_path.exists():
+            continue
+        try:
+            payload = _load_checkpoint_payload(checkpoint_path)
+            metadata = payload.get("metadata", {}) or {}
+            k_meta = metadata.get("k")
+            wr_meta = metadata.get("width_ratio")
+            latent_dim_meta = metadata.get("latent_dim")
+            if k_meta not in (None, expected_k):
+                continue
+            if wr_meta not in (None, expected_width_ratio):
+                continue
+            if latent_dim_meta not in (None, expected_latent_dim):
+                continue
+            logger.info(
+                "Resolved reusable SAE checkpoint: %s (k=%s, width_ratio=%s, latent_dim=%s)",
+                checkpoint_path,
+                k_meta,
+                wr_meta,
+                latent_dim_meta,
+            )
+            return checkpoint_path
+        except Exception as e:
+            logger.debug("Skipping incompatible SAE checkpoint %s: %s", checkpoint_path, e)
+
+    raise FileNotFoundError(
+        "Could not resolve a compatible SAE checkpoint for --skip-sae. "
+        f"Expected hidden_dim={expected_hidden_dim}, k={expected_k}. "
+        "Provide --sae-checkpoint explicitly or run one full training first."
+    )
+
+
+def _load_sae_from_checkpoint(
+    *,
+    checkpoint_path: Path,
+    config: Config,
+    checkpoint_mgr: CheckpointManager,
+    device: str,
+) -> tuple[TopKSAE, float, dict]:
+    sae_cfg = config["sae"]
+    elsa_cfg = config["elsa"]
+    hidden_dim = int(sae_cfg["width_ratio"]) * int(elsa_cfg["latent_dim"])
+    model = TopKSAE(
+        input_dim=int(elsa_cfg["latent_dim"]),
+        hidden_dim=hidden_dim,
+        k=int(sae_cfg["k"]),
+        l1_coef=float(sae_cfg["l1_coef"]),
+    ).to(device)
+    payload = _load_checkpoint_payload(checkpoint_path)
+    metadata = payload.get("metadata", {}) or {}
+    if metadata.get("k") not in (None, int(sae_cfg["k"])):
+        raise RuntimeError(
+            f"SAE checkpoint k mismatch: expected {sae_cfg['k']}, found {metadata.get('k')} in {checkpoint_path}"
+        )
+    if metadata.get("width_ratio") not in (None, int(sae_cfg["width_ratio"])):
+        raise RuntimeError(
+            f"SAE checkpoint width_ratio mismatch: expected {sae_cfg['width_ratio']}, found {metadata.get('width_ratio')} in {checkpoint_path}"
+        )
+    if metadata.get("latent_dim") not in (None, int(elsa_cfg["latent_dim"])):
+        raise RuntimeError(
+            f"SAE checkpoint latent_dim mismatch: expected {elsa_cfg['latent_dim']}, found {metadata.get('latent_dim')} in {checkpoint_path}"
+        )
+    model.load_state_dict(payload["model_state_dict"])
+    model.eval()
+    checkpoint_mgr.save(
+        model,
+        epoch=payload.get("epoch"),
+        metrics=payload.get("metrics", {}),
+        name=f"sae_r{sae_cfg['width_ratio']}_k{sae_cfg['k']}_best",
+        metadata={
+            "k": int(sae_cfg["k"]),
+            "width_ratio": int(sae_cfg["width_ratio"]),
+            "latent_dim": int(elsa_cfg["latent_dim"]),
+        },
+    )
+    logger.info("Loaded SAE checkpoint and materialized into this run: %s", checkpoint_path)
+    return (
+        model,
+        float("nan"),
+        {
+            "best_epoch": int(payload.get("epoch") or 0),
+            "final_epoch": int(payload.get("epoch") or 0),
+            "training_time_sec": 0.0,
+            "early_stop_reason": "skipped_training_reused_checkpoint",
+        },
+    )
+
+
 def _upload_experiment_manifest_to_cloud(
     experiment_dir: Path, experiment_id: str
 ) -> bool:
@@ -203,6 +456,7 @@ def _run_experiment_sweep(args: argparse.Namespace) -> None:
 
     total_runs = 0
     prepared_cache_keys: set[str] = set()
+    elsa_checkpoint_by_signature: dict[str, Path] = {}
     for experiment in experiments:
         experiment_name = experiment.get("name", "unnamed_experiment")
         experiment_desc = experiment.get("description", "")
@@ -246,13 +500,20 @@ def _run_experiment_sweep(args: argparse.Namespace) -> None:
                 str(run_config_path),
             ]
             cache_key = build_preprocessing_cache_key(resolved_config)
+            elsa_signature = _build_elsa_signature(resolved_config)
             if args.skip_preprocessing or cache_key in prepared_cache_keys:
                 command.append("--skip-preprocessing")
-            if args.skip_elsa:
+
+            reuse_checkpoint = elsa_checkpoint_by_signature.get(elsa_signature)
+            if reuse_checkpoint and reuse_checkpoint.exists():
+                command.append("--skip-elsa")
+                command.extend(["--elsa-checkpoint", str(reuse_checkpoint)])
+                logger.info("Reusing ELSA checkpoint for matching signature: %s", reuse_checkpoint)
+            elif args.skip_elsa:
                 command.append("--skip-elsa")
             if args.skip_sae:
                 command.append("--skip-sae")
-            if args.elsa_checkpoint:
+            if args.elsa_checkpoint and not reuse_checkpoint:
                 command.extend(["--elsa-checkpoint", args.elsa_checkpoint])
             if args.sae_checkpoint:
                 command.extend(["--sae-checkpoint", args.sae_checkpoint])
@@ -269,6 +530,10 @@ def _run_experiment_sweep(args: argparse.Namespace) -> None:
                 run_dir = Path(latest_run_path.read_text(encoding="utf-8").strip())
             else:
                 run_dir = Path("outputs")
+
+            produced_elsa_checkpoint = run_dir / "checkpoints" / "elsa_best.pt"
+            if produced_elsa_checkpoint.exists():
+                elsa_checkpoint_by_signature[elsa_signature] = produced_elsa_checkpoint
 
             summary_path = run_dir / "summary.json"
             summary = None
@@ -1528,15 +1793,29 @@ def main() -> None:
         X_train_split = Subset(X_train_dataset, train_idx)
         X_val_split = Subset(X_train_dataset, val_idx)
 
-        # Train ELSA
-        elsa_model, elsa_best_loss, elsa_stats = train_elsa(
-            config,
-            X_train_split,
-            X_val_split,
-            X_train_csr.shape[1],
-            checkpoint_mgr,
-            seed=seed,
-        )
+        # Train or reuse ELSA
+        if args.skip_elsa:
+            elsa_checkpoint_path = _resolve_elsa_checkpoint_path(
+                args,
+                config=config,
+                expected_n_items=X_train_csr.shape[1],
+            )
+            elsa_model, elsa_best_loss, elsa_stats = _load_elsa_from_checkpoint(
+                checkpoint_path=elsa_checkpoint_path,
+                config=config,
+                n_items=X_train_csr.shape[1],
+                checkpoint_mgr=checkpoint_mgr,
+                device=device,
+            )
+        else:
+            elsa_model, elsa_best_loss, elsa_stats = train_elsa(
+                config,
+                X_train_split,
+                X_val_split,
+                X_train_csr.shape[1],
+                checkpoint_mgr,
+                seed=seed,
+            )
 
         # Encode all users with ELSA (frozen) using chunked encoding for large matrices
         logger.info("Encoding users with ELSA...")
@@ -1557,15 +1836,24 @@ def main() -> None:
             f"Encoded: z_train={Z_train.shape}, z_val={Z_val.shape}, z_test={Z_test.shape}"
         )
 
-        # Train SAE
-        sae_model, sae_best_loss, sae_stats = train_sae(
-            config,
-            elsa_model,
-            Z_train,
-            Z_val,
-            checkpoint_mgr,
-            seed=seed,
-        )
+        # Train or reuse SAE
+        if args.skip_sae:
+            sae_checkpoint_path = _resolve_sae_checkpoint_path(args, config=config)
+            sae_model, sae_best_loss, sae_stats = _load_sae_from_checkpoint(
+                checkpoint_path=sae_checkpoint_path,
+                config=config,
+                checkpoint_mgr=checkpoint_mgr,
+                device=device,
+            )
+        else:
+            sae_model, sae_best_loss, sae_stats = train_sae(
+                config,
+                elsa_model,
+                Z_train,
+                Z_val,
+                checkpoint_mgr,
+                seed=seed,
+            )
 
         # Final evaluation on test set
         logger.info("=" * 60)
@@ -1627,7 +1915,7 @@ def main() -> None:
                 seed=config["data"]["seed"],
             )
 
-            eval_k_values = config.get("evaluation", {}).get("k_values", [10, 20, 50])
+            eval_k_values = config.get("evaluation", {}).get("k_values", [5, 10, 20, 50])
             holdout_diagnostics = compute_holdout_diagnostics(
                 X_eval_input_csr,
                 X_eval_target_csr,

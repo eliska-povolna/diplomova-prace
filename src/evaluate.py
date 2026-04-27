@@ -159,7 +159,7 @@ def _load_saved_protocol(output_dir: Path, summary: dict, k_values_arg) -> tuple
         if inferred_ks:
             ks = sorted(inferred_ks)
     if not ks:
-        ks = list(summary.get("config", {}).get("evaluation", {}).get("k_values", [10, 20, 50]))
+        ks = list(summary.get("config", {}).get("evaluation", {}).get("k_values", [5, 10, 20, 50]))
 
     protocol.setdefault("split", "per-user holdout")
     protocol.setdefault("holdout_ratio", 0.2)

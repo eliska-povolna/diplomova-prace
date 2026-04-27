@@ -26,7 +26,14 @@ class LabelingService:
         self.labels_cache: Dict[str, str] = {}
         self.selected_method: str = "weighted-category"
         self.method_descriptions: Dict[str, str] = {}
-        self.method_aliases: Dict[str, str] = {}
+        self.method_aliases: Dict[str, str] = {
+            "tag-based": "weighted-category",
+            "default": "weighted-category",
+            "weighted_category": "weighted-category",
+            "llm_review_based": "llm-review-based",
+            "llm_based": "llm-based",
+            "matrix_based": "matrix-based",
+        }
         self.comparison_rows: List[Dict] = []
         self.superfeatures: Dict[str, Dict[str, Any]] = {}
         self.concept_mapping: Dict[str, Any] = {}
@@ -106,14 +113,18 @@ class LabelingService:
                     data = json.load(f)
 
             if isinstance(data, dict) and "methods" in data:
-                self.method_descriptions = {
+                self.method_descriptions.update(
+                    {
                     str(k): str(v)
                     for k, v in (data.get("method_descriptions") or {}).items()
-                }
-                self.method_aliases = {
+                    }
+                )
+                self.method_aliases.update(
+                    {
                     str(k): str(v)
                     for k, v in (data.get("method_aliases") or {}).items()
-                }
+                    }
+                )
                 self.comparison_rows = list(data.get("comparison") or [])
                 self.superfeatures = {
                     str(k): v for k, v in (data.get("superfeatures") or {}).items()

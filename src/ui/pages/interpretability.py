@@ -62,6 +62,10 @@ def render_clickable_feature(feature_id: int, feature_label: str):
         logger.info(
             f"🔘 Related feature button clicked: feature_id={feature_id}, label={feature_label}"
         )
+        if "selected_superfeature_id" in st.session_state:
+            del st.session_state["selected_superfeature_id"]
+        if "selected_superfeature_anchor_neuron" in st.session_state:
+            del st.session_state["selected_superfeature_anchor_neuron"]
         st.session_state.selected_feature_id = feature_id
         st.session_state._pending_feature_search = str(feature_id)
         logger.info(f"   ✓ Set session_state.selected_feature_id = {feature_id}")
@@ -82,7 +86,7 @@ def show():
     """
     )
     st.caption(
-        "By default the app follows the best run from the latest experiment (highest NDCG@10). "
+        "By default the app follows the best run from the latest experiment (highest NDCG@20). "
         "The weighted-category baseline uses activation-weighted business categories rather than raw category counts, "
         "and deprioritizes very generic parent categories such as Restaurants and Food when more specific categories are available."
     )
@@ -98,32 +102,16 @@ def show():
         return
 
     available_methods = getattr(labels_service, "available_methods", [])
-    if available_methods:
-        default_method = getattr(
-            labels_service, "selected_method", available_methods[0]
-        )
-        if default_method not in available_methods:
-            default_method = available_methods[0]
+    if available_methods and hasattr(labels_service, "set_method"):
+        global_method = st.session_state.get("global_label_method")
+        if global_method in available_methods:
+            labels_service.set_method(global_method)
 
-        selected_method = st.selectbox(
-            "Label source",
-            options=available_methods,
-            index=available_methods.index(default_method),
-            key="interpretability_label_method",
-        )
-
-        if hasattr(labels_service, "set_method"):
-            labels_service.set_method(selected_method)
-
-        st.caption(f"Showing labels from `{selected_method}`")
-        superfeatures = (
-            labels_service.get_superfeatures()
-            if selected_method.startswith("llm")
-            else {}
-        )
-    else:
-        selected_method = getattr(labels_service, "selected_method", "weighted-category")
-        superfeatures = {}
+    selected_method = getattr(labels_service, "selected_method", "weighted-category")
+    st.caption(f"Using global label source: `{selected_method}`")
+    superfeatures = (
+        labels_service.get_superfeatures() if selected_method.startswith("llm") else {}
+    )
 
     if not wordcloud_service:
         st.warning(
@@ -264,74 +252,82 @@ def show():
                         cache_all_label_embeddings,
                     )
 
-                    semantic_model = load_semantic_search_model()
-                    logger.info(f"Semantic model loaded: {semantic_model is not None}")
-
-                    if semantic_model is not None:
-                        # Get cached label embeddings (cached in session_state on first call)
-                        label_embeddings_dict = cache_all_label_embeddings(
-                            labels_service, max_neuron
-                        )
+                    with st.spinner("🔍 Searching with semantic model..."):
+                        semantic_model = load_semantic_search_model()
                         logger.info(
-                            f"Label embeddings cached: {label_embeddings_dict is not None}, count: {len(label_embeddings_dict) if label_embeddings_dict else 0}"
+                            f"Semantic model loaded: {semantic_model is not None}"
                         )
 
-                        if label_embeddings_dict:
-                            # Encode query once
-                            query_embedding = semantic_model.encode(
-                                search_query, show_progress_bar=False
+                        if semantic_model is not None:
+                            # Get cached label embeddings (cached in session_state on first call)
+                            label_embeddings_dict = cache_all_label_embeddings(
+                                labels_service, max_neuron
                             )
                             logger.info(
-                                f"Query embedding - type: {type(query_embedding).__name__}, shape: {query_embedding.shape}"
+                                f"Label embeddings cached: {label_embeddings_dict is not None}, count: {len(label_embeddings_dict) if label_embeddings_dict else 0}"
                             )
 
-                            # Compute batch similarity with all cached label embeddings using numpy
-                            import numpy as np
+                            if label_embeddings_dict:
+                                # Encode query once
+                                query_embedding = semantic_model.encode(
+                                    search_query, show_progress_bar=False
+                                )
+                                logger.info(
+                                    f"Query embedding - type: {type(query_embedding).__name__}, shape: {query_embedding.shape}"
+                                )
 
-                            similarities = []
-                            logger.info(
-                                f"Computing similarities for {len(label_embeddings_dict)} labels"
-                            )
+                                # Compute batch similarity with all cached label embeddings using numpy
+                                import numpy as np
 
-                            for idx, label_embedding in label_embeddings_dict.items():
-                                try:
-                                    # Compute cosine similarity using numpy (more reliable)
-                                    # cos_sim = dot(a, b) / (norm(a) * norm(b))
-                                    dot_product = np.dot(
-                                        query_embedding, label_embedding
-                                    )
-                                    norm_query = np.linalg.norm(query_embedding)
-                                    norm_label = np.linalg.norm(label_embedding)
-                                    similarity = dot_product / (norm_query * norm_label)
+                                similarities = []
+                                logger.info(
+                                    f"Computing similarities for {len(label_embeddings_dict)} labels"
+                                )
 
-                                    label = labels_service.get_label(idx)
-                                    similarities.append((idx, label, similarity))
-                                    logger.debug(
-                                        f"  idx={idx}, label={label}, sim={similarity:.4f}"
-                                    )
-                                except Exception as e:
-                                    logger.error(
-                                        f"Similarity computation failed for idx {idx}: {type(e).__name__}: {e}"
-                                    )
+                                for (
+                                    idx,
+                                    label_embedding,
+                                ) in label_embeddings_dict.items():
+                                    try:
+                                        # Compute cosine similarity using numpy (more reliable)
+                                        # cos_sim = dot(a, b) / (norm(a) * norm(b))
+                                        dot_product = np.dot(
+                                            query_embedding, label_embedding
+                                        )
+                                        norm_query = np.linalg.norm(query_embedding)
+                                        norm_label = np.linalg.norm(label_embedding)
+                                        similarity = dot_product / (
+                                            norm_query * norm_label
+                                        )
 
-                            # Sort by similarity and take top 10
-                            similarities.sort(key=lambda x: x[2], reverse=True)
-                            logger.info(
-                                f"Top 5 similarities: {[(idx, sim) for idx, _, sim in similarities[:5]]}"
-                            )
+                                        label = labels_service.get_label(idx)
+                                        similarities.append((idx, label, similarity))
+                                        logger.debug(
+                                            f"  idx={idx}, label={label}, sim={similarity:.4f}"
+                                        )
+                                    except Exception as e:
+                                        logger.error(
+                                            f"Similarity computation failed for idx {idx}: {type(e).__name__}: {e}"
+                                        )
 
-                            matching_features = [
-                                (idx, label)
-                                for idx, label, sim in similarities[:semantic_top_k]
-                                if sim > semantic_threshold  # Threshold from config
-                            ]
-                            logger.info(
-                                f"Features matching threshold {semantic_threshold}: {len(matching_features)}"
-                            )
+                                # Sort by similarity and take top 10
+                                similarities.sort(key=lambda x: x[2], reverse=True)
+                                logger.info(
+                                    f"Top 5 similarities: {[(idx, sim) for idx, _, sim in similarities[:5]]}"
+                                )
+
+                                matching_features = [
+                                    (idx, label)
+                                    for idx, label, sim in similarities[:semantic_top_k]
+                                    if sim > semantic_threshold  # Threshold from config
+                                ]
+                                logger.info(
+                                    f"Features matching threshold {semantic_threshold}: {len(matching_features)}"
+                                )
+                            else:
+                                logger.warning("Label embeddings dict is None or empty")
                         else:
-                            logger.warning("Label embeddings dict is None or empty")
-                    else:
-                        logger.warning("Semantic model is None")
+                            logger.warning("Semantic model is None")
                 except Exception as e:
                     logger.error(f"Semantic search failed: {e}", exc_info=True)
 
@@ -359,36 +355,51 @@ def show():
     # MAIN AREA: Feature Details
     # ═══════════════════════════════════════════════════════════════════
 
+    superfeature_context = None
+    neuron_idx = None
+
     superfeature_id = st.session_state.get("selected_superfeature_id")
     if superfeature_id is not None:
-        if "selected_superfeature_id" in st.session_state:
-            del st.session_state["selected_superfeature_id"]
         superfeature = superfeatures.get(str(superfeature_id), {})
-        st.markdown(
-            f"## Superfeature: {superfeature.get('super_label', f'Superfeature {superfeature_id}')}"
-        )
-        st.caption(
-            f"{len(superfeature.get('neurons', []))} member neurons from `{selected_method}` labels"
-        )
-        st.divider()
-        if superfeature.get("sub_labels"):
-            st.subheader("Member Neurons")
-            for neuron_id, sub_label in zip(
-                superfeature.get("neurons", []), superfeature.get("sub_labels", [])
-            ):
-                render_clickable_feature(int(neuron_id), str(sub_label))
-        else:
-            st.info("No member neuron labels available for this superfeature.")
-        st.stop()
+        member_neurons = []
+        for raw_n in superfeature.get("neurons", []):
+            try:
+                n = int(raw_n)
+            except Exception:
+                continue
+            if 0 <= n <= max_neuron:
+                member_neurons.append(n)
 
-    # Get the selected feature from sidebar (session_state handles the selection)
-    neuron_idx = st.session_state.get("selected_feature_id")
-    logger.info(f"🔍 Main area: retrieved selected_feature_id = {neuron_idx}")
+        if not member_neurons:
+            st.warning("No valid member neurons available for this superfeature.")
+            st.stop()
 
-    # Clear it so it doesn't interfere with next interaction
-    if "selected_feature_id" in st.session_state:
-        logger.info(f"   ✓ Clearing selected_feature_id from session_state")
-        del st.session_state.selected_feature_id
+        sub_labels = superfeature.get("sub_labels", []) or []
+        member_labels = {
+            n: str(lbl) for n, lbl in zip(member_neurons, sub_labels) if lbl is not None
+        }
+
+        anchor = st.session_state.get("selected_superfeature_anchor_neuron")
+        if anchor not in member_neurons:
+            anchor = member_neurons[0]
+            st.session_state.selected_superfeature_anchor_neuron = anchor
+
+        neuron_idx = int(anchor)
+        superfeature_context = {
+            "id": str(superfeature_id),
+            "label": superfeature.get("super_label", f"Superfeature {superfeature_id}"),
+            "members": member_neurons,
+            "member_labels": member_labels,
+        }
+    else:
+        # Get the selected feature from sidebar (session_state handles the selection)
+        neuron_idx = st.session_state.get("selected_feature_id")
+        logger.info(f"🔍 Main area: retrieved selected_feature_id = {neuron_idx}")
+
+        # Clear it so it doesn't interfere with next interaction
+        if "selected_feature_id" in st.session_state:
+            logger.info(f"   ✓ Clearing selected_feature_id from session_state")
+            del st.session_state.selected_feature_id
 
     # Validate neuron index
     if neuron_idx is not None and not (0 <= neuron_idx <= max_neuron):
@@ -412,7 +423,14 @@ def show():
         logger.warning(f"Failed to get label: {e}")
 
     # Headline
-    st.markdown(f"## Feature #{neuron_idx}: {label}")
+    if superfeature_context is not None:
+        st.markdown(f"## Superfeature: {superfeature_context['label']}")
+        st.caption(
+            f"{len(superfeature_context['members'])} member neurons from `{selected_method}` labels"
+        )
+        st.markdown(f"### Representative Member Neuron #{neuron_idx}: {label}")
+    else:
+        st.markdown(f"## Feature #{neuron_idx}: {label}")
     st.divider()
 
     # Top Activating Categories Chart + Wordcloud (side by side)
@@ -472,9 +490,14 @@ def show():
 
         if wordcloud_service:
             try:
-                fig = wordcloud_service.generate_wordcloud_fig(
-                    neuron_idx, figsize=(6, 4), width=600, height=400, colormap="tab20"
-                )
+                with st.spinner("📊 Generating wordcloud..."):
+                    fig = wordcloud_service.generate_wordcloud_fig(
+                        neuron_idx,
+                        figsize=(6, 4),
+                        width=600,
+                        height=400,
+                        colormap="tab20",
+                    )
 
                 if fig is not None:
                     st.pyplot(fig, width="stretch")
@@ -518,46 +541,70 @@ def show():
             logger.error(f"Top businesses error: {e}", exc_info=True)
 
     st.divider()
+    # Related section: co-activation for neuron mode, member neurons for superfeature mode
+    if superfeature_context is not None:
+        st.subheader("Member Neurons")
+        members = superfeature_context["members"]
+        member_labels = superfeature_context["member_labels"]
+        sf_id = superfeature_context["id"]
 
-    # Related Features (co-activation section)
-    coactivation_service = st.session_state.get("coactivation")
+        for member_id in members:
+            member_label = member_labels.get(member_id)
+            if not member_label:
+                try:
+                    member_label = labels_service.get_label(member_id)
+                except Exception:
+                    member_label = f"Feature {member_id}"
 
-    if coactivation_service and neuron_idx is not None:
-        st.subheader("🔗 Related Features")
+            if st.button(
+                f"Feature {member_id}: {member_label}",
+                key=f"superfeature_member_{sf_id}_{member_id}",
+            ):
+                st.session_state.selected_superfeature_anchor_neuron = int(member_id)
+                st.rerun()
+    else:
+        coactivation_service = st.session_state.get("coactivation")
 
-        # Log diagnostic info about data sources
-        if (
-            hasattr(coactivation_service, "coactivation_data")
-            and coactivation_service.coactivation_data
-        ):
-            coact_neuron_ids = [
-                int(k) for k in coactivation_service.coactivation_data.keys()
-            ]
-            coact_max = max(coact_neuron_ids) if coact_neuron_ids else 0
-            logger.debug(
-                f"🔍 Data source mismatch diagnostic:"
-                f"\n   Model max_neuron: {max_neuron}"
-                f"\n   Coactivation data max neuron_id: {coact_max}"
-                f"\n   Coactivation data neurons: {len(coactivation_service.coactivation_data)}"
-                f"\n   Current neuron_idx: {neuron_idx}"
-            )
+        if coactivation_service and neuron_idx is not None:
+            st.subheader("Related Features")
 
-        col1, col2 = st.columns(2)
+            # Log diagnostic info about data sources
+            if (
+                hasattr(coactivation_service, "coactivation_data")
+                and coactivation_service.coactivation_data
+            ):
+                coact_neuron_ids = [
+                    int(k) for k in coactivation_service.coactivation_data.keys()
+                ]
+                coact_max = max(coact_neuron_ids) if coact_neuron_ids else 0
+                logger.debug(
+                    f"Data source mismatch diagnostic:"
+                    f"\n   Model max_neuron: {max_neuron}"
+                    f"\n   Coactivation data max neuron_id: {coact_max}"
+                    f"\n   Coactivation data neurons: {len(coactivation_service.coactivation_data)}"
+                    f"\n   Current neuron_idx: {neuron_idx}"
+                )
 
-        with col1:
-            st.markdown("**Frequently Co-Activated With**")
-            highly_coactivated = coactivation_service.get_highly_coactivated(neuron_idx)
-            if highly_coactivated:
-                for item in highly_coactivated:
-                    render_clickable_feature(item["neuron_id"], item["label"])
-            else:
-                st.caption("*No positive co-activation data found*")
+            col1, col2 = st.columns(2)
 
-        with col2:
-            st.markdown("**Rarely Co-Activated With**")
-            rarely_coactivated = coactivation_service.get_rarely_coactivated(neuron_idx)
-            if rarely_coactivated:
-                for item in rarely_coactivated:
-                    render_clickable_feature(item["neuron_id"], item["label"])
-            else:
-                st.caption("*No negative correlations found*")
+            with col1:
+                st.markdown("**Frequently Co-Activated With**")
+                highly_coactivated = coactivation_service.get_highly_coactivated(
+                    neuron_idx
+                )
+                if highly_coactivated:
+                    for item in highly_coactivated:
+                        render_clickable_feature(item["neuron_id"], item["label"])
+                else:
+                    st.caption("*No positive co-activation data found*")
+
+            with col2:
+                st.markdown("**Rarely Co-Activated With**")
+                rarely_coactivated = coactivation_service.get_rarely_coactivated(
+                    neuron_idx
+                )
+                if rarely_coactivated:
+                    for item in rarely_coactivated:
+                        render_clickable_feature(item["neuron_id"], item["label"])
+                else:
+                    st.caption("*No negative correlations found*")

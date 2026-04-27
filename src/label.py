@@ -246,6 +246,55 @@ def _find_latest_experiment_dir() -> Optional[Path]:
     return sorted(experiment_dirs, key=lambda d: d.name)[-1]
 
 
+def _find_latest_run_dir() -> Optional[Path]:
+    """Resolve latest run directory from outputs/LATEST_RUN.txt, then fallback scan."""
+    pointer_path = Path("outputs") / "LATEST_RUN.txt"
+    if pointer_path.exists():
+        try:
+            raw = pointer_path.read_text(encoding="utf-8").strip()
+            candidate = Path(raw)
+            if not candidate.is_absolute():
+                candidate = (Path.cwd() / candidate).resolve()
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except Exception as e:
+            logger.warning(f"Failed to read LATEST_RUN.txt: {e}")
+
+    outputs_dir = Path("outputs")
+    if not outputs_dir.exists():
+        return None
+
+    run_dirs = [
+        d
+        for d in outputs_dir.iterdir()
+        if d.is_dir() and len(d.name) == 15 and (d / "summary.json").exists()
+    ]
+    if not run_dirs:
+        return None
+    return sorted(run_dirs, key=lambda d: d.name)[-1]
+
+
+def _find_best_run_dir_from_latest_experiment() -> Optional[Path]:
+    """Resolve best run directory from latest experiment manifest (NDCG@10 rule)."""
+    latest_experiment_dir = _find_latest_experiment_dir()
+    if not latest_experiment_dir:
+        return None
+    try:
+        manifest = _load_experiment_manifest(latest_experiment_dir)
+        runs = manifest.get("runs", [])
+        if not runs:
+            return None
+        best_run = _find_best_experiment_run(runs)
+        if not best_run:
+            return None
+        best_run_dir = Path(best_run.get("run_dir", ""))
+        if best_run_dir.exists():
+            return best_run_dir
+    except Exception as e:
+        logger.warning("Failed to resolve best run from latest experiment: %s", e)
+    return None
+
+
 def upload_label_artifacts_to_cloud(training_dir: Path) -> bool:
     """Upload label/UI artifacts created by `src.label` to GCS."""
     try:
@@ -878,6 +927,65 @@ def load_review_lookup(
     return review_lookup
 
 
+def validate_review_labeling_artifacts(data_dir: Path) -> None:
+    """Validate review artifacts required for review-based LLM labeling."""
+    reviews_path = data_dir / "reviews_df.pkl"
+    if reviews_path.exists():
+        with open(reviews_path, "rb") as f:
+            reviews_df = pickle.load(f)
+        source = str(reviews_path)
+    else:
+        shared_payload = _load_shared_payload_from_data_dir(data_dir)
+        if not shared_payload:
+            raise RuntimeError(
+                "Review-based labeling requires reviews_df.pkl (or shared cache reviews), but no review artifact was found."
+            )
+        reviews_df = shared_payload.get("reviews")
+        source = "shared preprocessing cache"
+
+    if reviews_df is None or len(reviews_df) == 0:
+        raise RuntimeError(
+            f"Review-based labeling requires non-empty review snippets, but {source} is empty."
+        )
+
+    required_columns = {"business_id", "text"}
+    missing_required = sorted(required_columns - set(reviews_df.columns))
+    if missing_required:
+        raise RuntimeError(
+            "Review-based labeling artifact schema mismatch: "
+            f"{source} is missing required columns {missing_required}. "
+            f"Available columns: {list(reviews_df.columns)}"
+        )
+
+    optional_columns = {"useful", "stars"}
+    missing_optional = sorted(optional_columns - set(reviews_df.columns))
+    if missing_optional:
+        logger.info(
+            "Review labeling preflight: optional columns missing in %s: %s",
+            source,
+            ", ".join(missing_optional),
+        )
+    else:
+        logger.info(
+            "Review labeling preflight: optional columns present in %s: useful, stars",
+            source,
+        )
+
+    non_empty_text = int(reviews_df["text"].astype(str).str.strip().ne("").sum())
+    if non_empty_text == 0:
+        raise RuntimeError(
+            f"Review-based labeling requires non-empty text snippets, but all text values in {source} are empty."
+        )
+
+    logger.info(
+        "Review labeling preflight passed: %s rows=%d, businesses=%d, non_empty_text=%d",
+        source,
+        len(reviews_df),
+        reviews_df["business_id"].astype(str).nunique(),
+        non_empty_text,
+    )
+
+
 def extract_neuron_profiles(
     sparse_activations: torch.Tensor,
     item2index: dict,
@@ -1198,6 +1306,10 @@ def label_neurons(
         elsa_model_path = training_dir / "checkpoints" / "elsa_best.pt"
     elsa_model = load_elsa_model(elsa_model_path, len(item2index), config)
 
+    resolved_method = "weighted-category" if method == "tag-based" else method
+    if resolved_method in ["llm-review-based", "both"]:
+        validate_review_labeling_artifacts(data_path)
+
     logger.info("Computing sparse activations from trained ELSA + SAE...")
     sparse_activations = compute_item_sparse_activations(elsa_model, sae_model)
     review_lookup = load_review_lookup(data_path)
@@ -1214,7 +1326,6 @@ def label_neurons(
     # Label neurons
     all_labels = {}
     concept_mapping_payload = {}
-    resolved_method = "weighted-category" if method == "tag-based" else method
 
     if resolved_method in ["weighted-category", "non-llm", "both"]:
         logger.info("=" * 80)
@@ -1262,6 +1373,9 @@ def label_neurons(
         logger.info("=" * 80)
         logger.info("PHASE 3: LLM-BASED LABELING")
         logger.info("=" * 80)
+        logger.info(
+            "LLM labeling may take several minutes. Progress is logged per neuron with request timeout/retries."
+        )
         try:
             labeler = LLMBasedLabeler(api_key=gemini_api_key)
             labels = labeler.label_neurons(neuron_profiles, business_metadata)
@@ -1277,6 +1391,9 @@ def label_neurons(
         logger.info("=" * 80)
         logger.info("PHASE 4: REVIEW-BASED LLM LABELING")
         logger.info("=" * 80)
+        logger.info(
+            "Review-based LLM labeling may take several minutes. Progress is logged per neuron with request timeout/retries."
+        )
         try:
             if not review_lookup:
                 raise RuntimeError(
@@ -1537,13 +1654,23 @@ def main():
         "--training-dir",
         type=Path,
         default=None,
-        help="Training output directory (default: auto-detect latest run)",
+        help="Training output directory (default: best run from latest experiment)",
     )
     parser.add_argument(
         "--experiment-dir",
         type=Path,
         default=None,
         help="Experiment directory containing manifest.json (labels every run in the experiment)",
+    )
+    parser.add_argument(
+        "--label-latest-experiment",
+        action="store_true",
+        help="When --training-dir is omitted, label all runs in the latest experiment instead of only the active run.",
+    )
+    parser.add_argument(
+        "--label-latest-run",
+        action="store_true",
+        help="When --training-dir is omitted, label the run from outputs/LATEST_RUN.txt (override best-run default).",
     )
 
     # Optional overrides
@@ -1618,6 +1745,8 @@ def main():
         parser.error("Cannot use --skip-coactivation and --coactivation-only together")
     if args.training_dir and args.experiment_dir:
         parser.error("Cannot use --training-dir and --experiment-dir together")
+    if args.label_latest_experiment and args.label_latest_run:
+        parser.error("Cannot use --label-latest-experiment and --label-latest-run together")
 
     # Setup logging
     from src.utils import setup_logger
@@ -1640,21 +1769,50 @@ def main():
             coactivation_only=args.coactivation_only,
         )
     elif args.training_dir is None:
-        latest_experiment_dir = _find_latest_experiment_dir()
-        if latest_experiment_dir:
-            logger.info(
-                f"Detected latest experiment directory, labeling all runs: {latest_experiment_dir}"
-            )
-            results = _label_experiment_runs(
-                latest_experiment_dir,
-                method=args.method,
-                gemini_api_key=args.gemini_api_key,
-                similarity_threshold=args.similarity_threshold,
-                top_k=args.top_k,
-                skip_coactivation=args.skip_coactivation,
-                coactivation_only=args.coactivation_only,
-            )
+        if args.label_latest_experiment:
+            latest_experiment_dir = _find_latest_experiment_dir()
+            if latest_experiment_dir:
+                logger.info(
+                    f"Detected latest experiment directory, labeling all runs: {latest_experiment_dir}"
+                )
+                results = _label_experiment_runs(
+                    latest_experiment_dir,
+                    method=args.method,
+                    gemini_api_key=args.gemini_api_key,
+                    similarity_threshold=args.similarity_threshold,
+                    top_k=args.top_k,
+                    skip_coactivation=args.skip_coactivation,
+                    coactivation_only=args.coactivation_only,
+                )
+            else:
+                raise RuntimeError(
+                    "Could not resolve latest experiment directory for batch labeling."
+                )
         else:
+            if args.label_latest_run:
+                latest_run_dir = _find_latest_run_dir()
+                if latest_run_dir:
+                    logger.info(
+                        "No --training-dir provided; labeling latest active run: %s",
+                        latest_run_dir,
+                    )
+                    args.training_dir = latest_run_dir
+            else:
+                best_run_dir = _find_best_run_dir_from_latest_experiment()
+                if best_run_dir:
+                    logger.info(
+                        "No --training-dir provided; labeling best run from latest experiment: %s",
+                        best_run_dir,
+                    )
+                    args.training_dir = best_run_dir
+                else:
+                    latest_run_dir = _find_latest_run_dir()
+                    if latest_run_dir:
+                        logger.info(
+                            "Best-run resolution failed; falling back to latest active run: %s",
+                            latest_run_dir,
+                        )
+                        args.training_dir = latest_run_dir
             results = label_neurons(
                 training_dir=args.training_dir,
                 model_path=args.model_path,
