@@ -829,9 +829,7 @@ class DataService:
             lat = float(row.get("latitude", 0))
             lon = float(row.get("longitude", 0))
             if lat == 0 and lon == 0:
-                logger.warning(
-                    f"  🚫 POI {poi_idx} ({name}): INVALID COORDINATES (0,0)"
-                )
+                logger.warning(f"  🚫 POI {poi_idx} ({name}): INVALID COORDINATES (0,0)")
                 return {}
 
             rating = float(row.get("stars", 0))

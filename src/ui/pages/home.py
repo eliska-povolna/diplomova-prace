@@ -35,7 +35,9 @@ def show():
         return
 
     summary_data = _safe_get(training_results, "summary", "data", default={}) or {}
-    summary_eval = _safe_get(training_results, "summary", "evaluation", default={}) or {}
+    summary_eval = (
+        _safe_get(training_results, "summary", "evaluation", default={}) or {}
+    )
 
     n_users = (
         summary_data.get("n_users")

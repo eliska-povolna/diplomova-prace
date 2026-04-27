@@ -1714,10 +1714,12 @@ def main() -> None:
                 shared_cache_dir,
             )
 
-        preprocessing_payload, preprocessing_source, _ = (
-            prepare_shared_preprocessing_cache(
-                config_dict, require_existing=args.skip_preprocessing
-            )
+        (
+            preprocessing_payload,
+            preprocessing_source,
+            _,
+        ) = prepare_shared_preprocessing_cache(
+            config_dict, require_existing=args.skip_preprocessing
         )
         preprocessing_manifest = preprocessing_payload["manifest"]
         reviews = preprocessing_payload["reviews"]

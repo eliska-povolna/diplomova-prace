@@ -131,7 +131,9 @@ def _load_user_id_list(path: Path) -> list[str]:
     return [str(item) for item in data]
 
 
-def _load_saved_protocol(output_dir: Path, summary: dict, k_values_arg) -> tuple[dict, list[int]]:
+def _load_saved_protocol(
+    output_dir: Path, summary: dict, k_values_arg
+) -> tuple[dict, list[int]]:
     data_dir = output_dir / "data"
     protocol_path = data_dir / "evaluation_protocol.json"
     protocol = {}
@@ -140,15 +142,21 @@ def _load_saved_protocol(output_dir: Path, summary: dict, k_values_arg) -> tuple
             with protocol_path.open("r", encoding="utf-8") as f:
                 protocol = json.load(f) or {}
         except Exception as e:
-            logger.warning("Failed to load saved evaluation protocol %s: %s", protocol_path, e)
+            logger.warning(
+                "Failed to load saved evaluation protocol %s: %s", protocol_path, e
+            )
 
     if not protocol:
         protocol = dict(summary.get("evaluation_protocol") or {})
 
     ks = list(k_values_arg) if k_values_arg else list(protocol.get("k_values") or [])
     if not ks:
-        metric_dict = summary.get("ranking_metrics_sae") or summary.get("ranking_metrics") or {}
-        ndcg_metrics = metric_dict.get("ndcg", {}) if isinstance(metric_dict, dict) else {}
+        metric_dict = (
+            summary.get("ranking_metrics_sae") or summary.get("ranking_metrics") or {}
+        )
+        ndcg_metrics = (
+            metric_dict.get("ndcg", {}) if isinstance(metric_dict, dict) else {}
+        )
         inferred_ks = []
         for key in ndcg_metrics.keys():
             if isinstance(key, str) and key.startswith("@"):
@@ -159,7 +167,11 @@ def _load_saved_protocol(output_dir: Path, summary: dict, k_values_arg) -> tuple
         if inferred_ks:
             ks = sorted(inferred_ks)
     if not ks:
-        ks = list(summary.get("config", {}).get("evaluation", {}).get("k_values", [5, 10, 20, 50]))
+        ks = list(
+            summary.get("config", {})
+            .get("evaluation", {})
+            .get("k_values", [5, 10, 20, 50])
+        )
 
     protocol.setdefault("split", "per-user holdout")
     protocol.setdefault("holdout_ratio", 0.2)
@@ -214,7 +226,11 @@ def _resolve_split_from_artifacts(
         return np.array(train_users)[val_idx], source
 
     user_to_index = {str(user_id): idx for idx, user_id in enumerate(final_user_ids)}
-    split_indices = [user_to_index[user_id] for user_id in wanted_user_ids if user_id in user_to_index]
+    split_indices = [
+        user_to_index[user_id]
+        for user_id in wanted_user_ids
+        if user_id in user_to_index
+    ]
     missing = len(wanted_user_ids) - len(split_indices)
     if missing:
         logger.warning(
@@ -282,7 +298,10 @@ def _sync_summary(
     drift_sae: dict,
 ) -> None:
     if split != "test":
-        logger.info("Skipping summary sync for %s split; training summary remains canonical for test metrics.", split)
+        logger.info(
+            "Skipping summary sync for %s split; training summary remains canonical for test metrics.",
+            split,
+        )
         return
 
     summary["ranking_metrics_elsa"] = metrics_elsa
@@ -308,10 +327,14 @@ def _sync_experiment_manifest(output_dir: Path, summary: dict) -> None:
     experiment_cfg = summary.get("config", {}).get("experiment") or {}
     experiment_id = experiment_cfg.get("experiment_id")
     if not experiment_id:
-        logger.info("Run is not part of an experiment sweep; skipping experiment manifest sync.")
+        logger.info(
+            "Run is not part of an experiment sweep; skipping experiment manifest sync."
+        )
         return
 
-    manifest_path = Path("outputs") / "experiments" / str(experiment_id) / "manifest.json"
+    manifest_path = (
+        Path("outputs") / "experiments" / str(experiment_id) / "manifest.json"
+    )
     if not manifest_path.exists():
         logger.warning("Experiment manifest not found for sync: %s", manifest_path)
         return
@@ -329,7 +352,9 @@ def _sync_experiment_manifest(output_dir: Path, summary: dict) -> None:
             break
 
     if not updated:
-        logger.warning("Run %s not found in experiment manifest %s", run_dir_str, manifest_path)
+        logger.warning(
+            "Run %s not found in experiment manifest %s", run_dir_str, manifest_path
+        )
         return
 
     with manifest_path.open("w", encoding="utf-8") as f:
@@ -338,6 +363,7 @@ def _sync_experiment_manifest(output_dir: Path, summary: dict) -> None:
 
     try:
         from src.ui.services.secrets_helper import get_cloud_storage_bucket
+
         gcs_bucket_name = get_cloud_storage_bucket()
         if gcs_bucket_name:
             from src.ui.services.cloud_storage_helper import CloudStorageHelper
@@ -346,9 +372,14 @@ def _sync_experiment_manifest(output_dir: Path, summary: dict) -> None:
             cloud_storage.upload_json(
                 manifest_path,
                 f"experiments/{experiment_id}/manifest.json",
-                metadata={"timestamp": str(experiment_id), "type": "experiment_manifest"},
+                metadata={
+                    "timestamp": str(experiment_id),
+                    "type": "experiment_manifest",
+                },
             )
-            logger.info("Uploaded refreshed experiment manifest to GCS for %s", experiment_id)
+            logger.info(
+                "Uploaded refreshed experiment manifest to GCS for %s", experiment_id
+            )
     except Exception as e:
         logger.warning("Failed to upload refreshed experiment manifest to GCS: %s", e)
 
@@ -363,11 +394,15 @@ def _score_elsa_batch(elsa: ELSA, batch: np.ndarray, device: str) -> np.ndarray:
     return scores
 
 
-def _score_sae_batch(elsa: ELSA, sae: TopKSAE, batch: np.ndarray, device: str) -> np.ndarray:
+def _score_sae_batch(
+    elsa: ELSA, sae: TopKSAE, batch: np.ndarray, device: str
+) -> np.ndarray:
     """Score a dense user batch with the exact training-time SAE+ELSA path."""
     batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
     with torch.no_grad():
-        scores = elsa.decode(sae.decode(sae.encode(elsa.encode(batch_tensor)))).cpu().numpy()
+        scores = (
+            elsa.decode(sae.decode(sae.encode(elsa.encode(batch_tensor)))).cpu().numpy()
+        )
     scores = scores - batch
     scores[batch > 0] = -np.inf
     return scores
@@ -480,9 +515,11 @@ def main() -> None:
         logger.info("=" * 60)
         logger.info(f"LOADING {args.split.upper()} DATA")
         logger.info("=" * 60)
-        preprocessing_payload, preprocessing_source, shared_cache_dir = (
-            prepare_shared_preprocessing_cache(config, require_existing=False)
-        )
+        (
+            preprocessing_payload,
+            preprocessing_source,
+            shared_cache_dir,
+        ) = prepare_shared_preprocessing_cache(config, require_existing=False)
         X_csr = preprocessing_payload["final_dataset"].csr
         final_user_ids = [
             str(user_id) for user_id in preprocessing_payload["final_user_ids"]
@@ -549,7 +586,9 @@ def main() -> None:
         min_interactions = int(protocol.get("min_interactions", 5))
         replay_mode = "reconstructed_fallback"
         holdout_metadata: dict = {}
-        exact_holdout = load_holdout_split_artifacts(output_dir / "data", split=args.split)
+        exact_holdout = load_holdout_split_artifacts(
+            output_dir / "data", split=args.split
+        )
         if exact_holdout is not None:
             X_eval_input_csr, X_eval_target_csr, holdout_metadata = exact_holdout
             replay_mode = "exact_replay"
@@ -686,7 +725,9 @@ def main() -> None:
             metrics_sae,
         )
         if drift_elsa["matches"]:
-            logger.info("Refreshed ELSA-only metrics match the stored training summary.")
+            logger.info(
+                "Refreshed ELSA-only metrics match the stored training summary."
+            )
         else:
             largest = drift_elsa["largest_diff"]
             logger.warning(
@@ -809,4 +850,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

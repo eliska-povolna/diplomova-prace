@@ -4,6 +4,21 @@
 
 Modern recommender systems can be accurate while still being hard to inspect or influence. This project combines a collaborative-filtering model (**ELSA**) with a **Sparse Autoencoder (SAE)** so user preferences become sparse, readable features that can be interpreted and steered. The data source is the Yelp academic dataset, loaded into **DuckDB** locally or **CloudSQL** when using a cloud backend.
 
+## What data was used in the thesis?
+
+- Final run used in thesis: [outputs/20260427_030923/summary.json](outputs/20260427_030923/summary.json)
+- Final filtered dataset stats: 37,323 users, 12,793 items, 525,257 positive interactions, 99.89% sparsity
+- Final SAE metrics: NDCG@10=0.0667, Recall@10=0.1087, HR@10=0.2401, Coverage=0.7924, Entropy=0.7907
+- Results page implementation: [src/ui/pages/results.py](src/ui/pages/results.py)
+- Dataset page implementation: [src/ui/pages/dataset_statistics.py](src/ui/pages/dataset_statistics.py)
+- Chart export script for thesis: [scripts/generate_thesis_charts.py](scripts/generate_thesis_charts.py)
+
+### Artifact Snapshot Notes
+
+- Current canonical evaluation artifacts in the latest strict run use K={10,20,50}.
+- Steering diagnostics are primarily exposed in the Live Demo through rank deltas, score deltas, and activation shifts.
+- Dataset-level and model-level charts used in the thesis are exported by [scripts/generate_thesis_charts.py](scripts/generate_thesis_charts.py).
+
 ## What Is This?
 
 This repository contains the full pipeline for an interpretable POI recommender system:
@@ -608,16 +623,17 @@ These artifacts are uploaded automatically during the pipeline when `GCS_BUCKET_
 
 Each SAE neuron is labeled to identify what "feature" it represents:
 
-#### Tag-Based Labeling
+#### Weighted-Category Labeling
 - For each neuron, find the businesses with the highest activation scores
-- Extract the Yelp categories attached to those businesses
-- Aggregate the most frequent tags into a compact label such as "coffee_shops + casual"
+- Extract Yelp categories from those top-activating businesses
+- Aggregate category evidence weighted by activation strength
+- De-prioritize generic parent categories (e.g., Restaurants/Food) unless they are the only available signal
 - Best when you want a fast, reproducible label without any API calls
 
 #### Matrix-Based Labeling
-- Build a neuron-by-tag association matrix from the activation patterns
-- Rank tags by how strongly they co-occur with each neuron across the dataset
-- Produce labels from the strongest tag associations rather than only the top examples
+- Build a neuron-tag matrix from real sparse activations
+- Apply TF-IDF style scoring so labels reflect discriminative concepts, not just frequent tags
+- Export concept-neuron mappings used directly for concept steering in Live Demo
 - Best when you want a more global, dataset-level view of what a neuron represents
 
 #### LLM-Based Labeling
@@ -628,11 +644,26 @@ Each SAE neuron is labeled to identify what "feature" it represents:
 - Prompt template: [neuron label prompt](src/interpret/prompts.py#L3)
 - Superfeature prompt: [superfeature synthesis prompt](src/interpret/prompts.py#L17)
 
+#### Review-Based LLM Labeling
+- Extends LLM labeling with top useful review snippets per business
+- Uses the same activation-driven top businesses plus review text context
+- Produces labels that can capture nuance beyond taxonomy (atmosphere/service cues)
+- Requires review artifacts with business_id, text, useful, and stars columns
+
 **See:** `src/interpret/neuron_labeling.py`
 
 ### Co-Activation Analysis
 
-Neurons don't work in isolation. Co-activation matrices show which neurons tend to activate together:
+Neurons don't work in isolation. Co-activation is computed from saved sparse test activations:
+
+- Load `h_sparse_test.pt` for the run
+- Center activations and compute neuron-neuron Pearson correlation matrix
+- For each neuron, persist top positive and top negative related neurons (thresholded)
+- Save as `neuron_coactivation.json` for direct UI consumption
+
+The UI shows both:
+- Frequently co-activated features (positive correlation)
+- Rarely co-activated features (negative correlation)
 
 ```
 Neuron A (coffee)  ──────────┐
@@ -642,14 +673,50 @@ Neuron B (outdoor) ──────────┘
 
 Available in UI: **Interpretability Tab → Co-Activation Heatmap**
 
+### Top Activations and Wordcloud Methodology
+
+For each neuron, the labeling stage precomputes category metadata:
+
+- `top_items`: top activating businesses with activation value, name, categories, city/state, stars, review_count
+- `category_weights`: category → list of activation values contributed by top items
+
+Interpretability UI then renders:
+
+- **Top Activating Businesses**: top businesses sorted by activation
+- **Top Activating Categories**: categories ranked by mean activation with frequency and range diagnostics
+- **Wordcloud**: category token size is driven by combined frequency and activation strength (`frequency * mean_activation`, scaled)
+
+Wordcloud payloads are precomputed and cached under `precomputed_ui_cache/neuron_wordclouds/` to avoid runtime recomputation.
+
 ### Feature Steering in UI
 
-**Live Demo Tab** allows interactive steering:
+**Live Demo Tab** supports two steering modes that share the same inference pipeline:
+
+1. **Neuron Steering**
+  - User directly sets target values for selected neuron activations.
+2. **Concept / Superfeature Steering**
+  - Query text is matched by cosine similarity against saved concept mappings (matrix-based) or superfeatures/neuron labels (LLM-based).
+  - The selected concept is converted to a neuron-weight patch, optionally similarity-scaled.
+
+Both modes are merged into a single steering vector before inference.
+
+Steering inference path:
+
+- Encode user latent to sparse features
+- Apply neuron overrides in sparse space
+- Decode back to latent
+- Interpolate with baseline latent via global alpha
+- Re-rank items and compute rank/score deltas
+
+In short, recommendations are not rebuilt by retraining; they are recomputed from saved models with controlled latent-space edits.
+
+**Live workflow:**
 
 1. Select a user (or create synthetic profile)
-2. Adjust neuron sliders (increase/decrease activation)
-3. See updated top-K recommendations
-4. Attribution shows which neurons influenced the ranking
+2. Build steering draft from neuron sliders and/or concept search
+3. Apply steering (single action merges all draft sources)
+4. See updated top-K recommendations, map updates, and diagnostics
+5. Inspect activation shift and rank movement
 
 **Example:**
 - Increase "coffee_shops" neuron → get more coffee shop recommendations

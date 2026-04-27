@@ -10,7 +10,9 @@ import numpy as np
 import torch
 
 
-def set_global_reproducibility(seed: int, *, deterministic: bool = True) -> dict[str, Any]:
+def set_global_reproducibility(
+    seed: int, *, deterministic: bool = True
+) -> dict[str, Any]:
     """Seed Python, NumPy, and PyTorch state for reproducible runs."""
     seed = int(seed)
 

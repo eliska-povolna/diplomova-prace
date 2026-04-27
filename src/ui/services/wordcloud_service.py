@@ -109,7 +109,9 @@ class WordcloudService:
                 self.labels = data["neuron_labels"]
             elif isinstance(data, dict) and "methods" in data:
                 methods = data.get("methods") or {}
-                selected_method = str(data.get("selected_method") or "weighted-category")
+                selected_method = str(
+                    data.get("selected_method") or "weighted-category"
+                )
                 selected_payload = methods.get(selected_method)
                 if selected_payload is None and methods:
                     selected_payload = next(iter(methods.values()))

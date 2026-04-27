@@ -555,7 +555,9 @@ def compute_score_diagnostics(
             "examples": [],
         }
 
-    candidate_rows = np.where(np.asarray(X_target_csr.getnnz(axis=1)).reshape(-1) > 0)[0]
+    candidate_rows = np.where(np.asarray(X_target_csr.getnnz(axis=1)).reshape(-1) > 0)[
+        0
+    ]
     if len(candidate_rows) == 0:
         return {
             "sampled_users": 0,

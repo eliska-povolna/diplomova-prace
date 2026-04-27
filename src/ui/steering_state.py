@@ -93,7 +93,9 @@ def steering_config_hash(config: Optional[Mapping[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def to_inference_config(config: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+def to_inference_config(
+    config: Optional[Mapping[str, Any]]
+) -> Optional[Dict[str, Any]]:
     if not config:
         return None
     return {

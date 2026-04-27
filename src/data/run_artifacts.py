@@ -17,7 +17,9 @@ def shared_data_manifest_path(data_dir: Path) -> Path:
     return data_dir / SHARED_DATA_MANIFEST_NAME
 
 
-def build_shared_data_manifest(*, cache_dir: Path, cache_key: str, manifest_path: Path) -> dict[str, Any]:
+def build_shared_data_manifest(
+    *, cache_dir: Path, cache_key: str, manifest_path: Path
+) -> dict[str, Any]:
     return {
         "schema_version": SHARED_DATA_MANIFEST_VERSION,
         "shared_preprocessing": {
@@ -34,7 +36,9 @@ def load_shared_data_manifest(data_dir: Path) -> dict[str, Any] | None:
         try:
             return json.loads(manifest_file.read_text(encoding="utf-8"))
         except Exception as exc:
-            logger.warning("Failed to read shared data manifest %s: %s", manifest_file, exc)
+            logger.warning(
+                "Failed to read shared data manifest %s: %s", manifest_file, exc
+            )
 
     run_dir = data_dir.parent
     summary_path = run_dir / "summary.json"
@@ -49,10 +53,14 @@ def load_shared_data_manifest(data_dir: Path) -> dict[str, Any] | None:
                 return build_shared_data_manifest(
                     cache_dir=Path(cache_dir),
                     cache_key=str(cache_key or ""),
-                    manifest_path=Path(manifest_path or Path(cache_dir) / "manifest.json"),
+                    manifest_path=Path(
+                        manifest_path or Path(cache_dir) / "manifest.json"
+                    ),
                 )
         except Exception as exc:
-            logger.warning("Failed to infer shared data manifest from %s: %s", summary_path, exc)
+            logger.warning(
+                "Failed to infer shared data manifest from %s: %s", summary_path, exc
+            )
 
     return None
 
@@ -71,10 +79,14 @@ def load_shared_preprocessing_payload_for_run(data_dir: Path) -> dict[str, Any] 
     if not cache_dir:
         return None
     if not cache_dir.exists():
-        logger.warning("Shared preprocessing cache directory does not exist: %s", cache_dir)
+        logger.warning(
+            "Shared preprocessing cache directory does not exist: %s", cache_dir
+        )
         return None
     try:
         return load_shared_preprocessing_cache(cache_dir)
     except Exception as exc:
-        logger.warning("Failed to load shared preprocessing cache %s: %s", cache_dir, exc)
+        logger.warning(
+            "Failed to load shared preprocessing cache %s: %s", cache_dir, exc
+        )
         return None

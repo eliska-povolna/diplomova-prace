@@ -908,9 +908,12 @@ def show_actual_results(results: Dict[str, Any]) -> None:
         else:
             st.dataframe(_arrow_safe_df(metrics_df), width="stretch", hide_index=True)
             chart_df = _build_metrics_chart_df(results, selected_k_tags)
-            baseline_df, n_items, avg_heldout, missing_reqs = (
-                _build_random_baseline_reference(results, selected_k_values)
-            )
+            (
+                baseline_df,
+                n_items,
+                avg_heldout,
+                missing_reqs,
+            ) = _build_random_baseline_reference(results, selected_k_values)
             if not chart_df.empty:
                 fig = px.bar(
                     chart_df,

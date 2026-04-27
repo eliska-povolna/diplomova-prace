@@ -1259,9 +1259,12 @@ def label_neurons(
     elsa_model_path = None
     if model_path is None or data_path is None or business_metadata_path is None:
         logger.info("Auto-detecting model files...")
-        model_path, elsa_model_path, data_path, business_metadata_path = (
-            find_model_files(training_dir)
-        )
+        (
+            model_path,
+            elsa_model_path,
+            data_path,
+            business_metadata_path,
+        ) = find_model_files(training_dir)
 
     output_dir = training_dir / "neuron_interpretations"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1746,7 +1749,9 @@ def main():
     if args.training_dir and args.experiment_dir:
         parser.error("Cannot use --training-dir and --experiment-dir together")
     if args.label_latest_experiment and args.label_latest_run:
-        parser.error("Cannot use --label-latest-experiment and --label-latest-run together")
+        parser.error(
+            "Cannot use --label-latest-experiment and --label-latest-run together"
+        )
 
     # Setup logging
     from src.utils import setup_logger

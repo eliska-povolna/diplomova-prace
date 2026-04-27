@@ -589,7 +589,9 @@ class InferenceService:
                 {
                     "poi_idx": int(idx.item()),
                     "score": float(score.item()),
-                    "contributing_neurons": self.get_feature_contributions(h_final, idx.item())
+                    "contributing_neurons": self.get_feature_contributions(
+                        h_final, idx.item()
+                    ),
                 }
                 for score, idx in zip(top_scores, top_indices)
             ],
@@ -653,11 +655,11 @@ class InferenceService:
         return scores
 
     def get_feature_contributions(
-    self,
-    h_final: torch.Tensor,
-    item_idx: int,
-    top_k: int = 3,
-) -> List[Dict]:
+        self,
+        h_final: torch.Tensor,
+        item_idx: int,
+        top_k: int = 3,
+    ) -> List[Dict]:
         """
         Compute per-neuron contribution to item score.
 
@@ -902,7 +904,9 @@ class InferenceService:
                     "arrow_color": arrow_color,
                     "show_delta": show_delta,
                     "score": score,
-                    "contributing_neurons": self.get_feature_contributions(h_final, item_id)
+                    "contributing_neurons": self.get_feature_contributions(
+                        h_final, item_id
+                    ),
                 }
             )
 

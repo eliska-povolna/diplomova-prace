@@ -301,7 +301,9 @@ def build_concept_mapping_payload(
             {
                 "concept_id": tag_name,
                 "display_name": _clean_tag_name(tag_name),
-                "kind": "attribute" if tag_name.startswith("attribute:") else "category",
+                "kind": "attribute"
+                if tag_name.startswith("attribute:")
+                else "category",
                 "item_count": len(tag_items.get(tag_name, [])),
                 "top_neurons": top_neurons,
             }
@@ -383,7 +385,9 @@ def label_neurons_from_tags(
         profile = neuron_profiles.get(neuron_idx, {})
         local_support = _local_category_support(profile)
         max_local_support = max(local_support.values(), default=0.0)
-        min_required_support = max_local_support * 0.15 if max_local_support > 0 else 0.0
+        min_required_support = (
+            max_local_support * 0.15 if max_local_support > 0 else 0.0
+        )
 
         candidate_tags = []
         for idx in np.argsort(-scores):
@@ -410,7 +414,9 @@ def label_neurons_from_tags(
             filtered_candidates = [
                 row for row in candidate_tags if row[0] not in stop_categories
             ]
-            chosen_candidates = filtered_candidates if filtered_candidates else candidate_tags
+            chosen_candidates = (
+                filtered_candidates if filtered_candidates else candidate_tags
+            )
             chosen_candidates.sort(
                 key=lambda row: (row[2], row[1], row[1] * row[2]), reverse=True
             )
@@ -424,10 +430,7 @@ def label_neurons_from_tags(
                 row for row in local_ranked if row[0] not in stop_categories
             ]
             chosen_ranked = filtered_ranked if filtered_ranked else local_ranked
-            top_tags = [
-                category
-                for category, _support in chosen_ranked[:2]
-            ]
+            top_tags = [category for category, _support in chosen_ranked[:2]]
 
         # Build label from top tags
         if top_tags:

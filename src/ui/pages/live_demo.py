@@ -108,13 +108,13 @@ def _set_demo_recommendation_state(
     poi_details_map: Optional[Dict] = None,
 ) -> None:
     if base_recommendations is not None:
-        st.session_state[_demo_state_key(selected_user, "base_recommendations")] = (
-            base_recommendations
-        )
+        st.session_state[
+            _demo_state_key(selected_user, "base_recommendations")
+        ] = base_recommendations
     if steered_recommendations is not None:
-        st.session_state[_demo_state_key(selected_user, "steered_recommendations")] = (
-            steered_recommendations
-        )
+        st.session_state[
+            _demo_state_key(selected_user, "steered_recommendations")
+        ] = steered_recommendations
 
     active_config = active_steering_config
     if active_config is None:
@@ -122,9 +122,9 @@ def _set_demo_recommendation_state(
             _demo_state_key(selected_user, "active_steering_config")
         )
 
-    st.session_state[_demo_state_key(selected_user, "active_steering_config")] = (
-        active_config
-    )
+    st.session_state[
+        _demo_state_key(selected_user, "active_steering_config")
+    ] = active_config
 
     displayed = (
         steered_recommendations
@@ -379,18 +379,13 @@ Steer your preferences using this formula in the latent space:
                     except Exception:
                         logger.error("Could not compute blended activation.")
                     st.caption(
-                    (
-                        f"📊 Activation: {current_val:.2f} → steered to: {blended_activation:.2f}"
+                        (
+                            f"📊 Activation: {current_val:.2f} → steered to: {blended_activation:.2f}"
+                        )
                     )
-                )
-                    
+
                 else:
-                    st.caption(
-                    (
-                        f"📊 Activation: {current_val:.2f}"
-                    )
-                )
-                
+                    st.caption((f"📊 Activation: {current_val:.2f}"))
 
     st.session_state[draft_key] = merged_draft_values
     if merged_draft_values:
@@ -424,9 +419,9 @@ Steer your preferences using this formula in the latent space:
         except Exception as e:
             logger.debug(f"Could not compute steered activations chart: {e}")
     else:
-        st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = (
-            None
-        )
+        st.session_state[
+            _demo_state_key(selected_user, "feature_chart_original")
+        ] = None
         st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
 
 
@@ -1126,13 +1121,17 @@ def show():
         )
 
         draft_neuron_values = dict(st.session_state.get(draft_key, {}) or {})
-        concept_draft_key = _demo_state_key(selected_user, "draft_concept_neuron_values")
+        concept_draft_key = _demo_state_key(
+            selected_user, "draft_concept_neuron_values"
+        )
         draft_concept_neuron_values = dict(
             st.session_state.get(concept_draft_key, {}) or {}
         )
         has_pending_neuron_draft = bool(draft_neuron_values)
         has_pending_concept_draft = bool(draft_concept_neuron_values)
-        has_pending_alpha = bool(active_config) and abs(global_alpha - active_alpha) > 1e-9
+        has_pending_alpha = (
+            bool(active_config) and abs(global_alpha - active_alpha) > 1e-9
+        )
 
         if has_pending_neuron_draft:
             st.caption(
@@ -1211,7 +1210,9 @@ def show():
             st.session_state[concept_draft_key] = {}
             st.session_state[_demo_state_key(selected_user, "draft_source")] = None
             st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
-            st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
+            st.session_state[
+                _demo_state_key(selected_user, "sync_sliders_from_config")
+            ] = True
             st.rerun()
 
         # ===================================================================

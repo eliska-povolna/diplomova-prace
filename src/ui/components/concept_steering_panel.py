@@ -96,7 +96,9 @@ def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
     if selected_method == "matrix-based":
         concepts = labels_service.get_concept_mapping().get("concepts", [])
         return {
-            str(concept["concept_id"]): str(concept.get("display_name") or concept["concept_id"])
+            str(concept["concept_id"]): str(
+                concept.get("display_name") or concept["concept_id"]
+            )
             for concept in concepts
         }
 
@@ -104,17 +106,25 @@ def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
         superfeatures = labels_service.get_superfeatures()
         search_index = {}
         if superfeatures:
-            search_index.update({
-                f"superfeature:{sf_id}": str(sf_data.get("super_label", f"Superfeature {sf_id}"))
-                for sf_id, sf_data in superfeatures.items()
-            })
-        hidden_dim = getattr(getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0)
+            search_index.update(
+                {
+                    f"superfeature:{sf_id}": str(
+                        sf_data.get("super_label", f"Superfeature {sf_id}")
+                    )
+                    for sf_id, sf_data in superfeatures.items()
+                }
+            )
+        hidden_dim = getattr(
+            getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0
+        )
         search_index.update(
             {str(idx): labels_service.get_label(idx) for idx in range(hidden_dim)}
         )
         return search_index
 
-    hidden_dim = getattr(getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0)
+    hidden_dim = getattr(
+        getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0
+    )
     return {str(idx): labels_service.get_label(idx) for idx in range(hidden_dim)}
 
 

@@ -723,7 +723,7 @@ def _build_experiment_results(
 
     Skips runs that don't have all required artifacts for strict mode.
     """
-    
+
     def _ndcg_at_20(summary: Optional[dict]) -> float:
         ranking_metrics = (
             summary.get("ranking_metrics_sae", {}) if isinstance(summary, dict) else {}
@@ -765,14 +765,11 @@ def _build_experiment_results(
                         "Incomplete GCS run (missing artifacts): %s",
                         run_id,
                     )
-                    
+
             else:
                 run_dir = Path(run_id)
                 if not _has_all_required_artifacts(run_dir):
-                    logger.debug(
-                        "Incomplete run (missing artifacts): %s", run_dir
-                    )
-                    
+                    logger.debug("Incomplete run (missing artifacts): %s", run_dir)
 
         runs.append(run)
 

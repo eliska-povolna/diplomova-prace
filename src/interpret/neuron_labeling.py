@@ -19,14 +19,13 @@ logger = logging.getLogger(__name__)
 STOP_CATEGORIES = {"Restaurants", "Food"}
 
 
-def _rank_categories(
-    category_counts: dict, max_tags_per_neuron: int = 3
-) -> list[str]:
+def _rank_categories(category_counts: dict, max_tags_per_neuron: int = 3) -> list[str]:
     """Return top categories, preferring specific labels over generic stop categories."""
     ranked = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
     specific = [(cat, score) for cat, score in ranked if cat not in STOP_CATEGORIES]
     chosen = specific if specific else ranked
     return [tag for tag, _count in chosen[:max_tags_per_neuron]]
+
 
 # Try to import secrets helper for Streamlit integration
 try:
@@ -463,11 +462,15 @@ class ReviewBasedLLMLabeler(LLMBasedLabeler):
         self.max_reviews_per_business = max_reviews_per_business
         self.max_review_chars = max_review_chars
 
-    def _format_reviews(self, max_items: list[tuple[str, float]], business_metadata: dict) -> str:
+    def _format_reviews(
+        self, max_items: list[tuple[str, float]], business_metadata: dict
+    ) -> str:
         lines = []
         for business_id, _activation in max_items[:5]:
             business_key = str(business_id)
-            reviews = self.review_lookup.get(business_key, [])[: self.max_reviews_per_business]
+            reviews = self.review_lookup.get(business_key, [])[
+                : self.max_reviews_per_business
+            ]
             if not reviews:
                 continue
 

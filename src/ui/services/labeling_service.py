@@ -103,7 +103,9 @@ class LabelingService:
         self.labels_by_method.update(loaded)
         self._load_extra_artifacts(labels_dir)
 
-    def _load_from_file(self, labels_file: Path, method_name: str = "weighted-category") -> None:
+    def _load_from_file(
+        self, labels_file: Path, method_name: str = "weighted-category"
+    ) -> None:
         try:
             if labels_file.suffix.lower() == ".pkl":
                 with open(labels_file, "rb") as f:
@@ -115,14 +117,14 @@ class LabelingService:
             if isinstance(data, dict) and "methods" in data:
                 self.method_descriptions.update(
                     {
-                    str(k): str(v)
-                    for k, v in (data.get("method_descriptions") or {}).items()
+                        str(k): str(v)
+                        for k, v in (data.get("method_descriptions") or {}).items()
                     }
                 )
                 self.method_aliases.update(
                     {
-                    str(k): str(v)
-                    for k, v in (data.get("method_aliases") or {}).items()
+                        str(k): str(v)
+                        for k, v in (data.get("method_aliases") or {}).items()
                     }
                 )
                 self.comparison_rows = list(data.get("comparison") or [])
@@ -132,9 +134,9 @@ class LabelingService:
                 self.concept_mapping = dict(data.get("concept_mapping") or {})
                 for raw_method, labels in (data.get("methods") or {}).items():
                     normalized_method = self._normalize_method_name(str(raw_method))
-                    self.labels_by_method[normalized_method] = self._normalize_label_dict(
-                        labels
-                    )
+                    self.labels_by_method[
+                        normalized_method
+                    ] = self._normalize_label_dict(labels)
                 selected = data.get("selected_method")
                 if selected:
                     self.selected_method = self._normalize_method_name(str(selected))
