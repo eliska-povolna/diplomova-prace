@@ -358,8 +358,7 @@ def load_run_artifact_bundle(selected_output_dir: Optional[str]) -> Dict[str, An
                 ],
             )
 
-        temp_root = Path(tempfile.mkdtemp(prefix=f"diplomov_run_{run_id}_"))
-        gcs_base = f"models/{run_id}"
+        gcs_bases = [f"models/{run_id}", f"experiments/{run_id}"]
         required_files = [
             "summary.json",
             "mappings/item2index.pkl",
@@ -369,43 +368,53 @@ def load_run_artifact_bundle(selected_output_dir: Optional[str]) -> Dict[str, An
             "neuron_category_metadata.json",
             "checkpoints/elsa_best.pt",
         ]
-        missing = []
-        for relative_path in required_files:
-            ok = _download_gcs_file(
+        missing_by_prefix: List[str] = []
+        hydrated_run_dir: Optional[Path] = None
+        for gcs_base in gcs_bases:
+            temp_root = Path(tempfile.mkdtemp(prefix=f"diplomov_run_{run_id}_"))
+            missing = []
+            for relative_path in required_files:
+                ok = _download_gcs_file(
+                    cloud_storage,
+                    f"{gcs_base}/{relative_path}",
+                    temp_root / relative_path,
+                )
+                if not ok:
+                    missing.append(
+                        f"gs://{cloud_storage.bucket_name}/{gcs_base}/{relative_path}"
+                    )
+
+            checkpoints_prefix = f"{gcs_base}/checkpoints/"
+            checkpoints_ok = _download_gcs_prefix(
                 cloud_storage,
-                f"{gcs_base}/{relative_path}",
-                temp_root / relative_path,
+                checkpoints_prefix,
+                temp_root / "checkpoints",
             )
-            if not ok:
+            labels_ok = _download_gcs_prefix(
+                cloud_storage,
+                f"{gcs_base}/neuron_interpretations/",
+                temp_root / "neuron_interpretations",
+            )
+            if not checkpoints_ok:
+                missing.append(f"gs://{cloud_storage.bucket_name}/{checkpoints_prefix}")
+            if not labels_ok:
                 missing.append(
-                    f"gs://{cloud_storage.bucket_name}/{gcs_base}/{relative_path}"
+                    f"gs://{cloud_storage.bucket_name}/{gcs_base}/neuron_interpretations/"
                 )
 
-        checkpoints_prefix = f"{gcs_base}/checkpoints/"
-        checkpoints_ok = _download_gcs_prefix(
-            cloud_storage,
-            checkpoints_prefix,
-            temp_root / "checkpoints",
-        )
-        labels_ok = _download_gcs_prefix(
-            cloud_storage,
-            f"{gcs_base}/neuron_interpretations/",
-            temp_root / "neuron_interpretations",
-        )
-        if not checkpoints_ok:
-            missing.append(f"gs://{cloud_storage.bucket_name}/{checkpoints_prefix}")
-        if not labels_ok:
-            missing.append(
-                f"gs://{cloud_storage.bucket_name}/{gcs_base}/neuron_interpretations/"
-            )
+            if not missing:
+                hydrated_run_dir = temp_root
+                break
 
-        if missing:
+            missing_by_prefix.append(f"prefix={gcs_base} missing_count={len(missing)}")
+
+        if not hydrated_run_dir:
             raise _strict_runtime_error(
                 "Missing required run artifacts in cloud storage.",
-                missing,
+                missing_by_prefix,
             )
 
-        run_dir = temp_root
+        run_dir = hydrated_run_dir
 
     issues: List[str] = []
     required_local_paths = [
@@ -548,57 +557,64 @@ def validate_cloud_run_artifacts(selected_output_dir: Optional[str]) -> Dict[str
     if not cloud_storage:
         return {"status": "skipped", "run_id": run_id, "reason": "GCS not configured"}
 
-    gcs_base = f"models/{run_id}"
-    required_paths = [
-        f"{gcs_base}/summary.json",
-        f"{gcs_base}/mappings/item2index.pkl",
-        f"{gcs_base}/precomputed/user_csr_matrices.pkl",
-        f"{gcs_base}/data/test_users_top50.json",
-        f"{gcs_base}/checkpoints/elsa_best.pt",
-        f"{gcs_base}/neuron_coactivation.json",
-        f"{gcs_base}/neuron_category_metadata.json",
+    required_relative_paths = [
+        "summary.json",
+        "mappings/item2index.pkl",
+        "precomputed/user_csr_matrices.pkl",
+        "data/test_users_top50.json",
+        "checkpoints/elsa_best.pt",
+        "neuron_coactivation.json",
+        "neuron_category_metadata.json",
     ]
-    missing: List[str] = []
-    present: List[str] = []
-    for path in required_paths:
-        try:
-            if cloud_storage.exists(path):
-                present.append(path)
-            else:
+    for gcs_base in [f"models/{run_id}", f"experiments/{run_id}"]:
+        missing: List[str] = []
+        present: List[str] = []
+        for relative_path in required_relative_paths:
+            path = f"{gcs_base}/{relative_path}"
+            try:
+                if cloud_storage.exists(path):
+                    present.append(path)
+                else:
+                    missing.append(path)
+            except Exception:
                 missing.append(path)
+
+        try:
+            label_files = [
+                p
+                for p in cloud_storage.list_files(
+                    prefix=f"{gcs_base}/neuron_interpretations/"
+                )
+                if p.endswith(".pkl") and Path(p).name.startswith("labels_")
+            ]
         except Exception:
-            missing.append(path)
+            label_files = []
+        if not label_files:
+            missing.append(f"{gcs_base}/neuron_interpretations/labels_*.pkl")
 
-    try:
-        label_files = [
-            p
-            for p in cloud_storage.list_files(
-                prefix=f"{gcs_base}/neuron_interpretations/"
+        if not missing:
+            logger.info(
+                "Cloud strict-run artifact check (%s): complete (prefix=%s)",
+                run_id,
+                gcs_base,
             )
-            if p.endswith(".pkl") and Path(p).name.startswith("labels_")
-        ]
-    except Exception:
-        label_files = []
-    if not label_files:
-        missing.append(f"{gcs_base}/neuron_interpretations/labels_*.pkl")
+            return {
+                "status": "ok",
+                "run_id": run_id,
+                "bucket": cloud_storage.bucket_name,
+                "missing": [],
+                "present_count": len(present),
+                "resolved_prefix": gcs_base,
+            }
 
-    status = "ok" if not missing else "missing"
-    report = {
-        "status": status,
+    logger.warning("Cloud strict-run artifact check (%s): incomplete", run_id)
+    return {
+        "status": "missing",
         "run_id": run_id,
         "bucket": cloud_storage.bucket_name,
-        "missing": missing,
-        "present_count": len(present),
+        "missing": ["Required artifacts not complete in models/ or experiments/"],
+        "present_count": 0,
     }
-    if missing:
-        logger.warning(
-            "Cloud strict-run artifact check (%s) missing paths: %s",
-            run_id,
-            missing,
-        )
-    else:
-        logger.info("Cloud strict-run artifact check (%s): complete", run_id)
-    return report
 
 
 def _has_all_required_artifacts(run_dir: Path) -> bool:
@@ -634,11 +650,74 @@ def _has_all_required_artifacts(run_dir: Path) -> bool:
     return True
 
 
+def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
+    """Check strict-mode artifacts for a run in GCS under supported prefixes."""
+    if not run_id:
+        return False
+
+    required_relative_paths = [
+        "summary.json",
+        "mappings/item2index.pkl",
+        "precomputed/user_csr_matrices.pkl",
+        "data/test_users_top50.json",
+        "checkpoints/elsa_best.pt",
+        "neuron_coactivation.json",
+        "neuron_category_metadata.json",
+    ]
+
+    for gcs_base in [f"models/{run_id}", f"experiments/{run_id}"]:
+        try:
+            if not all(
+                cloud_storage.exists(f"{gcs_base}/{relative_path}")
+                for relative_path in required_relative_paths
+            ):
+                continue
+
+            label_files = [
+                p
+                for p in cloud_storage.list_files(
+                    prefix=f"{gcs_base}/neuron_interpretations/"
+                )
+                if p.endswith(".pkl") and Path(p).name.startswith("labels_")
+            ]
+            if not label_files:
+                continue
+
+            sae_candidates = [
+                p
+                for p in cloud_storage.list_files(prefix=f"{gcs_base}/checkpoints/")
+                if Path(p).name.startswith("sae_") and Path(p).suffix == ".pt"
+            ]
+            if not sae_candidates:
+                continue
+
+            return True
+        except Exception:
+            continue
+
+    return False
+
+
+def _read_gcs_run_summary(cloud_storage, run_id: str) -> Optional[Dict[str, Any]]:
+    """Read summary.json for a run from supported GCS prefixes."""
+    for gcs_base in [f"models/{run_id}", f"experiments/{run_id}"]:
+        summary_path = f"{gcs_base}/summary.json"
+        try:
+            if cloud_storage.exists(summary_path):
+                payload = cloud_storage.read_json(summary_path)
+                if isinstance(payload, dict):
+                    return payload
+        except Exception:
+            continue
+    return None
+
+
 def _build_experiment_results(
     manifest: dict,
     *,
     source: str,
     experiment_dir: Path,
+    cloud_storage=None,
 ) -> Optional[Dict]:
     """Normalize an experiment manifest into the structure expected by the UI.
 
@@ -679,10 +758,21 @@ def _build_experiment_results(
         # Skip runs that don't have all required artifacts
         run_dir_str = run.get("run_dir")
         if run_dir_str:
-            run_dir = Path(run_dir_str)
-            if not _has_all_required_artifacts(run_dir):
-                logger.debug("Skipping incomplete run (missing artifacts): %s", run_dir)
-                continue
+            if cloud_storage is not None:
+                run_id = _extract_run_timestamp(str(run_dir_str))
+                if not _has_all_required_gcs_artifacts(cloud_storage, str(run_id)):
+                    logger.debug(
+                        "Skipping incomplete GCS run (missing artifacts): %s",
+                        run_dir_str,
+                    )
+                    continue
+            else:
+                run_dir = Path(run_dir_str)
+                if not _has_all_required_artifacts(run_dir):
+                    logger.debug(
+                        "Skipping incomplete run (missing artifacts): %s", run_dir
+                    )
+                    continue
 
         runs.append(run)
 
@@ -812,6 +902,7 @@ def _load_gcs_experiment_results() -> Optional[Dict]:
                 manifest,
                 source="GCS Experiment",
                 experiment_dir=Path(f"experiments/{experiment_id}"),
+                cloud_storage=cloud_storage,
             )
             if not results:
                 issues.append(f"no_usable_runs experiment_id={experiment_id}")
@@ -828,6 +919,63 @@ def _load_gcs_experiment_results() -> Optional[Dict]:
 
             logger.info("âś… Loaded experiment manifest from GCS: %s", experiment_id)
             return results
+
+        # Fallback: allow direct run discovery when manifests are stale/incomplete.
+        run_ids = set()
+        try:
+            for blob in cloud_storage.bucket.list_blobs(prefix="experiments/"):
+                parts = blob.name.split("/")
+                if len(parts) >= 2 and len(parts[1]) == 15:
+                    run_ids.add(parts[1])
+            for blob in cloud_storage.bucket.list_blobs(prefix="models/"):
+                parts = blob.name.split("/")
+                if len(parts) >= 2 and len(parts[1]) == 15:
+                    run_ids.add(parts[1])
+        except Exception:
+            run_ids = set()
+
+        for run_id in sorted(run_ids, reverse=True):
+            if not _has_all_required_gcs_artifacts(cloud_storage, run_id):
+                continue
+
+            summary = _read_gcs_run_summary(cloud_storage, run_id)
+            if not summary:
+                continue
+
+            logger.warning(
+                "Using direct GCS run fallback (no usable manifest run): %s", run_id
+            )
+            return {
+                "summary": summary,
+                "ranking_metrics": summary.get("ranking_metrics"),
+                "source": "GCS Run (fallback)",
+                "default_run_dir": f"outputs/{run_id}",
+                "runs": [
+                    {
+                        "run_name": run_id,
+                        "run_dir": f"outputs/{run_id}",
+                        "summary": summary,
+                        "ndcg_at_20": float(
+                            (
+                                (summary.get("ranking_metrics") or {})
+                                .get("ndcg", {})
+                                .get("@20", float("-inf"))
+                            )
+                        ),
+                        "is_best_run": True,
+                    }
+                ],
+                "experiment": {
+                    "experiment_id": f"fallback_{run_id}",
+                    "created": summary.get("timestamp"),
+                    "source_config": None,
+                    "base_config": None,
+                    "experiment_dir": f"experiments/{run_id}",
+                    "manifest": None,
+                    "best_run_dir": f"outputs/{run_id}",
+                    "selection_metric": "ndcg@20",
+                },
+            }
 
         raise _strict_runtime_error(
             "No usable completed runs found in GCS experiment manifests.",
