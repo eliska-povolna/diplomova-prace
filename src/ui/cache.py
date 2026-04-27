@@ -365,7 +365,7 @@ def load_run_artifact_bundle(selected_output_dir: Optional[str]) -> Dict[str, An
                 ],
             )
 
-        gcs_bases = [f"outputs/{run_id}", f"experiments/{run_id}"]
+        gcs_bases = [f"outputs/{run_id}"]
         required_files = [
             "summary.json",
             "mappings/item2index.pkl",
