@@ -678,18 +678,17 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
         "checkpoints"
     ]
 
-    for gcs_base in [f"outputs/{run_id}"]:
-        try:
-            for relative_path in required_relative_paths:
-                full_path = f"{gcs_base}/{relative_path}"
-                exists = cloud_storage.exists(full_path)
-            if not all(exists):
-                logger.error(f"Some artifacts missing for run id {full_path}")
-                continue
-
-            return True
-        except Exception:
-            continue
+    gcs_base = f"outputs/{run_id}"
+    try:
+        for relative_path in required_relative_paths:
+            full_path = f"{gcs_base}/{relative_path}"
+            exists = cloud_storage.exists(full_path)
+        if not all(exists):
+            logger.error(f"Some artifacts missing for run id {full_path}")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"Error during file checks: {e}")
 
     return False
 
@@ -745,11 +744,11 @@ def _build_experiment_results(
                 if not _has_all_required_gcs_artifacts(cloud_storage, str(run_id)):
                     logger.debug(
                         "Skipping incomplete GCS run (missing artifacts): %s",
-                        run_dir_str,
+                        run_id,
                     )
                     continue
             else:
-                run_dir = Path(run_dir_str)
+                run_dir = Path(run_id)
                 if not _has_all_required_artifacts(run_dir):
                     logger.debug(
                         "Skipping incomplete run (missing artifacts): %s", run_dir
