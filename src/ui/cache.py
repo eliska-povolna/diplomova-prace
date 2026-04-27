@@ -52,7 +52,7 @@ def _get_cloud_storage_helper():
 def _find_latest_model_timestamp(cloud_storage) -> Optional[str]:
     """Find the newest timestamped model prefix in GCS."""
     try:
-        blobs = cloud_storage.bucket.list_blobs(prefix="models/")
+        blobs = cloud_storage.bucket.list_blobs(prefix="outputs/")
     except Exception as e:
         logger.debug(f"Failed to list GCS model artifacts: {e}")
         return None
@@ -73,7 +73,6 @@ def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
     """Extract a run timestamp from a selected run path/string."""
     if not selected_output_dir:
         return None
-    return selected_output_dir[:-15]
     try:
         path = Path(str(selected_output_dir).replace("\\", "/"))
         name = path.name
@@ -83,7 +82,7 @@ def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
             return path[:-15]
         else: logger.warning(f"Run timestamp was not parsed successfully: {name}.")
     except Exception:
-        return None
+        return str(selected_output_dir)[:-15]
     return None
 
 
@@ -362,7 +361,7 @@ def load_run_artifact_bundle(selected_output_dir: Optional[str]) -> Dict[str, An
                 ],
             )
 
-        gcs_bases = [f"models/{run_id}", f"experiments/{run_id}"]
+        gcs_bases = [f"outputs/{run_id}", f"experiments/{run_id}"]
         required_files = [
             "summary.json",
             "mappings/item2index.pkl",
@@ -573,7 +572,7 @@ def validate_cloud_run_artifacts(selected_output_dir: Optional[str]) -> Dict[str
         "neuron_coactivation.json",
         "neuron_category_metadata.json",
     ]
-    for gcs_base in [f"models/{run_id}", f"experiments/{run_id}"]:
+    for gcs_base in [f"outputs/{run_id}", f"experiments/{run_id}"]:
         missing: List[str] = []
         present: List[str] = []
         for relative_path in required_relative_paths:
@@ -619,7 +618,7 @@ def validate_cloud_run_artifacts(selected_output_dir: Optional[str]) -> Dict[str
         "status": "missing",
         "run_id": run_id,
         "bucket": cloud_storage.bucket_name,
-        "missing": ["Required artifacts not complete in models/ or experiments/"],
+        "missing": ["Required artifacts not complete in outputs/ or experiments/"],
         "present_count": 0,
     }
 
@@ -673,7 +672,7 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
         "neuron_category_metadata.json",
     ]
 
-    for gcs_base in [f"models/{run_id}", f"experiments/{run_id}"]:
+    for gcs_base in [f"outputs/{run_id}", f"experiments/{run_id}"]:
         try:
             for relative_path in required_relative_paths:
                 full_path = f"{gcs_base}/{relative_path}"
@@ -1149,7 +1148,7 @@ def load_inference_service(
         st.session_state._startup_diagnostics["models_loaded"] = True
         st.session_state._startup_diagnostics["run_id"] = bundle.get("run_id")
         st.session_state._startup_diagnostics["n_items"] = service.n_items
-    logger.info("âś… Models loaded successfully")
+    logger.info("Models loaded successfully")
     return service
 
 
