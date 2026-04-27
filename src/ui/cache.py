@@ -797,6 +797,7 @@ def _build_experiment_results(
             "selection_metric": "ndcg@20",
         },
         "runs": runs,
+        "experiment_runs": runs,
     }
 
 
