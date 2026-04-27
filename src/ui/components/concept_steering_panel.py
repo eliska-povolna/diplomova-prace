@@ -49,12 +49,11 @@ def _build_adjusted_weights(
         help="Scales all neurons from this concept before adding them to draft.",
     )
 
-    max_neurons = min(20, len(base_weights))
     visible_neurons = st.slider(
-        "Neurons to fine-tune",
+        "Max features to show",
         min_value=1,
-        max_value=max_neurons,
-        value=min(8, max_neurons),
+        max_value=16,
+        value=8,
         step=1,
         key=f"{key_prefix}::visible_neurons",
         help="Shows top neurons by absolute weight for manual control.",

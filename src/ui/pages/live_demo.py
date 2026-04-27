@@ -289,8 +289,7 @@ def _render_neuron_steering_draft(
 Steer your preferences using this formula in the latent space:
 `z_final = (1 - alpha) * z_user + alpha * z_steered`
 
-- You can set your preference for these concepts using the sliders below.
-- `alpha` controls how strongly steering influences the final ranking (if it is set to 0, no steering will be applied.)
+- You can set your preference for these concepts using the sliders below - if you move the slider to the right, you will see more, if you move it to the left, you will see less places activating this feature.
 - You can see the current and steered activation value under each slider.
 - For each label, concept presence ratio is computed, so you can see whether that feature is actually present in the recommendation set. (Unavailable for LLM features.)
 """
@@ -331,12 +330,9 @@ Steer your preferences using this formula in the latent space:
             active_or_current_value = float(
                 existing_neuron_values.get(neuron_idx, current_val)
             )
-            prior_value = float(
-                existing_draft_values.get(neuron_idx, active_or_current_value)
-            )
-            prior_value = max(-1.0, min(2.0, prior_value))
+
             if sync_sliders or slider_key not in st.session_state:
-                st.session_state[slider_key] = prior_value
+                st.session_state[slider_key] = 0
 
             with col:
                 formatted_label = format_feature_id(neuron_idx, label)
@@ -382,19 +378,25 @@ Steer your preferences using this formula in the latent space:
                         )
                     except Exception:
                         logger.error("Could not compute blended activation.")
-
                     st.caption(
-                        (
-                            f"📊 Activation value: {current_val:.2f} → activation: {blended_activation:.2f}"
-                        )
+                    (
+                        f"📊 Activation: {current_val:.2f} → steered to: {blended_activation:.2f}"
                     )
+                )
+                    
+                else:
+                    st.caption(
+                    (
+                        f"📊 Activation: {current_val:.2f}"
+                    )
+                )
+                
 
     st.session_state[draft_key] = merged_draft_values
     if merged_draft_values:
         st.caption(f"Pending neuron draft updates: {len(merged_draft_values)}")
 
     st.session_state[sliders_sync_key] = False
-    st.divider()
 
     steering_config = active_config
 
@@ -1107,14 +1109,13 @@ def show():
             st.session_state[draft_key] = {}
 
         global_alpha = st.slider(
-            "Global steering alpha",
+            "Steering alpha:  controls how strongly steering influences the final ranking (if it is set to 0, no steering will be applied.)",
             min_value=0.0,
             max_value=1.0,
             value=active_alpha,
             step=0.05,
             help="Shared steering strength used by both neuron and concept steering.",
         )
-        st.caption(f"The influence of steering: {global_alpha/100:.2f} %")
         # ===================================================================
         # Section 2: Steering Inputs (draft only)
         # ===================================================================
@@ -1132,9 +1133,6 @@ def show():
         has_pending_neuron_draft = bool(draft_neuron_values)
         has_pending_concept_draft = bool(draft_concept_neuron_values)
         has_pending_alpha = bool(active_config) and abs(global_alpha - active_alpha) > 1e-9
-        has_pending_changes = (
-            has_pending_neuron_draft or has_pending_concept_draft or has_pending_alpha
-        )
 
         if has_pending_neuron_draft:
             st.caption(
@@ -1144,11 +1142,14 @@ def show():
             st.caption(
                 f"Pending concept draft: {len(draft_concept_neuron_values)} neuron contribution(s)."
             )
+        if has_pending_alpha:
+            st.caption(
+                f"Pending alpha change: current {active_alpha:.2f} → new {global_alpha:.2f}."
+            )
 
         if st.button(
             "Apply Steering",
             key=f"apply_steering_{selected_user}",
-            disabled=not has_pending_changes,
             width="stretch",
         ):
             active_neuron_values = dict(active_config.get("neuron_values") or {})
