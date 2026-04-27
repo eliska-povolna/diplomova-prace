@@ -73,7 +73,7 @@ def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
     """Extract a run timestamp from a selected run path/string."""
     if not selected_output_dir:
         return None
-
+    return selected_output_dir[:-15]
     try:
         path = Path(str(selected_output_dir).replace("\\", "/"))
         name = path.name
