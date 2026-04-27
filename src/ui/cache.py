@@ -661,12 +661,12 @@ def _has_all_required_artifacts(run_dir: Path) -> bool:
 
 
 def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
-    """Check strict-mode artifacts for a run in GCS under supported prefixes."""
     if not run_id:
         return False
-    logger.error(f"CHECKING RUN_ID: {run_id}")
 
-    required_relative_paths = [
+    gcs_base = f"outputs/{run_id}"
+
+    file_paths = [
         "summary.json",
         "mappings/item2index.pkl",
         "precomputed/user_csr_matrices.pkl",
@@ -674,23 +674,42 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
         "checkpoints/elsa_best.pt",
         "neuron_coactivation.json",
         "neuron_category_metadata.json",
-        "neuron_interpretations",
-        "checkpoints"
     ]
 
-    gcs_base = f"outputs/{run_id}"
     try:
-        for relative_path in required_relative_paths:
-            full_path = f"{gcs_base}/{relative_path}"
-            exists = cloud_storage.exists(full_path)
-        if not all(exists):
-            logger.error(f"Some artifacts missing for run id {full_path}")
-            return False
-        return True
-    except Exception as e:
-        logger.error(f"Error during file checks: {e}")
+        results = []
 
-    return False
+        # 🔹 check files
+        for rel in file_paths:
+            full_path = f"{gcs_base}/{rel}"
+            exists = cloud_storage.exists(full_path)
+            logger.error(f"FILE {full_path}: {exists}")
+            results.append(exists)
+
+        # 🔹 check checkpoints folder (must contain at least something)
+        checkpoints_prefix = f"{gcs_base}/checkpoints/"
+        has_checkpoints = False
+        for path in cloud_storage.list_files(prefix=checkpoints_prefix):
+            has_checkpoints = True
+            break
+        logger.error(f"DIR {checkpoints_prefix}: {has_checkpoints}")
+        results.append(has_checkpoints)
+
+        # 🔹 check neuron_interpretations folder (must contain labels_*.pkl)
+        labels_prefix = f"{gcs_base}/neuron_interpretations/"
+        has_labels = False
+        for path in cloud_storage.list_files(prefix=labels_prefix):
+            if path.endswith(".pkl") and "labels_" in path:
+                has_labels = True
+                break
+        logger.error(f"DIR {labels_prefix}: {has_labels}")
+        results.append(has_labels)
+
+        return all(results)
+
+    except Exception as e:
+        logger.error(f"GCS artifact check failed: {e}")
+        return False
 
 
 def _build_experiment_results(
