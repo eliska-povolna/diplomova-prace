@@ -583,15 +583,13 @@ class InferenceService:
 
             # === Step 7: Get top-k ===
             top_scores, top_indices = torch.topk(scores, k=min(top_k, scores.shape[0]))
-
+        h_final = self.sae.encode(z_final.unsqueeze(0)).squeeze(0)
         result = {
             "recommendations": [
                 {
                     "poi_idx": int(idx.item()),
                     "score": float(score.item()),
-                    "contributing_neurons": self._get_attribution(
-                        h_steered.squeeze(0), idx.item()
-                    ),
+                    "contributing_neurons": self.get_feature_contributions(h_final, idx.item())
                 }
                 for score, idx in zip(top_scores, top_indices)
             ],
@@ -654,47 +652,50 @@ class InferenceService:
 
         return scores
 
-    def _get_attribution(
-        self, h_sparse: torch.Tensor, item_idx: int, top_k: int = 3
-    ) -> List[Dict]:
+    def get_feature_contributions(
+    self,
+    h_final: torch.Tensor,
+    item_idx: int,
+    top_k: int = 3,
+) -> List[Dict]:
         """
-        Identify which sparse features (neurons) contributed to this recommendation.
+        Compute per-neuron contribution to item score.
 
-        Args:
-            h_sparse: Sparse feature code (or latent vector to encode)
-            item_idx: Index of recommended item
-            top_k: Number of top neurons to return
-
-        Returns:
-            List of dicts with neuron_idx, label, and activation value
+        contribution_j ≈ h_j * w_{i,j}
         """
-        # If h_sparse is latent (not sparse), encode it first
-        if h_sparse.shape[0] != self.sae.hidden_dim:
-            # It's a latent vector, encode it
-            with torch.no_grad():
-                h_sparse = self.sae.encode(h_sparse.unsqueeze(0)).squeeze(0)
 
-        # Get top-k neurons by absolute activation
+        with torch.no_grad():
+            # Item vector (latent space)
+            item_vec = self.elsa._A_norm[item_idx]  # (latent_dim,)
+
+            # SAE decoder weights (map h → z)
+            # shape: (hidden_dim, latent_dim)
+            W = self.sae.decoder.weight
+
+            # contribution per neuron:
+            # h_j * (W_j dot item_vec)
+            # => (hidden_dim,)
+            neuron_weights = torch.matmul(W, item_vec)  # (hidden_dim,)
+            contributions = h_final * neuron_weights
+
+        # Top neurons by absolute contribution
         topk_vals, topk_idx = torch.topk(
-            h_sparse.abs(), k=min(top_k, h_sparse.shape[0])
+            contributions.abs(), k=min(top_k, contributions.shape[0])
         )
 
         result = []
-        for idx, val in zip(topk_idx, topk_vals):
-            neuron_idx = int(idx.item())
-            activation_val = float(val.item())
-
-            # Get label from LabelingService if available
+        for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
+            label = f"Feature {idx}"
             if self.labels:
-                label = self.labels.get_label(neuron_idx)
-            else:
-                label = f"Feature {neuron_idx}"
+                label = self.labels.get_label(idx)
+
+            signed_val = contributions[idx].item()
 
             result.append(
                 {
-                    "idx": neuron_idx,
+                    "neuron_idx": idx,
                     "label": label,
-                    "activation": activation_val,
+                    "contribution": float(signed_val),
                 }
             )
 
@@ -894,9 +895,6 @@ class InferenceService:
                 arrow = "→"
                 arrow_color = "gray"
 
-            # Get contributing neurons/features for this item
-            contributing_neurons = self._get_attribution(h_final, item_id)
-
             recommendations.append(
                 {
                     "item_id": item_id,
@@ -908,7 +906,7 @@ class InferenceService:
                     "arrow_color": arrow_color,
                     "show_delta": show_delta,
                     "score": score,
-                    "contributing_neurons": contributing_neurons,
+                    "contributing_neurons": self.get_feature_contributions(h_final, item_id)
                 }
             )
 

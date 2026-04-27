@@ -264,7 +264,7 @@ Steer your preferences using this formula:
 `z_final = (1 - alpha) * z_user + alpha * z_steered`
 
 - You can set your preference for these concepts using the sliders below.
-- `alpha` controls how strongly steering influences the final ranking (if it is set to 1, the activation value will be equal to the user's setting.)
+- `alpha` controls how strongly steering influences the final ranking (if it is set to 0, no steering will be applied.)
 - You can see the current and steered activation value of activations under each slider.
 - For each label, concept presence ratio is computed, so you can see whether that feature is actually present in the recommendation set. (Unavailable for LLM features.)
 """
@@ -275,16 +275,6 @@ Steer your preferences using this formula:
     active_alpha = float(active_config.get("alpha", 0.3))
     active_source = str(active_config.get("source", "neuron"))
     active_provenance = dict(active_config.get("provenance") or {})
-
-    global_alpha = st.slider(
-        "Global steering alpha",
-        min_value=0.0,
-        max_value=1.0,
-        value=active_alpha,
-        step=0.05,
-        help="Shared steering strength used by both neuron and concept steering.",
-    )
-    st.caption(f"Current shared alpha: {global_alpha:.2f}")
 
     try:
         current_activations = inference.get_user_steering(selected_user)
@@ -353,24 +343,21 @@ Steer your preferences using this formula:
                     merged_neuron_values[neuron_idx] = float(target_activation)
                 else:
                     merged_neuron_values.pop(neuron_idx, None)
+                if len(merged_neuron_values) > 0:
+                    try:
+                        blended_activation = inference.get_steered_neuron_activation(
+                            selected_user,
+                            neuron_idx,
+                            float(target_activation),
+                        )
+                    except Exception as e:
+                        logger.error("Could not compute blended activation.")
 
-                try:
-                    blended_activation = inference.get_steered_neuron_activation(
-                        selected_user,
-                        neuron_idx,
-                        float(target_activation),
+                    st.caption(
+                        (   
+                            f"📊 Feature strength: {current_val:.2f} → activation: {blended_activation:.2f}"
+                        )
                     )
-                except Exception as e:
-                    logger.debug(f"Could not compute steered activation: {e}")
-                    blended_activation = ((1.0 - global_alpha) * current_val) + (
-                        global_alpha * float(target_activation)
-                    )
-
-                st.caption(
-                    (
-                        f"📊 Current: {current_val:.2f} → Steered to: {blended_activation:.2f}"
-                    )
-                )
 
                 if abs(float(target_activation) - prior_value) > 1e-9:
                     slider_patch_applied = True
@@ -1099,6 +1086,18 @@ def show():
         else:
             activations = []
 
+        active_config = get_steering_config(st.session_state, selected_user) or {}
+        active_alpha = float(active_config.get("alpha", 0.3))
+
+        global_alpha = st.slider(
+            "Global steering alpha",
+            min_value=0.0,
+            max_value=1.0,
+            value=active_alpha,
+            step=0.05,
+            help="Shared steering strength used by both neuron and concept steering.",
+        )
+        st.caption(f"Current shared alpha: {global_alpha:.2f}")
         # ===================================================================
         # Section 2: Steering Sliders & Recommendations (isolated fragment)
         # ===================================================================
@@ -1759,7 +1758,7 @@ def draw_poi_card(
             content_parts.append(
                 f"<div><b>Why This Recommendation:</b></div>"
                 f"<div style='font-size: 11px; color: #666; margin-bottom: 4px;'>"
-                f"Top latent features that contributed to this recommendation:</div>"
+                f"Top latent features that contributed to this recommendation and their scores:</div>"
             )
             for feat in features:
                 neuron_idx = feat.get("idx")
