@@ -8,6 +8,7 @@ import tempfile
 import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import re
 
 try:
     import streamlit as st
