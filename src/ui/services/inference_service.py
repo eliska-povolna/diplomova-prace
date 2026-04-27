@@ -670,7 +670,7 @@ class InferenceService:
 
             # SAE decoder weights (map h → z)
             # shape: (hidden_dim, latent_dim)
-            W = self.sae.decoder.weight
+            W = self.sae.dec.weight.T
 
             # contribution per neuron:
             # h_j * (W_j dot item_vec)
@@ -684,18 +684,14 @@ class InferenceService:
         )
 
         result = []
-        for idx, val in zip(topk_idx.tolist(), topk_vals.tolist()):
-            label = f"Feature {idx}"
-            if self.labels:
-                label = self.labels.get_label(idx)
-
-            signed_val = contributions[idx].item()
+        for idx in topk_idx.tolist():
+            label = self.labels.get_label(idx) if self.labels else f"Feature {idx}"
 
             result.append(
                 {
                     "neuron_idx": idx,
                     "label": label,
-                    "contribution": float(signed_val),
+                    "contribution": float(contributions[idx].item()),
                 }
             )
 

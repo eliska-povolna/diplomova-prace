@@ -275,7 +275,6 @@ Steer your preferences using this formula in the latent space:
 
     active_config = get_steering_config(st.session_state, selected_user) or {}
     existing_neuron_values = dict(active_config.get("neuron_values") or {})
-    active_alpha = float(active_config.get("alpha", 0.3))
     active_source = str(active_config.get("source", "neuron"))
     active_provenance = dict(active_config.get("provenance") or {})
 
@@ -358,7 +357,7 @@ Steer your preferences using this formula in the latent space:
 
                     st.caption(
                         (   
-                            f"📊 Feature strength: {current_val:.2f} → activation: {blended_activation:.2f}"
+                            f"📊 Activation value: {current_val:.2f} → activation: {blended_activation:.2f}"
                         )
                     )
 

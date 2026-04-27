@@ -4,12 +4,15 @@ import logging
 import sys
 import warnings
 from pathlib import Path
+import os
 
 warnings.filterwarnings(
     "ignore",
     message=".*Accessing `__path__` from.*zoedepth.*",
     category=DeprecationWarning,
 )
+os.environ["TRANSFORMERS_NO_ADVISORY_WARNINGS"] = "true"
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 import streamlit as st
 
