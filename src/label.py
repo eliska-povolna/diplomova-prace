@@ -307,7 +307,7 @@ def upload_label_artifacts_to_cloud(training_dir: Path) -> bool:
 
         cloud_storage = CloudStorageHelper(bucket_name=bucket_name)
         timestamp = training_dir.name
-        gcs_prefix = f"models/{timestamp}"
+        gcs_prefix = f"outputs/{timestamp}"
 
         def _upload_file(
             local_file: Path, gcs_path: str, content_type: Optional[str] = None

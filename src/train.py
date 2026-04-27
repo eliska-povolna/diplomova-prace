@@ -713,7 +713,7 @@ def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
         cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
         logger.info(f"Uploading results to GCS bucket: {gcs_bucket_name}")
 
-        gcs_prefix = f"models/{timestamp}"
+        gcs_prefix = f"outputs/{timestamp}"
 
         def _upload_file(
             local_file: Path, gcs_path: str, content_type: Optional[str] = None
@@ -985,7 +985,7 @@ def precompute_user_csr_matrices(
             from src.ui.services.cloud_storage_helper import CloudStorageHelper
 
             cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
-            gcs_paths = [f"models/{output_dir.name}/precomputed/user_csr_matrices.pkl"]
+            gcs_paths = [f"outputs/{output_dir.name}/precomputed/user_csr_matrices.pkl"]
             if allowed_user_ids is None:
                 gcs_paths.append("metadata/user_csr_matrices.pkl")
 

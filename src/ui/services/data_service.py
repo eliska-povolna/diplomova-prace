@@ -1299,7 +1299,7 @@ class DataService:
             getattr(self, "cloud_storage_helper", None)
             and len(self.active_run_dir.name) == 15
         ):
-            gcs_path = f"models/{self.active_run_dir.name}/data/test_users_top50.json"
+            gcs_path = f"outputs/{self.active_run_dir.name}/data/test_users_top50.json"
             try:
                 if self.cloud_storage_helper.exists(gcs_path):
                     users = self.cloud_storage_helper.read_json(gcs_path)
@@ -2711,7 +2711,7 @@ class DataService:
 
         run_id = self.active_run_dir.name
         run_local_path = self.active_run_dir / "precomputed" / "user_csr_matrices.pkl"
-        cloud_run_path = f"models/{run_id}/precomputed/user_csr_matrices.pkl"
+        cloud_run_path = f"outputs/{run_id}/precomputed/user_csr_matrices.pkl"
         payload = None
         source_path = ""
 

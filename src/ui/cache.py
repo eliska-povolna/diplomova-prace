@@ -70,19 +70,22 @@ def _find_latest_model_timestamp(cloud_storage) -> Optional[str]:
 
 
 def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
-    """Extract a run timestamp from a selected run path/string."""
+    """Extract timestamp like YYYYMMDD_HHMMSS from a path/string."""
     if not selected_output_dir:
         return None
-    try:
-        path = Path(str(selected_output_dir).replace("\\", "/"))
-        name = path.name
-        if len(name) == 15 and name.isdigit():
-            return name
-        elif path[:-15].isdigit():
-            return path[:-15]
-        else: logger.warning(f"Run timestamp was not parsed successfully: {name}.")
-    except Exception:
-        return str(selected_output_dir)[:-15]
+
+    raw = str(selected_output_dir).replace("\\", "/")
+
+    match = re.search(r"\d{8}_\d{6}", raw)
+    if match:
+        return match.group(0)
+
+    logger.warning(
+        "Run timestamp was not parsed successfully: raw=%s, normalized=%s, name=%s",
+        selected_output_dir,
+        raw,
+        Path(raw).name,
+    )
     return None
 
 
