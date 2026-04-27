@@ -576,7 +576,7 @@ def validate_cloud_run_artifacts(selected_output_dir: Optional[str]) -> Dict[str
         "neuron_coactivation.json",
         "neuron_category_metadata.json",
     ]
-    for gcs_base in [f"outputs/{run_id}", f"experiments/{run_id}"]:
+    for gcs_base in [f"outputs/{run_id}"]:
         missing: List[str] = []
         present: List[str] = []
         for relative_path in required_relative_paths:
@@ -622,7 +622,7 @@ def validate_cloud_run_artifacts(selected_output_dir: Optional[str]) -> Dict[str
         "status": "missing",
         "run_id": run_id,
         "bucket": cloud_storage.bucket_name,
-        "missing": ["Required artifacts not complete in outputs/ or experiments/"],
+        "missing": ["Required artifacts not complete in outputs/"],
         "present_count": 0,
     }
 
@@ -676,7 +676,7 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
         "neuron_category_metadata.json",
     ]
 
-    for gcs_base in [f"outputs/{run_id}", f"experiments/{run_id}"]:
+    for gcs_base in [f"outputs/{run_id}"]:
         try:
             for relative_path in required_relative_paths:
                 full_path = f"{gcs_base}/{relative_path}"
