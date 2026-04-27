@@ -75,10 +75,11 @@ def _extract_run_timestamp(selected_output_dir: Optional[str]) -> Optional[str]:
         return None
 
     try:
-        candidate = Path(str(selected_output_dir))
-        name = candidate.name or Path(str(selected_output_dir).replace("\\", "/")).name
-        if len(name) == 15:
+        path = Path(str(selected_output_dir).replace("\\", "/"))
+        name = path.name
+        if len(name) == 15 and name.isdigit():
             return name
+        else: logger.warning("Run timestamp was not parsed successfully.")
     except Exception:
         return None
     return None
