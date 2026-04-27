@@ -762,17 +762,17 @@ def _build_experiment_results(
             if cloud_storage is not None:
                 if not _has_all_required_gcs_artifacts(cloud_storage, str(run_id)):
                     logger.debug(
-                        "Skipping incomplete GCS run (missing artifacts): %s",
+                        "Incomplete GCS run (missing artifacts): %s",
                         run_id,
                     )
-                    continue
+                    
             else:
                 run_dir = Path(run_id)
                 if not _has_all_required_artifacts(run_dir):
                     logger.debug(
-                        "Skipping incomplete run (missing artifacts): %s", run_dir
+                        "Incomplete run (missing artifacts): %s", run_dir
                     )
-                    continue
+                    
 
         runs.append(run)
 
