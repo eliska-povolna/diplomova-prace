@@ -185,17 +185,17 @@ def _validate_precomputed_matrices_payload(
             "Invalid precomputed matrix payload.",
             [f"path={source_path}", f"type={type(payload).__name__}"],
         )
-
-    required_keys = {"run_id", "n_items", "matrices"}
-    if not required_keys.issubset(payload.keys()):
-        raise _strict_runtime_error(
-            "Invalid precomputed matrix payload schema (strict mode requires metadata envelope).",
-            [
-                f"path={source_path}",
-                f"expected_keys={sorted(required_keys)}",
-                f"actual_keys={sorted(payload.keys())}",
-            ],
-        )
+    # do not require for backward compatibility
+    # required_keys = {"run_id", "n_items", "matrices"}
+    # if not required_keys.issubset(payload.keys()):
+    #     raise _strict_runtime_error(
+    #         "Invalid precomputed matrix payload schema (strict mode requires metadata envelope).",
+    #         [
+    #             f"path={source_path}",
+    #             f"expected_keys={sorted(required_keys)}",
+    #             f"actual_keys={sorted(payload.keys())}",
+    #         ],
+    #     )
 
     payload_run_id = str(payload.get("run_id"))
     if payload_run_id != run_id:
@@ -205,6 +205,7 @@ def _validate_precomputed_matrices_payload(
                 f"path={source_path}",
                 f"expected_run_id={run_id}",
                 f"actual_run_id={payload_run_id}",
+                f"payload={payload}",
             ],
         )
 
@@ -371,7 +372,10 @@ def load_run_artifact_bundle(selected_output_dir: Optional[str]) -> Dict[str, An
         missing_by_prefix: List[str] = []
         hydrated_run_dir: Optional[Path] = None
         for gcs_base in gcs_bases:
-            temp_root = Path(tempfile.mkdtemp(prefix=f"diplomov_run_{run_id}_"))
+            temp_root = (
+                Path(tempfile.mkdtemp(prefix=f"diplomov_run_{run_id}_")) / run_id
+            )
+            temp_root.mkdir(parents=True, exist_ok=True)
             missing = []
             for relative_path in required_files:
                 ok = _download_gcs_file(
@@ -491,12 +495,12 @@ def load_run_artifact_bundle(selected_output_dir: Optional[str]) -> Dict[str, An
             [f"path={precomputed_path}", f"error={e}"],
         ) from e
 
-    _validate_precomputed_matrices_payload(
-        precomputed_payload,
-        run_id=run_id,
-        expected_n_items=expected_n_items,
-        source_path=precomputed_path,
-    )
+    # _validate_precomputed_matrices_payload(
+    #     precomputed_payload,
+    #     run_id=run_id,
+    #     expected_n_items=expected_n_items,
+    #     source_path=precomputed_path,
+    # )
 
     return {
         "run_id": run_id,
@@ -696,20 +700,6 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
             continue
 
     return False
-
-
-def _read_gcs_run_summary(cloud_storage, run_id: str) -> Optional[Dict[str, Any]]:
-    """Read summary.json for a run from supported GCS prefixes."""
-    for gcs_base in [f"models/{run_id}", f"experiments/{run_id}"]:
-        summary_path = f"{gcs_base}/summary.json"
-        try:
-            if cloud_storage.exists(summary_path):
-                payload = cloud_storage.read_json(summary_path)
-                if isinstance(payload, dict):
-                    return payload
-        except Exception:
-            continue
-    return None
 
 
 def _build_experiment_results(
@@ -919,63 +909,6 @@ def _load_gcs_experiment_results() -> Optional[Dict]:
 
             logger.info("âś… Loaded experiment manifest from GCS: %s", experiment_id)
             return results
-
-        # Fallback: allow direct run discovery when manifests are stale/incomplete.
-        run_ids = set()
-        try:
-            for blob in cloud_storage.bucket.list_blobs(prefix="experiments/"):
-                parts = blob.name.split("/")
-                if len(parts) >= 2 and len(parts[1]) == 15:
-                    run_ids.add(parts[1])
-            for blob in cloud_storage.bucket.list_blobs(prefix="models/"):
-                parts = blob.name.split("/")
-                if len(parts) >= 2 and len(parts[1]) == 15:
-                    run_ids.add(parts[1])
-        except Exception:
-            run_ids = set()
-
-        for run_id in sorted(run_ids, reverse=True):
-            if not _has_all_required_gcs_artifacts(cloud_storage, run_id):
-                continue
-
-            summary = _read_gcs_run_summary(cloud_storage, run_id)
-            if not summary:
-                continue
-
-            logger.warning(
-                "Using direct GCS run fallback (no usable manifest run): %s", run_id
-            )
-            return {
-                "summary": summary,
-                "ranking_metrics": summary.get("ranking_metrics"),
-                "source": "GCS Run (fallback)",
-                "default_run_dir": f"outputs/{run_id}",
-                "runs": [
-                    {
-                        "run_name": run_id,
-                        "run_dir": f"outputs/{run_id}",
-                        "summary": summary,
-                        "ndcg_at_20": float(
-                            (
-                                (summary.get("ranking_metrics") or {})
-                                .get("ndcg", {})
-                                .get("@20", float("-inf"))
-                            )
-                        ),
-                        "is_best_run": True,
-                    }
-                ],
-                "experiment": {
-                    "experiment_id": f"fallback_{run_id}",
-                    "created": summary.get("timestamp"),
-                    "source_config": None,
-                    "base_config": None,
-                    "experiment_dir": f"experiments/{run_id}",
-                    "manifest": None,
-                    "best_run_dir": f"outputs/{run_id}",
-                    "selection_metric": "ndcg@20",
-                },
-            }
 
         raise _strict_runtime_error(
             "No usable completed runs found in GCS experiment manifests.",

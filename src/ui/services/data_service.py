@@ -316,7 +316,9 @@ class DataService:
 
         # In strict mode, load and validate precomputed matrices during startup.
         self._user_matrices_cache = (
-            self._load_precomputed_user_matrices() if self.strict_run_artifacts else None
+            self._load_precomputed_user_matrices()
+            if self.strict_run_artifacts
+            else None
         )
 
     def _get_business_columns(self) -> set[str]:
@@ -354,7 +356,9 @@ class DataService:
             if self.backend_type == "duckdb" and self.conn is not None:
                 result = self.conn.execute("PRAGMA table_info('yelp_business')").df()
                 cols = {str(v) for v in result["name"].tolist()}
-                self._business_columns_cache = cols if cols else (default_cols | {"photos"})
+                self._business_columns_cache = (
+                    cols if cols else (default_cols | {"photos"})
+                )
                 return self._business_columns_cache
         except Exception as e:
             logger.debug("Could not inspect business columns; using defaults: %s", e)
@@ -825,7 +829,9 @@ class DataService:
             lat = float(row.get("latitude", 0))
             lon = float(row.get("longitude", 0))
             if lat == 0 and lon == 0:
-                logger.warning(f"  🚫 POI {poi_idx} ({name}): INVALID COORDINATES (0,0)")
+                logger.warning(
+                    f"  🚫 POI {poi_idx} ({name}): INVALID COORDINATES (0,0)"
+                )
                 return {}
 
             rating = float(row.get("stars", 0))
@@ -1017,19 +1023,20 @@ class DataService:
 
         try:
             from sqlalchemy import bindparam, text
+
             projection_cols = _self._get_batch_projection_columns()
             projection_sql = ", ".join(projection_cols)
 
             if _self.backend_type == "cloudsql":
-                query = (
-                    text(
-                        """
+                query = text(
+                    """
                         SELECT {projection_sql}
                         FROM businesses
                         WHERE business_id IN :business_ids
-                        """.format(projection_sql=projection_sql)
-                    ).bindparams(bindparam("business_ids", expanding=True))
-                )
+                        """.format(
+                        projection_sql=projection_sql
+                    )
+                ).bindparams(bindparam("business_ids", expanding=True))
                 with _self.engine.connect() as conn:
                     rows = pd.read_sql(
                         query,
@@ -1054,7 +1061,9 @@ class DataService:
                         for _, row in rows.iterrows()
                     }
         except Exception as e:
-            logger.warning("Batch POI lookup failed, falling back to single lookups: %s", e)
+            logger.warning(
+                "Batch POI lookup failed, falling back to single lookups: %s", e
+            )
             return {
                 idx: details
                 for idx in ordered_unique_indices
@@ -1156,7 +1165,9 @@ class DataService:
             return run_users
 
         if _self.strict_run_artifacts:
-            run_name = _self.active_run_dir.name if _self.active_run_dir else "<unknown>"
+            run_name = (
+                _self.active_run_dir.name if _self.active_run_dir else "<unknown>"
+            )
             raise RuntimeError(
                 "Strict best-run mode requires run-scoped `test_users_top50.json`. "
                 f"Missing artifact for run {run_name} at "
@@ -1284,7 +1295,10 @@ class DataService:
         if not self.active_run_dir:
             return []
 
-        if getattr(self, "cloud_storage_helper", None) and len(self.active_run_dir.name) == 15:
+        if (
+            getattr(self, "cloud_storage_helper", None)
+            and len(self.active_run_dir.name) == 15
+        ):
             gcs_path = f"models/{self.active_run_dir.name}/data/test_users_top50.json"
             try:
                 if self.cloud_storage_helper.exists(gcs_path):
@@ -1573,9 +1587,7 @@ class DataService:
               ON rb.state = bb.state AND rb.business_id = bb.business_id
             GROUP BY bb.state
         """
-        idx_query = (
-            f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{mv}_state ON {mv}(state)"
-        )
+        idx_query = f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{mv}_state ON {mv}(state)"
 
         try:
             with self.engine.begin() as conn:
@@ -1711,7 +1723,9 @@ class DataService:
         row = df.iloc[0].to_dict()
         stored_threshold = row.get("pos_threshold")
         try:
-            if stored_threshold is not None and float(stored_threshold) != float(pos_threshold):
+            if stored_threshold is not None and float(stored_threshold) != float(
+                pos_threshold
+            ):
                 return None
         except Exception:
             return None
@@ -1835,15 +1849,35 @@ class DataService:
                     )
                     df = pd.DataFrame()
                 else:
-                    n_businesses = int((b_df.iloc[0].get("n_businesses") or 0)) if not b_df.empty else 0
+                    n_businesses = (
+                        int((b_df.iloc[0].get("n_businesses") or 0))
+                        if not b_df.empty
+                        else 0
+                    )
                     # n_items approximates active item universe for fallback path.
                     n_items = n_businesses
-                    n_interactions = int((r_df.iloc[0].get("n_interactions") or 0)) if not r_df.empty else 0
-                    avg_business_rating = float((b_df.iloc[0].get("avg_business_rating") or 0.0)) if not b_df.empty else 0.0
-                    avg_review_rating = float((r_df.iloc[0].get("avg_review_rating") or 0.0)) if not r_df.empty else 0.0
+                    n_interactions = (
+                        int((r_df.iloc[0].get("n_interactions") or 0))
+                        if not r_df.empty
+                        else 0
+                    )
+                    avg_business_rating = (
+                        float((b_df.iloc[0].get("avg_business_rating") or 0.0))
+                        if not b_df.empty
+                        else 0.0
+                    )
+                    avg_review_rating = (
+                        float((r_df.iloc[0].get("avg_review_rating") or 0.0))
+                        if not r_df.empty
+                        else 0.0
+                    )
                     min_year = r_df.iloc[0].get("min_year") if not r_df.empty else None
                     max_year = r_df.iloc[0].get("max_year") if not r_df.empty else None
-                    pos_interactions = int((r_df.iloc[0].get("pos_interactions") or 0)) if not r_df.empty else 0
+                    pos_interactions = (
+                        int((r_df.iloc[0].get("pos_interactions") or 0))
+                        if not r_df.empty
+                        else 0
+                    )
 
                     n_users = 0
                     pos_users = 0
@@ -1899,7 +1933,9 @@ class DataService:
             pos_items = int(row.get("pos_items") or 0)
             pos_interactions = int(row.get("pos_interactions") or 0)
             max_possible = pos_users * pos_items
-            density_pct = (100.0 * pos_interactions / max_possible) if max_possible else 0.0
+            density_pct = (
+                (100.0 * pos_interactions / max_possible) if max_possible else 0.0
+            )
             row["density_pct"] = float(density_pct)
             return row
 
@@ -1950,7 +1986,9 @@ class DataService:
             try:
                 return self._query_df_stats(query, params)
             except Exception as exc:
-                logger.warning("Review volume query failed; returning empty frame: %s", exc)
+                logger.warning(
+                    "Review volume query failed; returning empty frame: %s", exc
+                )
                 return pd.DataFrame(columns=["year", "review_count"])
 
         return self._cached_stats_value(cache_key, _compute)
@@ -1984,7 +2022,9 @@ class DataService:
             try:
                 df = self._query_df_stats(query, params)
             except Exception as exc:
-                logger.warning("Rating distribution query failed; returning empty frame: %s", exc)
+                logger.warning(
+                    "Rating distribution query failed; returning empty frame: %s", exc
+                )
                 return pd.DataFrame(columns=["stars", "review_count"])
             if not df.empty:
                 df = df.rename(columns={"rating_bucket": "stars"})
@@ -2097,7 +2137,9 @@ class DataService:
                     GROUP BY category
                     ORDER BY n_businesses DESC
                     LIMIT :limit
-                """.format(where_sql=where_sql)
+                """.format(
+                    where_sql=where_sql
+                )
             else:
                 query = f"""
                     SELECT
@@ -2134,7 +2176,9 @@ class DataService:
                     GROUP BY category
                     ORDER BY n_businesses DESC
                     LIMIT :limit
-                """.format(where_sql=where_sql)
+                """.format(
+                    where_sql=where_sql
+                )
             try:
                 return self._query_df_stats(query, params)
             except Exception as exc:
@@ -2351,7 +2395,9 @@ class DataService:
             try:
                 return self._query_df_stats(query, params)
             except Exception as exc:
-                logger.warning("Sample businesses query failed; returning empty frame: %s", exc)
+                logger.warning(
+                    "Sample businesses query failed; returning empty frame: %s", exc
+                )
                 return pd.DataFrame(
                     columns=[
                         "business_id",
@@ -2438,7 +2484,9 @@ class DataService:
             try:
                 return self._query_df_stats(query, params)
             except Exception as exc:
-                logger.warning("Sample reviews query failed; returning empty frame: %s", exc)
+                logger.warning(
+                    "Sample reviews query failed; returning empty frame: %s", exc
+                )
                 return pd.DataFrame(
                     columns=[
                         "review_id",
@@ -2571,17 +2619,34 @@ class DataService:
         payload_n_items = payload.get("n_items")
 
         if matrices is None:
-            raise RuntimeError(
-                "Invalid precomputed matrices payload schema at "
-                f"{source_path}: expected keys `run_id`, `n_items`, `matrices`."
-            )
+            # Legacy format: the pickle itself is the user_id -> csr_matrix mapping.
+            # Older runs were written before the strict metadata envelope existed.
+            legacy_matrices = payload
+            if not legacy_matrices:
+                raise RuntimeError(
+                    f"Precomputed matrices are empty or invalid at {source_path}."
+                )
+            first_matrix = next(iter(legacy_matrices.values()))
+            shape = getattr(first_matrix, "shape", None)
+            if not shape or len(shape) != 2:
+                raise RuntimeError(
+                    "Legacy precomputed matrices payload is missing matrix shapes at "
+                    f"{source_path}."
+                )
+            matrices = legacy_matrices
+            payload_n_items = int(shape[1])
+            payload_run_id = expected_run_id
 
         if not isinstance(matrices, dict) or not matrices:
             raise RuntimeError(
                 f"Precomputed matrices are empty or invalid at {source_path}."
             )
 
-        if expected_run_id and payload_run_id and str(payload_run_id) != str(expected_run_id):
+        if (
+            expected_run_id
+            and payload_run_id
+            and str(payload_run_id) != str(expected_run_id)
+        ):
             raise RuntimeError(
                 "Precomputed matrix run mismatch: "
                 f"expected run_id={expected_run_id}, got run_id={payload_run_id} from {source_path}."
