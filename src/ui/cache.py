@@ -674,6 +674,8 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
         "checkpoints/elsa_best.pt",
         "neuron_coactivation.json",
         "neuron_category_metadata.json",
+        "neuron_interpretations",
+        "checkpoints"
     ]
 
     for gcs_base in [f"outputs/{run_id}"]:
@@ -681,29 +683,8 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
             for relative_path in required_relative_paths:
                 full_path = f"{gcs_base}/{relative_path}"
                 exists = cloud_storage.exists(full_path)
-                if not exists:
-                    logger.error(f"❌ MISSING: {full_path}")
-                else:
-                    logger.info(f"✅ FOUND: {full_path}")
             if not all(exists):
-                continue
-
-            label_files = [
-                p
-                for p in cloud_storage.list_files(
-                    prefix=f"{gcs_base}/neuron_interpretations/"
-                )
-                if p.endswith(".pkl") and Path(p).name.startswith("labels_")
-            ]
-            if not label_files:
-                continue
-
-            sae_candidates = [
-                p
-                for p in cloud_storage.list_files(prefix=f"{gcs_base}/checkpoints/")
-                if Path(p).name.startswith("sae_") and Path(p).suffix == ".pt"
-            ]
-            if not sae_candidates:
+                logger.error(f"Some artifacts missing for run id {full_path}")
                 continue
 
             return True
@@ -727,7 +708,7 @@ def _build_experiment_results(
     
     def _ndcg_at_20(summary: Optional[dict]) -> float:
         ranking_metrics = (
-            summary.get("ranking_metrics", {}) if isinstance(summary, dict) else {}
+            summary.get("ranking_metrics_sae", {}) if isinstance(summary, dict) else {}
         )
         try:
             return float(ranking_metrics.get("ndcg", {}).get("@20", float("-inf")))
@@ -759,10 +740,8 @@ def _build_experiment_results(
         run["ndcg_at_20"] = _ndcg_at_20(summary)
 
         # Skip runs that don't have all required artifacts
-        run_dir_str = run.get("run_dir")
-        if run_dir_str:
+        if run_id:
             if cloud_storage is not None:
-                run_id = _extract_run_timestamp(str(run_dir_str))
                 if not _has_all_required_gcs_artifacts(cloud_storage, str(run_id)):
                     logger.debug(
                         "Skipping incomplete GCS run (missing artifacts): %s",
@@ -798,7 +777,7 @@ def _build_experiment_results(
     selected_summary = best_run.get("summary") or {}
     return {
         "summary": selected_summary,
-        "ranking_metrics": selected_summary.get("ranking_metrics"),
+        "ranking_metrics": selected_summary.get("ranking_metrics_sae"),
         "source": source,
         "default_run_dir": best_run.get("run_dir"),
         "experiment": {
