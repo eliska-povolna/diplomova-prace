@@ -658,6 +658,7 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
     """Check strict-mode artifacts for a run in GCS under supported prefixes."""
     if not run_id:
         return False
+    logger.error(f"CHECKING RUN_ID: {run_id}")
 
     required_relative_paths = [
         "summary.json",
@@ -717,7 +718,7 @@ def _build_experiment_results(
 
     Skips runs that don't have all required artifacts for strict mode.
     """
-
+    
     def _ndcg_at_20(summary: Optional[dict]) -> float:
         ranking_metrics = (
             summary.get("ranking_metrics", {}) if isinstance(summary, dict) else {}
@@ -732,7 +733,9 @@ def _build_experiment_results(
     for raw_run in manifest.get("runs", []):
         run = dict(raw_run)
         summary = run.get("summary")
-
+        logger.error(f"RUN RAW: {run.get('run_dir')}")
+        run_id = _extract_run_timestamp(run.get("run_dir"))
+        logger.error(f"RUN ID: {run_id}")
         if not summary:
             summary_path_str = run.get("summary_path")
             if summary_path_str:
@@ -771,10 +774,12 @@ def _build_experiment_results(
         runs.append(run)
 
     if not runs:
+        logger.warning("No runs found in the manifest.")
         return None
 
     runs = [run for run in runs if math.isfinite(run.get("ndcg_at_20", float("-inf")))]
     if not runs:
+        logger.warning("Could not create the run list.")
         return None
 
     runs = sorted(
