@@ -671,10 +671,14 @@ def _has_all_required_gcs_artifacts(cloud_storage, run_id: str) -> bool:
 
     for gcs_base in [f"models/{run_id}", f"experiments/{run_id}"]:
         try:
-            if not all(
-                cloud_storage.exists(f"{gcs_base}/{relative_path}")
-                for relative_path in required_relative_paths
-            ):
+            for relative_path in required_relative_paths:
+                full_path = f"{gcs_base}/{relative_path}"
+                exists = cloud_storage.exists(full_path)
+                if not exists:
+                    logger.error(f"❌ MISSING: {full_path}")
+                else:
+                    logger.info(f"✅ FOUND: {full_path}")
+            if not all(exists):
                 continue
 
             label_files = [
