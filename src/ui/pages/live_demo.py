@@ -108,13 +108,13 @@ def _set_demo_recommendation_state(
     poi_details_map: Optional[Dict] = None,
 ) -> None:
     if base_recommendations is not None:
-        st.session_state[
-            _demo_state_key(selected_user, "base_recommendations")
-        ] = base_recommendations
+        st.session_state[_demo_state_key(selected_user, "base_recommendations")] = (
+            base_recommendations
+        )
     if steered_recommendations is not None:
-        st.session_state[
-            _demo_state_key(selected_user, "steered_recommendations")
-        ] = steered_recommendations
+        st.session_state[_demo_state_key(selected_user, "steered_recommendations")] = (
+            steered_recommendations
+        )
 
     active_config = active_steering_config
     if active_config is None:
@@ -122,9 +122,9 @@ def _set_demo_recommendation_state(
             _demo_state_key(selected_user, "active_steering_config")
         )
 
-    st.session_state[
-        _demo_state_key(selected_user, "active_steering_config")
-    ] = active_config
+    st.session_state[_demo_state_key(selected_user, "active_steering_config")] = (
+        active_config
+    )
 
     displayed = (
         steered_recommendations
@@ -379,13 +379,18 @@ Steer your preferences using this formula in the latent space:
                     except Exception:
                         logger.error("Could not compute blended activation.")
                     st.caption(
-                        (
-                            f"📊 Activation: {current_val:.2f} → steered to: {blended_activation:.2f}"
-                        )
+                    (
+                        f"📊 Activation: {current_val:.2f} → steered to: {blended_activation:.2f}"
                     )
-
+                )
+                    
                 else:
-                    st.caption((f"📊 Activation: {current_val:.2f}"))
+                    st.caption(
+                    (
+                        f"📊 Activation: {current_val:.2f}"
+                    )
+                )
+                
 
     st.session_state[draft_key] = merged_draft_values
     if merged_draft_values:
@@ -419,9 +424,9 @@ Steer your preferences using this formula in the latent space:
         except Exception as e:
             logger.debug(f"Could not compute steered activations chart: {e}")
     else:
-        st.session_state[
-            _demo_state_key(selected_user, "feature_chart_original")
-        ] = None
+        st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = (
+            None
+        )
         st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
 
 
@@ -1121,13 +1126,18 @@ def show():
         )
 
         draft_neuron_values = dict(st.session_state.get(draft_key, {}) or {})
-        concept_draft_key = _demo_state_key(
-            selected_user, "draft_concept_neuron_values"
-        )
+        concept_draft_key = _demo_state_key(selected_user, "draft_concept_neuron_values")
         draft_concept_neuron_values = dict(
             st.session_state.get(concept_draft_key, {}) or {}
         )
-        has_pending_neuron_draft = bool(draft_neuron_values)
+        # Only show pending draft if values differ from active config (not just non-empty)
+        active_neuron_values = dict(active_config.get("neuron_values") or {})
+        different_neurons = {
+            idx: val
+            for idx, val in draft_neuron_values.items()
+            if abs(float(val) - float(active_neuron_values.get(idx, 0.0))) > 1e-9
+        }
+        has_pending_neuron_draft = bool(different_neurons)
         has_pending_concept_draft = bool(draft_concept_neuron_values)
         has_pending_alpha = (
             bool(active_config) and abs(global_alpha - active_alpha) > 1e-9
@@ -1135,7 +1145,7 @@ def show():
 
         if has_pending_neuron_draft:
             st.caption(
-                f"Pending steering draft: {len(draft_neuron_values)} neuron update(s)."
+                f"Pending steering draft: {len(different_neurons)} neuron update(s)."
             )
         if has_pending_concept_draft:
             st.caption(
@@ -1210,9 +1220,7 @@ def show():
             st.session_state[concept_draft_key] = {}
             st.session_state[_demo_state_key(selected_user, "draft_source")] = None
             st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
-            st.session_state[
-                _demo_state_key(selected_user, "sync_sliders_from_config")
-            ] = True
+            st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
             st.rerun()
 
         # ===================================================================
@@ -1869,22 +1877,22 @@ def draw_poi_card(
         if category:
             content_parts.append(f"<div>📂 {category}</div>")
 
-        # Why (contributing neurons) - show top 3 each on own line with activation
+        # Why (contributing neurons) - show top 3 each on own line with contribution score
         if recommendation.get("contributing_neurons"):
             features = recommendation["contributing_neurons"][:3]  # Top 3
             content_parts.append(
                 f"<div><b>Why This Recommendation:</b></div>"
                 f"<div style='font-size: 11px; color: #666; margin-bottom: 4px;'>"
-                f"Top latent features that contributed to this recommendation and their scores:</div>"
+                f"Top latent features that contributed to this recommendation:</div>"
             )
             for feat in features:
-                neuron_idx = feat.get("idx")
+                neuron_idx = feat.get("neuron_idx")
                 feature_label = feat.get("label") or f"Feature {neuron_idx}"
-                activation = feat.get("activation", 0)
-                # Format each on own line: "  #42: Italian (0.85)"
-                formatted = f"  #{neuron_idx}: {feature_label}"
-                if activation:
-                    formatted += f" ({activation:.2f})"
+                contribution = feat.get("contribution", 0)
+                # Format each on own line: "  #42 Italian: 0.85"
+                formatted = f"  #{neuron_idx} {feature_label}"
+                if contribution:
+                    formatted += f": {contribution:.2f}"
                 content_parts.append(
                     f"<div style='font-size: 12px; margin: 2px 0;'>{formatted}</div>"
                 )

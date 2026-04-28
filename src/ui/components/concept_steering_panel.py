@@ -31,65 +31,59 @@ def _format_similarity_explanation(similarity: float) -> str:
     return "Opposite semantic direction"
 
 
-def _build_adjusted_weights(
+def _build_per_neuron_adjustments(
     base_weights: Dict[int, float],
+    similarity_score: float,
     key_prefix: str,
 ) -> Dict[int, float]:
-    """Build neuron steering weights from per-neuron UI controls."""
+    """Build neuron steering weights from per-neuron sliders defaulting to similarity.
+    
+    Each neuron from the selected concept gets its own slider in a 3-column grid.
+    The default value is automatically set to the concept's similarity score to the query.
+    """
     if not base_weights:
         return {}
 
-    global_scale = st.slider(
-        "Overall concept strength",
-        min_value=0.0,
-        max_value=2.0,
-        value=1.0,
-        step=0.05,
-        key=f"{key_prefix}::global_scale",
-        help="Scales all neurons from this concept before adding them to draft.",
+    st.markdown("**Adjust strength for each neuron**")
+    st.caption(
+        f"💡 Automatically set to similarity score ({similarity_score:.3f})"
     )
 
-    visible_neurons = st.slider(
-        "Max features to show",
-        min_value=1,
-        max_value=16,
-        value=8,
-        step=1,
-        key=f"{key_prefix}::visible_neurons",
-        help="Shows top neurons by absolute weight for manual control.",
-    )
-
+    # Sort neurons by absolute weight (descending) - show strongest first
     sorted_items = sorted(
         ((int(idx), float(weight)) for idx, weight in base_weights.items()),
         key=lambda item: abs(item[1]),
         reverse=True,
     )
-    selected_items = sorted_items[:visible_neurons]
 
-    adjusted = dict(base_weights)
-    with st.expander("Fine-tune individual neuron influence", expanded=False):
-        st.caption(
-            "Set multiplier per neuron. 1.0 keeps original concept weight, "
-            "0.0 removes neuron from this concept patch."
-        )
-        for neuron_idx, base_weight in selected_items:
-            multiplier = st.slider(
-                f"Neuron {neuron_idx} (base {base_weight:+.3f})",
-                min_value=0.0,
-                max_value=2.0,
-                value=1.0,
-                step=0.05,
-                key=f"{key_prefix}::neuron_scale::{neuron_idx}",
-            )
-            adjusted[neuron_idx] = float(base_weight) * float(multiplier)
+    adjusted = {}
+    cols_per_row = 3
 
-    output = {}
-    for neuron_idx, weight in adjusted.items():
-        scaled = float(weight) * float(global_scale)
-        if abs(scaled) >= 1e-9:
-            output[int(neuron_idx)] = scaled
+    # Create grid layout of sliders
+    for row_idx in range(0, len(sorted_items), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for col_idx, col in enumerate(cols):
+            neuron_pos = row_idx + col_idx
+            if neuron_pos >= len(sorted_items):
+                continue
 
-    return output
+            neuron_idx, base_weight = sorted_items[neuron_pos]
+            slider_label = f"#{neuron_idx}"
+
+            with col:
+                slider_value = st.slider(
+                    slider_label,
+                    min_value=-1.0,
+                    max_value=2.0,
+                    value=float(similarity_score),
+                    step=0.1,
+                    key=f"{key_prefix}::neuron::{neuron_idx}",
+                    help=f"Strength for neuron {neuron_idx}. Default: similarity score.",
+                )
+                if abs(slider_value) >= 1e-9:
+                    adjusted[int(neuron_idx)] = float(slider_value)
+
+    return adjusted
 
 
 def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
@@ -284,8 +278,9 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         st.info("Select one result to add concept weights into steering draft.")
         return None
 
-    adjusted_weights = _build_adjusted_weights(
+    adjusted_weights = _build_per_neuron_adjustments(
         chosen_weights,
+        similarity_score=float(chosen_similarity),
         key_prefix=f"concept_adjust::{selected_method}::{chosen_entity}",
     )
 
@@ -293,7 +288,7 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         "Auto-scale by similarity",
         value=True,
         key=f"concept_auto_scale_similarity::{selected_method}",
-        help="If enabled, concept neuron weights are multiplied by the selected match similarity.",
+        help="If enabled, each neuron strength is multiplied by the selected match similarity.",
     )
     if auto_scale_similarity:
         adjusted_weights = {
@@ -302,11 +297,11 @@ and apply steering through the same hidden-space mechanism used for direct neuro
             if abs(float(weight) * float(chosen_similarity)) >= 1e-9
         }
         st.caption(
-            f"Similarity scaling applied: x {chosen_similarity:.3f} to all selected concept weights."
+            f"Similarity scaling applied: each neuron × {chosen_similarity:.3f}."
         )
 
     st.caption(
-        f"Prepared draft patch: {len(adjusted_weights)} neurons after scaling controls."
+        f"Prepared draft patch: {len(adjusted_weights)} neurons selected."
     )
 
     if st.button(
