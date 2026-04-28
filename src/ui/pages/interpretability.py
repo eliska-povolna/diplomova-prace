@@ -557,11 +557,18 @@ def show():
         st.subheader("🔥 Top Activating Categories")
         
         with st.expander("ℹ️ How is this calculated?", expanded=False):
-            st.write(
-                "**Σ** = sum of activation strengths for this neuron across all places with this category\n\n"
-                "**n** = number of recommended places with this category where the neuron activated\n\n"
-                "Categories are ranked by total contribution (Σ), consistent with weighted-category labeling."
-            )
+            if superfeature_context is not None:
+                st.write(
+                    "**Σ** = sum of activation strengths across all member neurons for places with this category\n\n"
+                    "**n** = how many member neurons' top lists included this category (frequency across members)\n\n"
+                    "Categories are ranked by total contribution (Σ) aggregated across the superfeature (consistent with weighted-category labeling)."
+                )
+            else:
+                st.write(
+                    "**Σ** = sum of activation strengths for this neuron across all places with this category\n\n"
+                    "**n** = number of recommended places with this category where the neuron activated\n\n"
+                    "Categories are ranked by total contribution (Σ), consistent with weighted-category labeling."
+                )
 
         if wordcloud_service:
             try:
@@ -618,11 +625,16 @@ def show():
         st.subheader("☁️ Wordcloud")
         
         with st.expander("ℹ️ How is this calculated?", expanded=False):
-            st.write(
-                "Word cloud shows the relative frequency and importance of categories based on their total activation."
-                "\n\n"
-                "Category size reflects how much that category contributes to the neuron's overall activation across all top-activating items."
-            )
+            if superfeature_context is not None:
+                st.write(
+                    "Word cloud shows the relative frequency and importance of categories based on aggregated total activation across all member neurons.\n\n"
+                    "Category size reflects how much that category contributes to the superfeature's overall activation (combines frequency and strength across members)."
+                )
+            else:
+                st.write(
+                    "Word cloud shows the relative frequency and importance of categories based on their total activation.\n\n"
+                    "Category size reflects how much that category contributes to the neuron's overall activation across all top-activating items."
+                )
 
         if wordcloud_service:
             try:
@@ -664,10 +676,17 @@ def show():
         st.subheader("🏢 Top Activating Businesses")
         
         with st.expander("ℹ️ How is this calculated?", expanded=False):
-            st.write(
-                "Shows the top-10 individual places that most strongly activate this neuron.\n\n"
-                "**σ** = activation strength for this place (how much this neuron activated when recommending it)"
-            )
+            if superfeature_context is not None:
+                st.write(
+                    "Shows the top places aggregated across member neurons of the superfeature.\n\n"
+                    "**Σ** = sum of activations for this business across all member neurons' top lists.\n"
+                    "**n** = number of member neurons that listed this business among their top items."
+                )
+            else:
+                st.write(
+                    "Shows the top-10 individual places that most strongly activate this neuron.\n\n"
+                    "**σ** = activation strength for this place (how much this neuron activated when recommending it)"
+                )
         try:
             if superfeature_context is not None:
                 top_items = _aggregate_superfeature_top_items(
