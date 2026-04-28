@@ -221,8 +221,7 @@ def _render_active_features_section(
     info_section(
         "🧠 Your Active Features",
         "Shows the top active features for this user based on their interaction history. "
-        "Higher activation means this feature is more relevant to their preferences.",
-        "When steering is used, the original values are shown in grey.",
+        "Higher activation means this feature is more relevant to their preferences. When steering is used, the original values are shown in grey.",
     )
 
     try:
