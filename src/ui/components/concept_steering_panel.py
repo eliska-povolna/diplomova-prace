@@ -31,86 +31,32 @@ def _format_similarity_explanation(similarity: float) -> str:
     return "Opposite semantic direction"
 
 
-def _build_per_neuron_adjustments(
+def _render_inline_concept_strength(
     base_weights: Dict[int, float],
     similarity_score: float,
     key_prefix: str,
+    is_selected: bool,
 ) -> Dict[int, float]:
-    """Build neuron steering weights from per-neuron sliders defaulting to similarity.
-
-    Each neuron from the selected concept gets its own slider in a 3-column grid.
-    The default value is automatically set to the concept's similarity score to the query.
-    Users can exclude a neuron with a checkbox instead of dragging the slider to zero.
+    """Render slider inline for strength adjustment when concept is selected.
+    
+    Returns dict of selected neuron weights set to slider value.
     """
-    if not base_weights:
+    if not is_selected or not base_weights:
         return {}
 
-    concept_strength = st.slider(
-        "Concept steering strength",
+    slider_value = st.slider(
+        "Strength",
         min_value=0.0,
         max_value=2.0,
-        value=1.0,
+        value=float(similarity_score),
         step=0.05,
-        key=f"{key_prefix}::concept_strength",
-        help="Scales the final selected concept weights before they are merged into the draft.",
+        key=f"{key_prefix}::strength",
+        help="Adjust steering strength for this concept",
     )
+    st.caption(f"💡 Automatically set to similarity score ({similarity_score:.3f})")
 
-    st.markdown("**Adjust strength for each neuron**")
-    st.caption(
-        f"💡 Automatically set to similarity score ({similarity_score:.3f})"
-    )
-    st.caption(
-        "Use the checkbox to exclude a neuron without searching for zero on the slider."
-    )
-
-    # Sort neurons by absolute weight (descending) - show strongest first
-    sorted_items = sorted(
-        ((int(idx), float(weight)) for idx, weight in base_weights.items()),
-        key=lambda item: abs(item[1]),
-        reverse=True,
-    )
-
-    adjusted = {}
-    cols_per_row = 3
-
-    # Create grid layout of sliders
-    for row_idx in range(0, len(sorted_items), cols_per_row):
-        cols = st.columns(cols_per_row)
-        for col_idx, col in enumerate(cols):
-            neuron_pos = row_idx + col_idx
-            if neuron_pos >= len(sorted_items):
-                continue
-
-            neuron_idx, base_weight = sorted_items[neuron_pos]
-
-            with col:
-                control_col, slider_col = st.columns([1, 4])
-                with control_col:
-                    include_key = f"{key_prefix}::include::{neuron_idx}"
-                    include_neuron = st.checkbox(
-                        "Include",
-                        value=True,
-                        key=include_key,
-                        help="Uncheck to exclude this neuron from the draft without changing its slider value.",
-                    )
-                with slider_col:
-                    slider_value = st.slider(
-                        f"#{neuron_idx}",
-                        min_value=-1.0,
-                        max_value=2.0,
-                        value=float(similarity_score),
-                        step=0.1,
-                        key=f"{key_prefix}::neuron::{neuron_idx}",
-                        disabled=not include_neuron,
-                        help=f"Strength for neuron {neuron_idx}. Default: similarity score.",
-                    )
-                st.caption(f"Base weight: {base_weight:+.3f}")
-                if include_neuron and abs(slider_value) >= 1e-9:
-                    adjusted[int(neuron_idx)] = float(slider_value) * float(
-                        concept_strength
-                    )
-
-    return adjusted
+    # All selected neurons get the slider value
+    return {int(idx): float(slider_value) for idx in base_weights.keys()}
 
 
 def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
@@ -189,7 +135,11 @@ def render_concept_steering_panel(
     session_state,
     selected_user: str | None = None,
 ) -> Optional[Dict[int, float]]:
-    """Render concept steering selector and return draft neuron updates."""
+    """Render concept steering with checkbox selection and inline strength sliders.
+    
+    Each search result shows a checkbox. When checked, a strength slider appears inline.
+    All selected concepts are combined and returned as draft neuron values.
+    """
     labels_service = session_state.get("labels")
     selected_user = selected_user or session_state.get("current_user_id")
 
@@ -265,9 +215,9 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         st.warning("No matching concepts found.")
         return None
 
-    result_options = []
-    existing_config = get_steering_config(session_state, selected_user) or {}
-    active_alpha = float(existing_config.get("alpha", 0.3))
+    st.markdown("### Select concepts to draft")
+
+    all_selected_weights = {}
 
     for rank, (entity_id, label, similarity) in enumerate(results, 1):
         resolved_label, neuron_weights, entity_type = _resolve_result(
@@ -275,28 +225,49 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         )
         if not neuron_weights:
             continue
-        result_options.append(
-            {
-                "entity_id": str(entity_id),
-                "resolved_label": resolved_label,
-                "neuron_weights": neuron_weights,
-                "entity_type": entity_type,
-                "similarity": float(similarity),
-                "rank": rank,
-            }
-        )
 
-        columns = st.columns([1, 4, 2, 1])
-        with columns[0]:
-            st.write(f"{rank}.")
-        with columns[1]:
-            st.write(f"**{resolved_label}**")
-            st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
-        with columns[2]:
-            st.write(f"Similarity: {similarity:.3f}")
-            st.caption(_format_similarity_explanation(float(similarity)))
+        # Result row: checkbox + label + type + similarity
+        col_checkbox, col_label, col_type, col_similarity = st.columns([0.8, 3, 1.2, 1])
 
-    st.caption(f"Using global steering alpha: {active_alpha:.2f}")
+        with col_checkbox:
+            is_selected = st.checkbox(
+                label="",
+                value=False,
+                key=f"concept_select_{rank}",
+            )
+
+        with col_label:
+            st.write(f"**#{rank} {resolved_label}**")
+
+        with col_type:
+            st.caption(f"{entity_type.title()}")
+
+        with col_similarity:
+            st.write(f"**{similarity:.3f}**")
+
+        # Show inline strength slider and explanation when selected
+        if is_selected:
+            strength_col, explain_col = st.columns([2, 3])
+            with strength_col:
+                strength_value = st.slider(
+                    "Strength",
+                    min_value=0.0,
+                    max_value=2.0,
+                    value=float(similarity),
+                    step=0.05,
+                    key=f"concept_strength_{rank}",
+                )
+            with explain_col:
+                st.caption(f"💡 Automatically set to similarity score ({similarity:.3f})")
+
+            # Add all neurons from this concept with the selected strength
+            for neuron_idx in neuron_weights.keys():
+                all_selected_weights[int(neuron_idx)] = float(strength_value)
+
+        st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
+        st.divider()
+
+    return all_selected_weights if all_selected_weights else None
 
     if not result_options:
         st.info("Select one result to add concept weights into steering draft.")
