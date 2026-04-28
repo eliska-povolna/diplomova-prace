@@ -1287,12 +1287,11 @@ def show():
         # ===================================================================
         # Section 3: Shared Recommendations Compute Block
         # ===================================================================
-        if st.session_state.get(_demo_state_key(selected_user, "force_recompute")):
-            _recompute_recommendations_shared(
-                selected_user=selected_user,
-                inference=inference,
-                data=data,
-            )
+        _recompute_recommendations_shared(
+            selected_user=selected_user,
+            inference=inference,
+            data=data,
+        )
 
         displayed_recommendations = st.session_state.get(
             _demo_state_key(selected_user, "displayed_recommendations"),
