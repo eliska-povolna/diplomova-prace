@@ -1,10 +1,12 @@
 """Inference service for steering and recommendation generation."""
 
+import json
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
+from scipy import sparse
 import torch
 
 from src.models.collaborative_filtering import ELSA
@@ -31,6 +33,7 @@ class InferenceService:
         config: Optional[Dict] = None,
         labels: Optional[object] = None,
         data_service: Optional[object] = None,
+        training_dir: Optional[Path] = None,
     ):
         """
         Initialize inference service and load models.
@@ -46,6 +49,7 @@ class InferenceService:
                 - device: 'cpu' or 'cuda' (default 'cpu')
             labels: LabelingService instance for neuron labels (optional)
             data_service: DataService instance for accessing user interaction data (optional)
+            training_dir: Run directory with holdout artifacts for live NDCG.
 
             Note: n_items is read from the ELSA checkpoint metadata, NOT from config.
                   The checkpoint metadata is the definitive source of truth.
@@ -55,6 +59,7 @@ class InferenceService:
         self.alpha = self.config.get("steering_alpha", 0.3)
         self.labels = labels
         self.data_service = data_service
+        self.training_dir = Path(training_dir) if training_dir else None
 
         # Model hyperparameters
         # n_items is NOT read from config - it will be loaded from checkpoint metadata
@@ -87,7 +92,82 @@ class InferenceService:
         # Latency tracking for performance monitoring
         self.latency_ms = []  # List of inference times in milliseconds
 
+        # Optional holdout ground truth for live ranking metrics in the UI.
+        self.holdout_target = None
+        self.holdout_user_ids: List[str] = []
+        self.holdout_user_to_index: Dict[str, int] = {}
+        if self.training_dir:
+            self._load_holdout_artifacts(self.training_dir)
+
         logger.info("✅ Inference service ready")
+
+    def _load_holdout_artifacts(self, training_dir: Path) -> None:
+        """Load per-user held-out target interactions for live ranking metrics."""
+        data_dir = Path(training_dir) / "data"
+        target_path = data_dir / "test_holdout_target.npz"
+        user_ids_path = data_dir / "test_user_ids.json"
+
+        if not target_path.exists() or not user_ids_path.exists():
+            logger.info(
+                "Holdout artifacts not found under %s; live NDCG will be unavailable",
+                data_dir,
+            )
+            return
+
+        try:
+            self.holdout_target = sparse.load_npz(target_path).tocsr()
+            with user_ids_path.open("r", encoding="utf-8") as f:
+                raw_user_ids = json.load(f)
+
+            normalized_user_ids: List[str] = []
+            if isinstance(raw_user_ids, list):
+                for entry in raw_user_ids:
+                    if isinstance(entry, str):
+                        normalized_user_ids.append(entry)
+                    elif isinstance(entry, dict):
+                        user_id = entry.get("user_id") or entry.get("id")
+                        if user_id is not None:
+                            normalized_user_ids.append(str(user_id))
+
+            self.holdout_user_ids = normalized_user_ids
+            self.holdout_user_to_index = {
+                user_id: idx for idx, user_id in enumerate(self.holdout_user_ids)
+            }
+
+            if self.holdout_target.shape[0] != len(self.holdout_user_ids):
+                logger.warning(
+                    "Holdout target rows (%s) do not match test user ids (%s)",
+                    self.holdout_target.shape[0],
+                    len(self.holdout_user_ids),
+                )
+
+            logger.info(
+                "Loaded holdout target for live NDCG: %s users, %s items",
+                len(self.holdout_user_ids),
+                self.holdout_target.shape[1],
+            )
+        except Exception as e:
+            logger.warning("Failed to load holdout artifacts for live NDCG: %s", e)
+            self.holdout_target = None
+            self.holdout_user_ids = []
+            self.holdout_user_to_index = {}
+
+    def get_user_ground_truth(self, user_id: str) -> np.ndarray:
+        """Return the held-out relevance vector for a user, or zeros if unavailable."""
+        if self.holdout_target is None or self.n_items is None:
+            return np.zeros(int(self.n_items or 0), dtype=np.int8)
+
+        row_idx = self.holdout_user_to_index.get(str(user_id))
+        if row_idx is None or row_idx < 0 or row_idx >= self.holdout_target.shape[0]:
+            return np.zeros(self.holdout_target.shape[1], dtype=np.int8)
+
+        row = self.holdout_target.getrow(row_idx)
+        if row.nnz == 0:
+            return np.zeros(self.holdout_target.shape[1], dtype=np.int8)
+
+        y_true = np.zeros(self.holdout_target.shape[1], dtype=np.int8)
+        y_true[row.indices] = 1
+        return y_true
 
     def _load_elsa(self, ckpt_path: Path) -> ELSA:
         """Load ELSA model from checkpoint, using metadata from the checkpoint.
