@@ -240,12 +240,10 @@ and apply steering through the same hidden-space mechanism used for direct neuro
             st.write(f"**#{rank} {resolved_label}**")
 
         with col_type:
-            st.caption(f"{entity_type.title()}")
+            st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
 
         with col_similarity:
             st.write(f"**{similarity:.3f}**")
-
-        st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
 
         # Show inline strength slider and explanation when selected
         if is_selected:

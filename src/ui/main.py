@@ -85,67 +85,78 @@ try:
     )
 
     init_session_state()
-    config = load_config(config_path)
+    
+    # Only load artifacts once during startup, not on every rerun
+    if "inference" not in st.session_state:
+        config = load_config(config_path)
 
-    with st.spinner("Loading experiment results..."):
-        training_results = load_training_results(config, None)
-    startup_notice = (training_results or {}).get("startup_notice")
-    if startup_notice:
-        st.warning(startup_notice)
-        st.session_state["startup_notice"] = startup_notice
+        with st.spinner("Loading experiment results..."):
+            training_results = load_training_results(config, None)
+        startup_notice = (training_results or {}).get("startup_notice")
+        if startup_notice:
+            st.warning(startup_notice)
+            st.session_state["startup_notice"] = startup_notice
 
-    default_run_dir = (
-        training_results.get("default_run_dir") if training_results else None
-    )
-    if not default_run_dir:
-        raise RuntimeError("No best run found in the latest experiment manifest.")
-
-    selected_output_dir = default_run_dir
-    st.session_state.selected_result_run_dir = selected_output_dir
-
-    with st.spinner("Validating strict best-run artifacts..."):
-        run_bundle = load_run_artifact_bundle(selected_output_dir)
-    cloud_artifact_report = validate_cloud_run_artifacts(selected_output_dir)
-
-    with st.spinner("Loading models..."):
-        inference = load_inference_service(config, selected_output_dir)
-
-    with st.spinner("Loading POI data..."):
-        data = load_data_service(
-            config,
-            selected_output_dir=selected_output_dir,
-            expected_n_items=inference.n_items,
+        default_run_dir = (
+            training_results.get("default_run_dir") if training_results else None
         )
+        if not default_run_dir:
+            raise RuntimeError("No best run found in the latest experiment manifest.")
 
-    with st.spinner("Loading labeling artifacts..."):
-        labels = load_labeling_service(
-            config,
-            _data_service=data,
-            selected_output_dir=selected_output_dir,
-        )
+        selected_output_dir = default_run_dir
+        st.session_state.selected_result_run_dir = selected_output_dir
 
-    inference.labels = labels
-    inference.data_service = data
+        with st.spinner("Validating strict best-run artifacts..."):
+            run_bundle = load_run_artifact_bundle(selected_output_dir)
+        cloud_artifact_report = validate_cloud_run_artifacts(selected_output_dir)
 
-    with st.spinner("Loading wordcloud artifacts..."):
-        wordcloud = load_wordcloud_service(config, selected_output_dir)
+        with st.spinner("Loading models..."):
+            inference = load_inference_service(config, selected_output_dir)
 
-    with st.spinner("Loading co-activation artifacts..."):
-        coactivation = load_coactivation_service(config, selected_output_dir)
+        with st.spinner("Loading POI data..."):
+            data = load_data_service(
+                config,
+                selected_output_dir=selected_output_dir,
+                expected_n_items=inference.n_items,
+            )
 
-    with st.spinner("Loading semantic search model..."):
-        semantic_search_model = load_semantic_search_model()
+        with st.spinner("Loading labeling artifacts..."):
+            labels = load_labeling_service(
+                config,
+                _data_service=data,
+                selected_output_dir=selected_output_dir,
+            )
 
-    st.session_state.inference = inference
-    st.session_state.data = data
-    st.session_state.labels = labels
-    st.session_state.wordcloud = wordcloud
-    st.session_state.coactivation = coactivation
-    st.session_state.training_results = training_results
-    st.session_state.strict_run_bundle = run_bundle
-    st.session_state.cloud_artifact_report = cloud_artifact_report
-    st.session_state.config = config
-    st.session_state.semantic_search_model = semantic_search_model
+        inference.labels = labels
+        inference.data_service = data
+
+        with st.spinner("Loading wordcloud artifacts..."):
+            wordcloud = load_wordcloud_service(config, selected_output_dir)
+
+        with st.spinner("Loading co-activation artifacts..."):
+            coactivation = load_coactivation_service(config, selected_output_dir)
+
+        with st.spinner("Loading semantic search model..."):
+            semantic_search_model = load_semantic_search_model()
+
+        st.session_state.inference = inference
+        st.session_state.data = data
+        st.session_state.labels = labels
+        st.session_state.wordcloud = wordcloud
+        st.session_state.coactivation = coactivation
+        st.session_state.training_results = training_results
+        st.session_state.strict_run_bundle = run_bundle
+        st.session_state.cloud_artifact_report = cloud_artifact_report
+        st.session_state.config = config
+        st.session_state.semantic_search_model = semantic_search_model
+    else:
+        # Already loaded, just get from session state
+        config = st.session_state.config
+        training_results = st.session_state.training_results
+        startup_notice = st.session_state.get("startup_notice")
+        if startup_notice:
+            st.warning(startup_notice)
+        labels = st.session_state.labels
 
     _render_global_label_method_selector(labels)
     logger.info("All services initialized in strict best-run mode")

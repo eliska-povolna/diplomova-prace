@@ -171,6 +171,11 @@ def _clear_demo_steering_state(selected_user: str) -> None:
     st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
     st.session_state.current_recommendations = base
     st.session_state.steering_modified = False
+    
+    # Reset concept steering panel checkbox states
+    keys_to_delete = [k for k in st.session_state.keys() if k.startswith(f"concept_select_") or k.startswith("concept_strength_")]
+    for k in keys_to_delete:
+        del st.session_state[k]
 
 
 @st.fragment
@@ -244,6 +249,7 @@ def render_steering_tabs(
     selected_user: str,
     inference,
     activations: List[Dict],
+    steering_config: Optional[Dict] = None,
 ) -> None:
     """Render neuron/concept steering tabs that only update draft state."""
     tab_neuron, tab_concept = st.tabs(["Neuron Steering", "Concept Steering"])
@@ -253,6 +259,7 @@ def render_steering_tabs(
             selected_user=selected_user,
             inference=inference,
             activations=activations,
+            steering_config=steering_config,
         )
 
     with tab_concept:
@@ -272,6 +279,7 @@ def _render_neuron_steering_draft(
     selected_user: str,
     inference,
     activations: List[Dict],
+    steering_config: Optional[Dict] = None,
 ) -> None:
     """Render neuron sliders that only write pending draft steering values."""
     info_section(
@@ -1129,6 +1137,7 @@ def show():
             selected_user=selected_user,
             inference=inference,
             activations=activations,
+            steering_config=active_config,
         )
 
         draft_neuron_values = dict(st.session_state.get(draft_key, {}) or {})
@@ -1159,10 +1168,12 @@ def show():
                 f"{len(pending_merged)} unique feature update(s) "
                 f"(neuron: {len(different_neurons)}, concept: {len(draft_concept_neuron_values)})."
             )
-            st.markdown(
-                "<span title=\"Unique means the number of final feature IDs after merging neuron and concept drafts. The numbers in parentheses show source counts before merge. If both tabs update the same feature, source counts can be higher than unique.\">ℹ️ What do these counts mean?</span>",
-                unsafe_allow_html=True,
-            )
+            with st.expander("ℹ️ What do these counts mean?"):
+                st.write(
+                    "**Unique** = the number of final feature IDs after merging neuron and concept drafts.\n\n"
+                    "**Source counts** (in parentheses) = how many updates come from each tab before merge.\n\n"
+                    "If both tabs update the same feature, source counts can be higher than unique."
+                )
         if has_pending_alpha:
             st.caption(
                 f"Pending alpha change: current {active_alpha:.2f} → new {global_alpha:.2f}."
