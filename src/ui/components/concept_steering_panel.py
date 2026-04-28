@@ -11,8 +11,6 @@ from typing import Dict, Optional, Tuple
 
 import streamlit as st
 
-from src.ui.steering_state import get_steering_config
-
 logger = logging.getLogger(__name__)
 
 
@@ -32,31 +30,33 @@ def _format_similarity_explanation(similarity: float) -> str:
 
 
 def _render_inline_concept_strength(
-    base_weights: Dict[int, float],
+    neuron_weights: Dict[int, float],
     similarity_score: float,
     key_prefix: str,
-    is_selected: bool,
-) -> Dict[int, float]:
-    """Render slider inline for strength adjustment when concept is selected.
+) -> Tuple[Dict[int, float], bool]:
+    """Render slider inline for strength adjustment.
     
-    Returns dict of selected neuron weights set to slider value.
+    Returns:
+        (selected_weights dict, whether user configured it)
     """
-    if not is_selected or not base_weights:
-        return {}
+    if not neuron_weights:
+        return {}, False
 
-    slider_value = st.slider(
-        "Strength",
-        min_value=0.0,
-        max_value=2.0,
-        value=float(similarity_score),
-        step=0.05,
-        key=f"{key_prefix}::strength",
-        help="Adjust steering strength for this concept",
-    )
-    st.caption(f"💡 Automatically set to similarity score ({similarity_score:.3f})")
+    strength_col, explain_col = st.columns([2, 3])
+    with strength_col:
+        strength_value = st.slider(
+            "Strength",
+            min_value=0.0,
+            max_value=2.0,
+            value=float(similarity_score),
+            step=0.05,
+            key=f"{key_prefix}::strength",
+        )
+    with explain_col:
+        st.caption(f"💡 Automatically set to similarity score ({similarity_score:.3f})")
 
     # All selected neurons get the slider value
-    return {int(idx): float(slider_value) for idx in base_weights.keys()}
+    return {int(idx): float(strength_value) for idx in neuron_weights.keys()}, True
 
 
 def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
@@ -245,78 +245,18 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         with col_similarity:
             st.write(f"**{similarity:.3f}**")
 
+        st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
+
         # Show inline strength slider and explanation when selected
         if is_selected:
-            strength_col, explain_col = st.columns([2, 3])
-            with strength_col:
-                strength_value = st.slider(
-                    "Strength",
-                    min_value=0.0,
-                    max_value=2.0,
-                    value=float(similarity),
-                    step=0.05,
-                    key=f"concept_strength_{rank}",
-                )
-            with explain_col:
-                st.caption(f"💡 Automatically set to similarity score ({similarity:.3f})")
-
+            selected_weights, _ = _render_inline_concept_strength(
+                neuron_weights,
+                similarity_score=float(similarity),
+                key_prefix=f"concept_result_{rank}",
+            )
             # Add all neurons from this concept with the selected strength
-            for neuron_idx in neuron_weights.keys():
-                all_selected_weights[int(neuron_idx)] = float(strength_value)
-
-        st.caption(f"{entity_type.title()} · {len(neuron_weights)} neurons")
-        st.divider()
+            for neuron_idx, weight in selected_weights.items():
+                all_selected_weights[int(neuron_idx)] = float(weight)
+            st.divider()
 
     return all_selected_weights if all_selected_weights else None
-
-    if not result_options:
-        st.info("Select one result to add concept weights into steering draft.")
-        return None
-
-    selected_result_idx = st.radio(
-        "Select one concept result to draft",
-        options=range(len(result_options)),
-        format_func=lambda i: (
-            f"#{result_options[i]['rank']} {result_options[i]['resolved_label']} "
-            f"({result_options[i]['similarity']:.3f})"
-        ),
-        key=f"concept_result_selection::{selected_method}",
-    )
-    selected_result = result_options[selected_result_idx]
-
-    adjusted_weights = _build_per_neuron_adjustments(
-        selected_result["neuron_weights"],
-        similarity_score=float(selected_result["similarity"]),
-        key_prefix=f"concept_adjust::{selected_method}::{selected_result['entity_id']}",
-    )
-
-    auto_scale_similarity = st.checkbox(
-        "Auto-scale by similarity",
-        value=True,
-        key=f"concept_auto_scale_similarity::{selected_method}",
-        help="If enabled, each neuron strength is multiplied by the selected match similarity.",
-    )
-    if auto_scale_similarity:
-        adjusted_weights = {
-            int(neuron_idx): float(weight) * float(selected_result["similarity"])
-            for neuron_idx, weight in adjusted_weights.items()
-            if abs(float(weight) * float(selected_result["similarity"])) >= 1e-9
-        }
-        st.caption(
-            f"Similarity scaling applied: each neuron × {selected_result['similarity']:.3f}."
-        )
-
-    st.caption(
-        f"Prepared draft patch: {len(adjusted_weights)} neuron(s) selected."
-    )
-
-    if st.button(
-        "Add Selected Concept to Draft", key=f"apply_concept_{selected_method}"
-    ):
-        st.success(
-            f"Added {selected_result['entity_type']} steering draft with {len(adjusted_weights)} neuron target(s). "
-            "Click Apply Steering below tabs to recompute recommendations."
-        )
-        return dict(adjusted_weights)
-
-    return None
