@@ -1,6 +1,7 @@
 """Interpretability page — Feature browser with labels and wordclouds."""
 
 import logging
+from collections import defaultdict
 
 import streamlit as st
 
@@ -50,6 +51,120 @@ def resolve_item_to_business_name(item: dict, data_service, wordcloud_service) -
         str(business_id) if business_id else f"Item {item.get('index', '?')}",
         activation,
     )
+
+
+def _get_superfeature_member_metadata(superfeature_context: dict, wordcloud_service):
+    member_metadata = []
+    if not superfeature_context or not wordcloud_service:
+        return member_metadata
+
+    metadata_source = getattr(wordcloud_service, "category_metadata", {}) or {}
+    for member_id in superfeature_context.get("members", []):
+        metadata = metadata_source.get(str(member_id), {}) or {}
+        member_metadata.append((int(member_id), metadata))
+    return member_metadata
+
+
+def _aggregate_superfeature_categories(superfeature_context: dict, wordcloud_service):
+    category_values = defaultdict(list)
+    for _member_id, metadata in _get_superfeature_member_metadata(
+        superfeature_context, wordcloud_service
+    ):
+        for category, activations in (metadata.get("category_weights", {}) or {}).items():
+            cleaned = [float(value) for value in activations if isinstance(value, (int, float))]
+            if cleaned:
+                category_values[category].extend(cleaned)
+
+    results = []
+    for category, activations in category_values.items():
+        total_activation = float(sum(activations))
+        results.append(
+            {
+                "category": category,
+                "total_activation": total_activation,
+                "avg_activation": float(total_activation / len(activations)),
+                "max_activation": float(max(activations)),
+                "min_activation": float(min(activations)),
+                "frequency": len(activations),
+            }
+        )
+
+    results.sort(key=lambda item: item["total_activation"], reverse=True)
+    return results
+
+
+def _aggregate_superfeature_top_items(
+    superfeature_context: dict,
+    wordcloud_service,
+    data_service,
+):
+    item_values = {}
+    for _member_id, metadata in _get_superfeature_member_metadata(
+        superfeature_context, wordcloud_service
+    ):
+        for item in metadata.get("top_items", []) or []:
+            if not isinstance(item, dict):
+                continue
+            raw_item_id = (
+                item.get("business_id")
+                or item.get("item_id")
+                or item.get("id")
+                or item.get("business")
+                or item.get("name")
+            )
+            if raw_item_id is None:
+                continue
+
+            item_key = str(raw_item_id)
+            activation = item.get("activation", item.get("avg_activation", 0))
+            try:
+                activation_value = float(activation)
+            except (TypeError, ValueError):
+                continue
+
+            bucket = item_values.setdefault(
+                item_key,
+                {
+                    "sample": dict(item),
+                    "activations": [],
+                    "frequency": 0,
+                },
+            )
+            bucket["activations"].append(activation_value)
+            bucket["frequency"] += 1
+
+    aggregated = []
+    for item_key, payload in item_values.items():
+        sample = payload["sample"]
+        total_activation = float(sum(payload["activations"]))
+        avg_activation = (
+            total_activation / len(payload["activations"])
+            if payload["activations"]
+            else 0.0
+        )
+        business_name, _ = resolve_item_to_business_name(
+            sample, data_service, wordcloud_service
+        )
+        aggregated.append(
+            {
+                "item_id": item_key,
+                "business_name": business_name,
+                "sample_item": sample,
+                "total_activation": total_activation,
+                "avg_activation": float(avg_activation),
+                "frequency": payload["frequency"],
+            }
+        )
+
+    aggregated.sort(key=lambda item: item["total_activation"], reverse=True)
+    return aggregated
+
+
+def _aggregate_superfeature_wordcloud_frequencies(superfeature_context: dict, wordcloud_service):
+    frequencies = defaultdict(float)
+    for item in _aggregate_superfeature_categories(superfeature_context, wordcloud_service):
+        frequencies[item["category"]] = item["total_activation"]
+    return dict(frequencies)
 
 
 def render_clickable_feature(feature_id: int, feature_label: str):
@@ -428,7 +543,9 @@ def show():
         st.caption(
             f"{len(superfeature_context['members'])} member neurons from `{selected_method}` labels"
         )
-        st.markdown(f"### Representative Member Neuron #{neuron_idx}: {label}")
+        st.caption(
+            "The sections below use statistics aggregated across the whole superfeature. "
+        )
     else:
         st.markdown(f"## Feature #{neuron_idx}: {label}")
     st.divider()
@@ -448,9 +565,14 @@ def show():
 
         if wordcloud_service:
             try:
-                top_categories = wordcloud_service.get_top_activating_categories(
-                    neuron_idx, top_k=10
-                )
+                if superfeature_context is not None:
+                    top_categories = _aggregate_superfeature_categories(
+                        superfeature_context, wordcloud_service
+                    )[:10]
+                else:
+                    top_categories = wordcloud_service.get_top_activating_categories(
+                        neuron_idx, top_k=10
+                    )
 
                 if top_categories:
                     # Find max activation for normalization
@@ -505,13 +627,25 @@ def show():
         if wordcloud_service:
             try:
                 with st.spinner("📊 Generating wordcloud..."):
-                    fig = wordcloud_service.generate_wordcloud_fig(
-                        neuron_idx,
-                        figsize=(6, 4),
-                        width=600,
-                        height=400,
-                        colormap="tab20",
-                    )
+                    if superfeature_context is not None:
+                        fig = wordcloud_service.generate_wordcloud_from_frequencies(
+                            _aggregate_superfeature_wordcloud_frequencies(
+                                superfeature_context, wordcloud_service
+                            ),
+                            title=f"Superfeature: {superfeature_context['label']}",
+                            figsize=(6, 4),
+                            width=600,
+                            height=400,
+                            colormap="tab20",
+                        )
+                    else:
+                        fig = wordcloud_service.generate_wordcloud_fig(
+                            neuron_idx,
+                            figsize=(6, 4),
+                            width=600,
+                            height=400,
+                            colormap="tab20",
+                        )
 
                 if fig is not None:
                     st.pyplot(fig, width="stretch")
@@ -535,16 +669,26 @@ def show():
                 "**σ** = activation strength for this place (how much this neuron activated when recommending it)"
             )
         try:
-            top_items = wordcloud_service.get_top_items(neuron_idx, top_k=10)
+            if superfeature_context is not None:
+                top_items = _aggregate_superfeature_top_items(
+                    superfeature_context, wordcloud_service, data_service
+                )[:10]
+            else:
+                top_items = wordcloud_service.get_top_items(neuron_idx, top_k=10)
+
             logger.debug(f"🔍 DISPLAYING TOP ITEMS: {len(top_items)} items found")
             if top_items:
                 logger.debug(f"   First item: {top_items[0]}")
                 for i, item in enumerate(top_items, 1):
                     logger.debug(f"   Item #{i}: {item}")
                     # Resolve item to business name
-                    business_name, activation = resolve_item_to_business_name(
-                        item, data_service, wordcloud_service
-                    )
+                    if superfeature_context is not None:
+                        business_name = item["business_name"]
+                        activation = item["total_activation"]
+                    else:
+                        business_name, activation = resolve_item_to_business_name(
+                            item, data_service, wordcloud_service
+                        )
                     logger.debug(f"   Resolved to: {business_name}")
 
                     col_rank, col_name, col_stats = st.columns([0.5, 2, 1])
@@ -553,7 +697,12 @@ def show():
                     with col_name:
                         st.caption(f"**{business_name}**")
                     with col_stats:
-                        st.caption(f"σ={activation:.2f}")
+                        if superfeature_context is not None:
+                            st.caption(
+                                f"Σ={activation:.2f} (n={item['frequency']})"
+                            )
+                        else:
+                            st.caption(f"σ={activation:.2f}")
             else:
                 st.info("No business data available for this feature")
         except Exception as e:

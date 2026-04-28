@@ -988,6 +988,12 @@ def show_actual_results(results: Dict[str, Any]) -> None:
 
     with tab_speed:
         st.subheader("Inference Latency")
+        with st.expander("ℹ️ How is this calculated?", expanded=False):
+            st.write(
+                "Latency measures the end-to-end time for one inference pass of the recommender, "
+                "measured in milliseconds.\n\n"
+                "The scatter plot below shows the individual measured samples used to compute these summaries."
+            )
         ranking = results.get("ranking_metrics", {}) or {}
         latency = ranking.get("latency", {})
         if not isinstance(latency, dict) or not latency:

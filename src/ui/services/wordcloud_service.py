@@ -329,6 +329,52 @@ class WordcloudService:
             logger.error(f"Failed to generate wordcloud: {e}")
             return None
 
+    def generate_wordcloud_from_frequencies(
+        self,
+        frequencies: Dict[str, float],
+        title: str = "Feature Summary",
+        figsize: tuple = (8, 6),
+        width: int = 400,
+        height: int = 300,
+        background_color: str = "white",
+        colormap: str = "viridis",
+    ):
+        """Generate a wordcloud figure from a precomputed frequency mapping."""
+        if not HAS_WORDCLOUD:
+            logger.warning("wordcloud library not installed")
+            return None
+
+        cleaned_frequencies = {
+            str(category): max(1.0, float(weight))
+            for category, weight in (frequencies or {}).items()
+            if weight is not None and float(weight) > 0
+        }
+        if not cleaned_frequencies:
+            logger.debug("No frequencies provided for wordcloud generation")
+            return None
+
+        try:
+            import matplotlib.pyplot as plt
+
+            wc = WordCloud(
+                width=width,
+                height=height,
+                background_color=background_color,
+                colormap=colormap,
+                relative_scaling=0.5,
+                min_font_size=8,
+            ).generate_from_frequencies(cleaned_frequencies)
+
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.imshow(wc, interpolation="bilinear")
+            ax.set_axis_off()
+            ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
+            plt.tight_layout()
+            return fig
+        except Exception as e:
+            logger.error(f"Failed to generate wordcloud from frequencies: {e}")
+            return None
+
     @cache_data
     def generate_wordcloud_fig(
         _self, neuron_id: int, figsize: tuple = (8, 6), **kwargs
