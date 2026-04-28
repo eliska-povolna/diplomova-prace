@@ -438,6 +438,13 @@ def show():
 
     with col_chart:
         st.subheader("🔥 Top Activating Categories")
+        
+        with st.expander("ℹ️ How is this calculated?", expanded=False):
+            st.write(
+                "**Σ** = sum of activation strengths for this neuron across all places with this category\n\n"
+                "**n** = number of recommended places with this category where the neuron activated\n\n"
+                "Categories are ranked by total contribution (Σ), consistent with weighted-category labeling."
+            )
 
         if wordcloud_service:
             try:
@@ -447,8 +454,8 @@ def show():
 
                 if top_categories:
                     # Find max activation for normalization
-                    max_activation = (
-                        max([c["avg_activation"] for c in top_categories])
+                    max_total = (
+                        max([c["total_activation"] for c in top_categories])
                         if top_categories
                         else 1.0
                     )
@@ -456,13 +463,13 @@ def show():
                     # Display categories with activation strength bars
                     for item in top_categories:
                         category = item["category"]
-                        avg_activation = item["avg_activation"]
+                        total_activation = item["total_activation"]
                         frequency = item["frequency"]
 
                         # Normalize for display
-                        strength_pct = min(100, max(0, int(avg_activation * 100)))
+                        strength_pct = min(100, max(0, int(total_activation * 100)))
                         normalized_strength = (
-                            avg_activation / max_activation if max_activation > 0 else 0
+                            total_activation / max_total if max_total > 0 else 0
                         )
 
                         # Multi-line display with activation strength and frequency
@@ -472,7 +479,7 @@ def show():
                             st.caption(f"**{category}**")
 
                         with col_strength:
-                            st.caption(f"σ={avg_activation:.2f} (n={frequency})")
+                            st.caption(f"Σ={total_activation:.2f} (n={frequency})")
 
                         # Progress bar for visual strength
                         st.progress(
@@ -487,6 +494,13 @@ def show():
 
     with col_wordcloud:
         st.subheader("☁️ Wordcloud")
+        
+        with st.expander("ℹ️ How is this calculated?", expanded=False):
+            st.write(
+                "Word cloud shows the relative frequency and importance of categories based on their total activation."
+                "\n\n"
+                "Category size reflects how much that category contributes to the neuron's overall activation across all top-activating items."
+            )
 
         if wordcloud_service:
             try:
@@ -514,6 +528,12 @@ def show():
     # Top activating businesses section
     if wordcloud_service:
         st.subheader("🏢 Top Activating Businesses")
+        
+        with st.expander("ℹ️ How is this calculated?", expanded=False):
+            st.write(
+                "Shows the top-10 individual places that most strongly activate this neuron.\n\n"
+                "**σ** = activation strength for this place (how much this neuron activated when recommending it)"
+            )
         try:
             top_items = wordcloud_service.get_top_items(neuron_idx, top_k=10)
             logger.debug(f"🔍 DISPLAYING TOP ITEMS: {len(top_items)} items found")
@@ -567,6 +587,13 @@ def show():
 
         if coactivation_service and neuron_idx is not None:
             st.subheader("Related Features")
+            
+            with st.expander("ℹ️ How is this calculated?", expanded=False):
+                st.write(
+                    "**Frequently Co-Activated** = features that activate together with this neuron (positive correlation)\n\n"
+                    "**Rarely Co-Activated** = features that activate opposite to this neuron (negative correlation)\n\n"
+                    "Computed from Pearson correlation across all neurons in the model."
+                )
 
             # Log diagnostic info about data sources
             if (

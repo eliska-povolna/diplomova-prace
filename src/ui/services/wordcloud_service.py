@@ -191,13 +191,22 @@ class WordcloudService:
         self, neuron_id: int, top_k: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Get top categories by average activation strength.
-
-        Returns list of dicts with category name, average activation strength,
-        frequency, and activation range.
+        Get top categories by total activation strength (sum, not average).
+        
+        This uses the same aggregation as weighted-category labeling:
+        categories are ranked by their total activation contribution.
+        
+        Returns list of dicts with:
+        - category: name
+        - total_activation: sum of activations where this category appeared
+        - avg_activation: mean activation (for display/comparison)
+        - frequency: number of items with this category
+        - max_activation: highest single item activation
+        - min_activation: lowest single item activation
         """
         metadata = self.category_metadata.get(str(neuron_id), {})
         category_weights = metadata.get("category_weights", {})
+        category_sums = metadata.get("category_sums", {})
 
         if not category_weights:
             return []
@@ -206,12 +215,14 @@ class WordcloudService:
         categories_with_stats = []
         for category, activations in category_weights.items():
             if activations:
-                avg_strength = sum(activations) / len(activations)
+                total_activation = sum(activations)
+                avg_strength = total_activation / len(activations)
                 max_strength = max(activations)
                 min_strength = min(activations)
                 categories_with_stats.append(
                     {
                         "category": category,
+                        "total_activation": float(total_activation),
                         "avg_activation": float(avg_strength),
                         "max_activation": float(max_strength),
                         "min_activation": float(min_strength),
@@ -219,8 +230,11 @@ class WordcloudService:
                     }
                 )
 
-        # Sort by average activation strength (descending)
-        categories_with_stats.sort(key=lambda x: x["avg_activation"], reverse=True)
+        # Sort by TOTAL activation strength (sum), not average
+        # This is consistent with weighted-category labeling
+        categories_with_stats.sort(
+            key=lambda x: x["total_activation"], reverse=True
+        )
 
         logger.debug(
             f"Neuron {neuron_id}: found {len(categories_with_stats)} categories with activation data"

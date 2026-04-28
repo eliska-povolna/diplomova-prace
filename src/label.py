@@ -489,13 +489,28 @@ def _build_neuron_category_metadata(
     business_metadata: dict,
     top_k: int = 10,
 ) -> dict:
-    """Build per-neuron category metadata for the interpretability UI."""
+    """Build per-neuron category metadata for the interpretability UI.
+    
+    Uses the same aggregation as weighted-category labeling: activation sums
+    grouped by category. This ensures consistency with the labeling pipeline.
+    
+    Args:
+        neuron_profiles: {neuron_idx: {"max_activating": {"items": [(id, activation), ...]}, ...}}
+        business_metadata: {business_id: {name, categories, ...}}
+        top_k: Number of items to display in top_items (aggregation uses all available items)
+    """
 
     metadata = {}
 
     for neuron_idx, profile in neuron_profiles.items():
-        max_items = profile.get("max_activating", {}).get("items", [])[:top_k]
+        # Get ALL max-activating items (aggregate all, not limited by display top_k)
+        max_items = profile.get("max_activating", {}).get("items", [])
+        
+        # category_weights will store list of activations for each category
+        # (needed to compute frequency later)
         category_weights: dict[str, list[float]] = {}
+        category_sums: dict[str, float] = {}  # Total activation per category
+        
         top_items = []
         activation_values = []
 
@@ -507,38 +522,43 @@ def _build_neuron_category_metadata(
             activation_value = float(activation)
             activation_values.append(activation_value)
 
-            top_items.append(
-                {
-                    "business_id": business_key,
-                    "item_id": business_key,
-                    "name": str(business_info.get("name", "Unknown")),
-                    "activation": activation_value,
-                    "categories": categories,
-                    "city": str(business_info.get("city", "Unknown")),
-                    "state": str(business_info.get("state", "Unknown")),
-                    "stars": (
-                        float(business_info["stars"])
-                        if business_info.get("stars") is not None
-                        else None
-                    ),
-                    "review_count": (
-                        int(business_info["review_count"])
-                        if business_info.get("review_count") is not None
-                        else None
-                    ),
-                }
-            )
+            # Store detailed item info (for display, top_k limited)
+            if len(top_items) < top_k:
+                top_items.append(
+                    {
+                        "business_id": business_key,
+                        "item_id": business_key,
+                        "name": str(business_info.get("name", "Unknown")),
+                        "activation": activation_value,
+                        "categories": categories,
+                        "city": str(business_info.get("city", "Unknown")),
+                        "state": str(business_info.get("state", "Unknown")),
+                        "stars": (
+                            float(business_info["stars"])
+                            if business_info.get("stars") is not None
+                            else None
+                        ),
+                        "review_count": (
+                            int(business_info["review_count"])
+                            if business_info.get("review_count") is not None
+                            else None
+                        ),
+                    }
+                )
 
+            # Aggregate across ALL items (consistent with weighted-category labeling)
             for category in categories:
                 category_weights.setdefault(category, []).append(activation_value)
+                category_sums[category] = category_sums.get(category, 0.0) + activation_value
 
         metadata[str(neuron_idx)] = {
             "neuron_id": int(neuron_idx),
             "top_items": top_items,
-            "category_weights": category_weights,
+            "category_weights": category_weights,  # For frequency count: n = len(activations)
+            "category_sums": category_sums,  # For sorting by total contribution
             "top_categories": sorted(
                 category_weights.keys(),
-                key=lambda category: sum(category_weights[category]),
+                key=lambda category: category_sums[category],  # Sort by SUM, not average
                 reverse=True,
             ),
             "max_activation": max(activation_values) if activation_values else 0.0,
