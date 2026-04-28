@@ -21,22 +21,31 @@ def _truncate_text(value: Any, max_len: int = 140) -> str:
 def _parse_attribute_count(value: Any) -> Optional[int]:
     if value is None:
         return None
+
+    def count_non_empty(d: dict) -> int:
+        return sum(
+            1 for v in d.values()
+            if v is not None and not (isinstance(v, str) and not v.strip())
+        )
+
     if isinstance(value, dict):
-        return len(value)
+        return count_non_empty(value)
+
     if isinstance(value, str):
         text = value.strip()
         if not text:
             return None
+
         try:
             import ast
-
             parsed = ast.literal_eval(text)
         except Exception:
             return None
-        if isinstance(parsed, dict):
-            return len(parsed)
-    return None
 
+        if isinstance(parsed, dict):
+            return count_non_empty(parsed)
+
+    return None
 
 def _word_count(value: Any) -> Optional[int]:
     if value is None:
@@ -505,9 +514,9 @@ def show() -> None:
     else:
         st.caption("Sample tables are paused for faster initial page load.")
 
-    st.subheader("Data Quality: Missing Values")
+    st.subheader("Data Quality")
     st.caption(
-        "Distributions are more useful here than raw missing-value counts: categories per place, attributes per place, and review length."
+        "The following chart shows distributions of semantic metadata: categories per place, attributes per place, and review length. It is calculated on the sample above."
     )
     if load_samples:
         box_col1, box_col2, box_col3 = st.columns(3)

@@ -2422,7 +2422,7 @@ class DataService:
         year_max: Optional[int] = None,
         rating_min: Optional[float] = None,
         rating_max: Optional[float] = None,
-        limit: int = 10,
+        limit: int = 50,
     ) -> pd.DataFrame:
         """Return sample review rows for table preview."""
         cache_key = (
