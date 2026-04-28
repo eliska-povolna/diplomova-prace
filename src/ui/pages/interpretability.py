@@ -197,7 +197,7 @@ def show():
         if neuron_idx is not None and not (0 <= neuron_idx <= max_neuron):
             neuron_idx = None
 
-        # Only run search if there's a query AND we haven't already selected a feature
+        # Search should stay independent of the currently selected feature.
         matching_features = []
         if browse_mode == "Superfeature":
             matching_superfeatures = []
@@ -221,7 +221,7 @@ def show():
                 ][0]
             elif search_query:
                 st.warning("No superfeatures found. Try a different search.")
-        elif search_query and neuron_idx is None:
+        elif search_query:
             # Try to match as a number first
             try:
                 search_num = int(search_query)

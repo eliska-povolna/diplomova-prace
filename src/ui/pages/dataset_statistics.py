@@ -18,6 +18,35 @@ def _truncate_text(value: Any, max_len: int = 140) -> str:
     return text[: max_len - 3] + "..."
 
 
+def _parse_attribute_count(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return len(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            import ast
+
+            parsed = ast.literal_eval(text)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return len(parsed)
+    return None
+
+
+def _word_count(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return len(text.split())
+
+
 @st.cache_data(show_spinner=False)
 def _cached_summary(_data, scope: str, state: Optional[str], city: Optional[str]):
     try:
@@ -279,15 +308,16 @@ def show() -> None:
         rating_range = st.slider("Review stars", 1.0, 5.0, (1.0, 5.0), 0.5)
 
     summary = _cached_summary(data, scope, selected_state, selected_city)
-    kpi_cols = st.columns(6)
+    kpi_cols = st.columns(7)
     kpi_cols[0].metric("Businesses", f"{int(summary.get('n_businesses', 0)):,}")
     kpi_cols[1].metric("Users", f"{int(summary.get('n_users', 0)):,}")
     kpi_cols[2].metric("Items", f"{int(summary.get('n_items', 0)):,}")
     kpi_cols[3].metric("Interactions", f"{int(summary.get('n_interactions', 0)):,}")
-    kpi_cols[4].metric(
-        "Sparsity (positive)", f"{float(summary.get('density_pct', 0.0)):.4f}%"
-    )
-    kpi_cols[5].metric(
+    density_pct = float(summary.get('density_pct', 0.0))
+    sparsity_pct = max(0.0, 100.0 - density_pct)
+    kpi_cols[4].metric("Density (positive)", f"{density_pct:.4f}%")
+    kpi_cols[5].metric("Sparsity", f"{sparsity_pct:.4f}%")
+    kpi_cols[6].metric(
         "Year span",
         (
             f"{int(summary['min_year'])}-{int(summary['max_year'])}"
@@ -476,19 +506,82 @@ def show() -> None:
         st.caption("Sample tables are paused for faster initial page load.")
 
     st.subheader("Data Quality: Missing Values")
-    st.caption("Analysis of empty/missing values for each column in the main tables.")
-    missing_values_df = _cached_missing_values(
-        data, scope, selected_state, selected_city
+    st.caption(
+        "Distributions are more useful here than raw missing-value counts: categories per place, attributes per place, and review length."
     )
-    if not missing_values_df.empty:
-        st.dataframe(
-            missing_values_df,
-            width="stretch",
-            hide_index=True,
-            column_config={
-                "Missing Count": st.column_config.NumberColumn(format="%d"),
-                "Missing %": st.column_config.TextColumn(),
-            },
-        )
+    if load_samples:
+        box_col1, box_col2, box_col3 = st.columns(3)
+
+        with box_col1:
+            if not sample_business_df.empty and "categories" in sample_business_df.columns:
+                plot_df = sample_business_df.copy()
+                plot_df["category_count"] = plot_df["categories"].map(
+                    lambda value: len(
+                        [part for part in str(value).split(",") if part.strip()]
+                    )
+                    if pd.notna(value)
+                    else None
+                )
+                plot_df = plot_df.dropna(subset=["category_count"])
+                if not plot_df.empty:
+                    fig = px.box(
+                        plot_df,
+                        y="category_count",
+                        points="all",
+                        title="Categories per Place",
+                        labels={"category_count": "Category count"},
+                    )
+                    fig.update_layout(height=360)
+                    st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info("No category distribution data.")
+            else:
+                st.info("No category distribution data.")
+
+        with box_col2:
+            if not sample_business_df.empty and "attributes" in sample_business_df.columns:
+                plot_df = sample_business_df.copy()
+                plot_df["attribute_count"] = plot_df["attributes"].map(
+                    _parse_attribute_count
+                )
+                plot_df = plot_df.dropna(subset=["attribute_count"])
+                if not plot_df.empty:
+                    fig = px.box(
+                        plot_df,
+                        y="attribute_count",
+                        points="all",
+                        title="Attributes per Place",
+                        labels={"attribute_count": "Attribute count"},
+                    )
+                    fig.update_layout(height=360)
+                    st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info(
+                        "Attributes are not available in the current business sample."
+                    )
+            else:
+                st.info(
+                    "Attributes are not available in the current business sample."
+                )
+
+        with box_col3:
+            if not sample_review_df.empty and "text" in sample_review_df.columns:
+                plot_df = sample_review_df.copy()
+                plot_df["word_count"] = plot_df["text"].map(_word_count)
+                plot_df = plot_df.dropna(subset=["word_count"])
+                if not plot_df.empty:
+                    fig = px.box(
+                        plot_df,
+                        y="word_count",
+                        points="all",
+                        title="Words per Review",
+                        labels={"word_count": "Word count"},
+                    )
+                    fig.update_layout(height=360)
+                    st.plotly_chart(fig, width="stretch")
+                else:
+                    st.info("No review text distribution data.")
+            else:
+                st.info("No review text distribution data.")
     else:
-        st.info("No missing values data available.")
+        st.info("Enable sample rows to inspect data distributions.")

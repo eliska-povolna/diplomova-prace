@@ -2384,7 +2384,8 @@ class DataService:
                     b.state,
                     {b_stars} AS stars,
                     {b_reviews} AS review_count,
-                    b.categories
+                    b.categories,
+                    b.attributes
                 FROM {'businesses' if self.backend_type == 'cloudsql' else 'yelp_business'} b
                 {where_sql}
                 ORDER BY {b_reviews} DESC NULLS LAST
@@ -2405,6 +2406,7 @@ class DataService:
                         "stars",
                         "review_count",
                         "categories",
+                        "attributes",
                     ]
                 )
 

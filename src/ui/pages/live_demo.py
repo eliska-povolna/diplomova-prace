@@ -332,7 +332,7 @@ Steer your preferences using this formula in the latent space:
             )
 
             if sync_sliders or slider_key not in st.session_state:
-                st.session_state[slider_key] = 0
+                st.session_state[slider_key] = active_or_current_value
 
             with col:
                 formatted_label = format_feature_id(neuron_idx, label)
@@ -393,8 +393,6 @@ Steer your preferences using this formula in the latent space:
                 
 
     st.session_state[draft_key] = merged_draft_values
-    if merged_draft_values:
-        st.caption(f"Pending neuron draft updates: {len(merged_draft_values)}")
 
     st.session_state[sliders_sync_key] = False
 
@@ -546,8 +544,22 @@ def _recompute_recommendations_shared(selected_user: str, inference, data) -> No
                         )
                 avg_delta = float(np.mean(score_deltas)) if score_deltas else 0.0
                 st.markdown("#### Steering Diagnostics")
+                provenance = dict((steering_config or {}).get("provenance") or {})
+                last_neuron_updates = int(
+                    provenance.get("last_apply_neuron_updates", 0)
+                )
+                last_concept_updates = int(
+                    provenance.get("last_apply_concept_updates", 0)
+                )
+                source_breakdown_part = ""
+                if last_neuron_updates or last_concept_updates:
+                    source_breakdown_part = (
+                        "Source breakdown: "
+                        f"neuron {last_neuron_updates}, concept {last_concept_updates} | "
+                    )
                 st.caption(
                     f"Changed features: {len(inference_steering.get('neuron_values', {}))} | "
+                    f"{source_breakdown_part}"
                     f"Rank delta: up {up}, down {down}, unchanged {flat} | "
                     f"Avg score delta: {avg_delta:+.4f}"
                 )
@@ -977,12 +989,6 @@ def show():
 
         st.divider()
 
-        # Actions
-        if st.button("Reset Steering", width="stretch"):
-            if selected_user:
-                _clear_demo_steering_state(selected_user)
-            st.rerun()
-
     # =====================================================================
     # MAIN AREA
     # =====================================================================
@@ -1143,24 +1149,42 @@ def show():
             bool(active_config) and abs(global_alpha - active_alpha) > 1e-9
         )
 
-        if has_pending_neuron_draft:
-            st.caption(
-                f"Pending steering draft: {len(different_neurons)} neuron update(s)."
+        if has_pending_neuron_draft or has_pending_concept_draft:
+            pending_merged = merge_steering_vectors(
+                different_neurons,
+                draft_concept_neuron_values,
             )
-        if has_pending_concept_draft:
             st.caption(
-                f"Pending concept draft: {len(draft_concept_neuron_values)} neuron contribution(s)."
+                "Pending steering draft: "
+                f"{len(pending_merged)} unique feature update(s) "
+                f"(neuron: {len(different_neurons)}, concept: {len(draft_concept_neuron_values)})."
+            )
+            st.markdown(
+                "<span title=\"Unique means the number of final feature IDs after merging neuron and concept drafts. The numbers in parentheses show source counts before merge. If both tabs update the same feature, source counts can be higher than unique.\">ℹ️ What do these counts mean?</span>",
+                unsafe_allow_html=True,
             )
         if has_pending_alpha:
             st.caption(
                 f"Pending alpha change: current {active_alpha:.2f} → new {global_alpha:.2f}."
             )
 
-        if st.button(
+        action_col_apply, action_col_reset = st.columns(2)
+        apply_clicked = action_col_apply.button(
             "Apply Steering",
             key=f"apply_steering_{selected_user}",
             width="stretch",
-        ):
+        )
+        reset_clicked = action_col_reset.button(
+            "Reset Steering",
+            key=f"reset_steering_main_{selected_user}",
+            width="stretch",
+        )
+
+        if reset_clicked:
+            _clear_demo_steering_state(selected_user)
+            st.rerun()
+
+        if apply_clicked:
             active_neuron_values = dict(active_config.get("neuron_values") or {})
             neuron_contributions: Dict[int, float] = {}
             for raw_idx, raw_value in draft_neuron_values.items():
@@ -1206,6 +1230,10 @@ def show():
             )
             if has_pending_neuron_draft:
                 provenance["edited_in"] = "neuron_panel"
+            provenance["last_apply_neuron_updates"] = int(len(different_neurons))
+            provenance["last_apply_concept_updates"] = int(
+                len(draft_concept_neuron_values)
+            )
 
             set_steering_config(
                 st.session_state,
