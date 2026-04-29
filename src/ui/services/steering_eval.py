@@ -289,8 +289,21 @@ def generate_steering_eval_plots(
     outdir: Path | str = DEFAULT_STEERING_EVAL_OUTDIR,
     *,
     k_filter: int | None = 12,
+    lang: str = "en",
 ) -> dict[str, Path]:
-    """Create steering evaluation plots and save them as PNG files."""
+    """Create steering evaluation plots and save them as PNG files.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Steering evaluation dataframe
+    outdir : Path | str
+        Output directory for PNG files
+    k_filter : int | None
+        Filter rows by k value before plotting
+    lang : str
+        Language for labels ('en' or 'cs')
+    """
 
     output_dir = Path(outdir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -299,13 +312,13 @@ def generate_steering_eval_plots(
     if k_filter is not None:
         plot_df = plot_df[pd.to_numeric(plot_df["k"], errors="coerce") == int(k_filter)]
 
-    tradeoff_path = output_dir / STEERING_EVAL_TRADEOFF_PLOT
-    strength_path = output_dir / STEERING_EVAL_STRENGTH_PLOT
+    # Choose filename based on language
+    strength_plot = "steering_vs_strength.png" if lang == "en" else "steering_vs_strength_cz.png"
+    strength_path = output_dir / strength_plot
 
-    _plot_tradeoff(plot_df, tradeoff_path, k_filter=k_filter)
-    _plot_strength(plot_df, strength_path, k_filter=k_filter)
+    _plot_strength(plot_df, strength_path, k_filter=k_filter, lang=lang)
 
-    return {"tradeoff": tradeoff_path, "strength": strength_path}
+    return {"strength": strength_path}
 
 
 def _plot_tradeoff(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> None:
@@ -372,17 +385,47 @@ def _plot_tradeoff(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> 
     plt.close(fig)
 
 
-def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> None:
+def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None, lang: str = "en") -> None:
     fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(13, 5.5))
 
     left_df = _safe_group_means(df, "strength", ["cpr_after", "ndcg_after"])
     right_df = _safe_group_means(df, "delta_activation", ["delta_cpr", "delta_ndcg"])
 
+    # Language-specific labels
+    labels = {
+        "en": {
+            "strength": "Strength",
+            "cpr_after": "mean CPR after",
+            "ndcg_after": "mean NDCG after",
+            "metric": "Mean metric",
+            "delta_activation": "Delta activation",
+            "delta_cpr": "mean delta CPR",
+            "delta_ndcg": "mean delta NDCG",
+            "delta_metric": "Mean delta metric",
+            "title_strength": "Mean metrics by strength",
+            "title_delta": "Metric deltas vs activation shift",
+        },
+        "cs": {
+            "strength": "Síla steeringu",
+            "cpr_after": "průměr CPR po",
+            "ndcg_after": "průměr NDCG po",
+            "metric": "Průměrná metrika",
+            "delta_activation": "Změna aktivace",
+            "delta_cpr": "průměr Δ CPR",
+            "delta_ndcg": "průměr Δ NDCG",
+            "delta_metric": "Průměrná změna metriky",
+            "title_strength": "Průměrné metriky podle síly steeringu",
+            "title_delta": "Změny metrik vs posun aktivace",
+        },
+    }
+    
+    l = labels.get(lang, labels["en"])
+
     if left_df.empty:
-        _annotate_no_data(ax_left, "No data for strength grouping")
+        _annotate_no_data(ax_left, "No data for strength grouping" if lang == "en" else "Žádná data pro seskupení podle síly")
     else:
-        ax_left.plot(left_df["strength"], left_df["cpr_after"], marker="o", label="mean CPR after")
-        ax_left.plot(left_df["strength"], left_df["ndcg_after"], marker="o", label="mean NDCG after")
+        ax_left.plot(left_df["strength"], left_df["cpr_after"], marker="o", label=l["cpr_after"])
+        ax_left.plot(left_df["strength"], left_df["ndcg_after"], marker="o", label=l["ndcg_after"])
         
         # Add regression lines for both metrics
         if len(left_df) >= 2:
@@ -398,28 +441,28 @@ def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> 
             x_range_ndcg = np.linspace(left_df["strength"].min(), left_df["strength"].max(), 100)
             ax_left.plot(x_range_ndcg, ndcg_line(x_range_ndcg), "--", alpha=0.5, color="C1", linewidth=1.5)
         
-        ax_left.set_xlabel("Strength")
-        ax_left.set_ylabel("Mean metric")
+        ax_left.set_xlabel(l["strength"])
+        ax_left.set_ylabel(l["metric"])
         ax_left.set_title(
-            "Mean metrics by strength" + (f" (k={k_filter})" if k_filter is not None else "")
+            l["title_strength"] + (f" (k={k_filter})" if k_filter is not None else "")
         )
         ax_left.grid(True, alpha=0.25)
         ax_left.legend()
 
     if right_df.empty:
-        _annotate_no_data(ax_right, "No data for delta activation grouping")
+        _annotate_no_data(ax_right, "No data for delta activation grouping" if lang == "en" else "Žádná data pro seskupení podle změny aktivace")
     else:
         ax_right.plot(
             right_df["delta_activation"],
             right_df["delta_cpr"],
             marker="o",
-            label="mean delta CPR",
+            label=l["delta_cpr"],
         )
         ax_right.plot(
             right_df["delta_activation"],
             right_df["delta_ndcg"],
             marker="o",
-            label="mean delta NDCG",
+            label=l["delta_ndcg"],
         )
         
         # Add regression lines for both metrics
@@ -436,9 +479,9 @@ def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> 
             x_range_ndcg = np.linspace(right_df["delta_activation"].min(), right_df["delta_activation"].max(), 100)
             ax_right.plot(x_range_ndcg, ndcg_line(x_range_ndcg), "--", alpha=0.5, color="C1", linewidth=1.5)
         
-        ax_right.set_xlabel("Delta activation")
-        ax_right.set_ylabel("Mean delta metric")
-        ax_right.set_title("Metric deltas vs activation shift")
+        ax_right.set_xlabel(l["delta_activation"])
+        ax_right.set_ylabel(l["delta_metric"])
+        ax_right.set_title(l["title_delta"])
         ax_right.grid(True, alpha=0.25)
         ax_right.legend()
 
