@@ -770,7 +770,6 @@ def show():
         st.subheader("Member Neurons")
         members = superfeature_context["members"]
         member_labels = superfeature_context["member_labels"]
-        sf_id = superfeature_context["id"]
 
         for member_id in members:
             member_label = member_labels.get(member_id)
@@ -780,20 +779,7 @@ def show():
                 except Exception:
                     member_label = f"Feature {member_id}"
 
-            if st.button(
-                f"Feature {member_id}: {member_label}",
-                key=f"superfeature_member_{sf_id}_{member_id}",
-            ):
-                # Clear superfeature selection to switch to neuron view
-                # This implements "take the last selected thing" - clicking member neuron clears superfeature
-                if "selected_superfeature_id" in st.session_state:
-                    del st.session_state["selected_superfeature_id"]
-                if "selected_superfeature_anchor_neuron" in st.session_state:
-                    del st.session_state["selected_superfeature_anchor_neuron"]
-                st.session_state["interpretability_browse_mode"] = "Neuron"
-                st.session_state["feature_search"] = str(member_id)
-                st.session_state.selected_feature_id = int(member_id)
-                st.rerun()
+            st.markdown(f"- **Feature {member_id}:** {member_label}")
     else:
         coactivation_service = st.session_state.get("coactivation")
 
