@@ -971,11 +971,6 @@ def _recompute_recommendations_shared(
                         st.warning(
                             f"Could not save steering evaluation log: {log_error}"
                         )
-                if up == 0 and down == 0:
-                    st.info(
-                        "No rank change in the visible top-K. This usually means target activations are close to baseline "
-                        "or current alpha is too low for rank reordering."
-                    )
         else:
             full_recommendations = list(st.session_state.get(full_cache_key, []) or [])
             if not full_recommendations:
