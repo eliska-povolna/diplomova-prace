@@ -5,6 +5,11 @@ from collections import defaultdict
 
 import streamlit as st
 
+from interpret.prompts import (
+    NEURON_LABEL_SYSTEM_PROMPT,
+    SUPERFEATURE_SYSTEM_PROMPT,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -809,3 +814,12 @@ def show():
                         render_clickable_feature(item["neuron_id"], item["label"])
                 else:
                     st.caption("*No negative correlations found*")
+
+    st.divider()
+    st.subheader("Prompts")
+
+    with st.expander("Labeling Prompt", expanded=False):
+        st.code(NEURON_LABEL_SYSTEM_PROMPT, language="text")
+
+    with st.expander("Superfeature Prompt", expanded=False):
+        st.code(SUPERFEATURE_SYSTEM_PROMPT, language="text")
