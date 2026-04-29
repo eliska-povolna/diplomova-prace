@@ -218,6 +218,8 @@ and apply steering through the same hidden-space mechanism used for direct neuro
     st.markdown("### Select concepts to draft")
 
     all_selected_weights = {}
+    selected_metadata = []
+    metadata_key = f"concept_steering_metadata::{selected_user}"
 
     for rank, (entity_id, label, similarity) in enumerate(results, 1):
         resolved_label, neuron_weights, entity_type = _resolve_result(
@@ -252,9 +254,21 @@ and apply steering through the same hidden-space mechanism used for direct neuro
                 similarity_score=float(similarity),
                 key_prefix=f"concept_result_{rank}",
             )
+            selected_strength = next(iter(selected_weights.values()), None)
+            selected_metadata.append(
+                {
+                    "label": resolved_label,
+                    "entity_id": str(entity_id),
+                    "entity_type": entity_type,
+                    "similarity": float(similarity),
+                    "strength": float(selected_strength) if selected_strength is not None else None,
+                    "neuron_weights": dict(selected_weights),
+                }
+            )
             # Add all neurons from this concept with the selected strength
             for neuron_idx, weight in selected_weights.items():
                 all_selected_weights[int(neuron_idx)] = float(weight)
             st.divider()
 
+    session_state[metadata_key] = selected_metadata
     return all_selected_weights if all_selected_weights else None

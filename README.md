@@ -19,6 +19,13 @@ Modern recommender systems can be accurate while still being hard to inspect or 
 - Steering diagnostics are primarily exposed in the Live Demo through rank deltas, score deltas, and activation shifts.
 - Dataset-level and model-level charts used in the thesis are exported by [scripts/generate_thesis_charts.py](scripts/generate_thesis_charts.py).
 
+### Steering Evaluation
+
+- Steering changes are appended to [outputs/steering_eval.csv](outputs/steering_eval.csv) from the Live Demo.
+- Charts are generated with [scripts/plot_steering_eval.py](scripts/plot_steering_eval.py) and written to [img/generated/](img/generated/).
+- The Results page now includes a dedicated Steering Eval tab with log filters, recent rows, and the generated charts.
+- Plot generation keeps only the latest 500 steering rows by default so the UI stays responsive.
+
 ## What Is This?
 
 This repository contains the full pipeline for an interpretable POI recommender system:
