@@ -8,14 +8,17 @@ from .formatting import (
 )
 
 
-def info_section(title, info_text):
+def info_section(title, *info_texts):
     """
     Display a section header with inline info icon and hoverable tooltip.
 
     Args:
         title: Section title (includes emoji icon)
-        info_text: Tooltip text explaining the section
+        *info_texts: One or more tooltip text strings explaining the section
     """
+    # Join multiple info text parts into a single help string
+    info_text = "\n\n".join([str(t) for t in info_texts if t is not None])
+
     col_title, col_info = st.columns([0.85, 0.15])
     with col_title:
         st.subheader(title)
