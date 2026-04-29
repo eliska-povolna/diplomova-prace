@@ -45,18 +45,14 @@ python -m src.preprocess_data --config configs/default.yaml
 ```
 
 This reads from DuckDB and creates:
-    --parquet_dir /path/to/yelp_parquet
-```
 
-This produces the same partitioned structure:
 ```
-yelp_parquet/
-    business/state=AZ/part-0.parquet
-    business/state=CA/part-0.parquet
-    ...
-    review/year=2005/part-0.parquet
-    review/year=2006/part-0.parquet
-    ...
+data/preprocessed_yelp/
+    processed_train.npz        # Training interaction matrix (CSR format)
+    processed_test.npz         # Test interaction matrix (CSR format)
+    user2index.pkl             # User ID to index mapping
+    item2index.pkl             # Business ID to index mapping
+    state_statistics.csv       # Statistics per state
 ```
 
 ## Directory layout

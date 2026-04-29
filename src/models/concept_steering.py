@@ -4,7 +4,6 @@ This module implements semantic neuron discovery using SentenceTransformer embed
 Users can type a query like "Italian restaurants" and find neurons with similar labels,
 enabling guided exploration of the SAE feature space.
 
-Reference: IMPLEMENTATION_PLAN.md Task 8.4
 """
 
 from __future__ import annotations

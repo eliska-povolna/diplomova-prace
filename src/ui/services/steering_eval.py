@@ -26,6 +26,24 @@ STEERING_EVAL_TRADEOFF_PLOT = "steering_tradeoff_cpr_vs_ndcg.png"
 STEERING_EVAL_STRENGTH_PLOT = "steering_vs_strength.png"
 DEFAULT_STEERING_EVAL_TABLE = "steering_eval"
 
+
+def _ensure_steering_eval_table(engine) -> None:
+    """Create the steering_eval table if it does not exist yet."""
+
+    from sqlalchemy import text
+
+    cols_ddl = (
+        "timestamp_iso TIMESTAMP WITH TIME ZONE,"
+        "run_id TEXT, user_id TEXT, k INTEGER, method TEXT, label TEXT,"
+        "strength DOUBLE PRECISION, ndcg_before DOUBLE PRECISION, ndcg_after DOUBLE PRECISION,"
+        "cpr_before DOUBLE PRECISION, cpr_after DOUBLE PRECISION, activation_before DOUBLE PRECISION,"
+        "activation_after DOUBLE PRECISION, delta_ndcg DOUBLE PRECISION, delta_cpr DOUBLE PRECISION,"
+        "delta_activation DOUBLE PRECISION, weights_changed_json TEXT"
+    )
+    create_sql = f"CREATE TABLE IF NOT EXISTS {DEFAULT_STEERING_EVAL_TABLE} ({cols_ddl})"
+    with engine.begin() as conn:
+        conn.execute(text(create_sql))
+
 CSV_COLUMNS = [
     "timestamp_iso",
     "run_id",
@@ -59,7 +77,6 @@ def append_steering_eval_rows(
     try:
         from .secrets_helper import get_cloudsql_config
         from .cloud_sql_helper import CloudSQLHelper
-        from sqlalchemy import text
 
         cfg = get_cloudsql_config()
         if all([cfg.get("instance"), cfg.get("database"), cfg.get("user"), cfg.get("password")]):
@@ -71,19 +88,11 @@ def append_steering_eval_rows(
             )
             engine = getattr(sql_helper, "engine", None)
             if engine is not None:
-                # Ensure table exists
-                cols_ddl = (
-                    "timestamp_iso TIMESTAMP WITH TIME ZONE,"
-                    "run_id TEXT, user_id TEXT, k INTEGER, method TEXT, label TEXT,"
-                    "strength DOUBLE PRECISION, ndcg_before DOUBLE PRECISION, ndcg_after DOUBLE PRECISION,"
-                    "cpr_before DOUBLE PRECISION, cpr_after DOUBLE PRECISION, activation_before DOUBLE PRECISION,"
-                    "activation_after DOUBLE PRECISION, delta_ndcg DOUBLE PRECISION, delta_cpr DOUBLE PRECISION,"
-                    "delta_activation DOUBLE PRECISION, weights_changed_json TEXT"
-                )
-                create_sql = f"CREATE TABLE IF NOT EXISTS {DEFAULT_STEERING_EVAL_TABLE} ({cols_ddl})"
-                with engine.begin() as conn:
-                    conn.execute(text(create_sql))
+                from sqlalchemy import text
 
+                _ensure_steering_eval_table(engine)
+
+                with engine.begin() as conn:
                     # Prepare rows for insert: normalize keys and ensure timestamp present
                     insert_cols = ", ".join(CSV_COLUMNS)
                     placeholders = ", ".join([f":" + c for c in CSV_COLUMNS])
@@ -138,6 +147,7 @@ def load_steering_eval_dataframe(
             )
             engine = getattr(sql_helper, "engine", None)
             if engine is not None:
+                _ensure_steering_eval_table(engine)
                 query = f"SELECT * FROM {DEFAULT_STEERING_EVAL_TABLE} ORDER BY timestamp_iso DESC LIMIT {int(max_rows) if max_rows>0 else 1000000}"
                 df = pd.read_sql(query, con=engine)
                 # SQL returned newest-first; invert to have chronological order like CSV loader

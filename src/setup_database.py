@@ -71,6 +71,7 @@ def load_json_to_duckdb(json_dir: Path, db_path: str | Path) -> bool:
     logger.info("LOADING JSON INTO DUCKDB")
     logger.info("=" * 80)
 
+    con = None
     try:
         con = connect(str(db_path))
 
@@ -122,13 +123,15 @@ def load_json_to_duckdb(json_dir: Path, db_path: str | Path) -> bool:
             n_users = con.execute("SELECT COUNT(*) FROM yelp_user").fetchall()[0][0]
             logger.info(f"✓ Loaded {n_users:,} users")
 
-        con.close()
         logger.info("\n✓ DuckDB database setup complete")
         return True
 
     except Exception as e:
         logger.error(f"Failed to load data into DuckDB: {e}")
         return False
+    finally:
+        if con is not None:
+            con.close()
 
 
 def load_json_to_cloudsql(
@@ -254,10 +257,11 @@ def main() -> None:
         help="Load into CloudSQL instead of local DuckDB",
     )
     parser.add_argument(
-        "--skip-if-exists",
-        action="store_true",
+        "--no-skip-if-exists",
+        action="store_false",
+        dest="skip_if_exists",
         default=True,
-        help="Skip loading if tables already exist (default: True)",
+        help="Force reload even if tables already exist (default: skip if exists)",
     )
 
     args = parser.parse_args()

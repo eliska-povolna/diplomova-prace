@@ -213,7 +213,7 @@ def write_latest_run_pointer(run_dir: Path, outputs_dir: Optional[Path] = None) 
     else:
         pointer = run_dir
 
-    latest_run_path.write_text(str(pointer), encoding="utf-8")
+    latest_run_path.write_text(pointer.as_posix(), encoding="utf-8")
     logger.info(f"Latest run pointer updated: {latest_run_path} -> {pointer}")
     return latest_run_path
 

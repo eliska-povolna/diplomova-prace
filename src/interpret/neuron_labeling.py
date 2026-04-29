@@ -506,7 +506,14 @@ class ReviewBasedLLMLabeler(LLMBasedLabeler):
         for position, (neuron_idx, profile) in enumerate(
             sorted(neuron_profiles.items()), 1
         ):
-            max_items = profile.get("max_activating", {}).get("items", [])
+            # Parse max_items from various profile formats (reuse logic from LLMBasedLabeler)
+            max_activating = profile.get("max_activating", {})
+            if isinstance(max_activating, dict):
+                max_items = max_activating.get("items", [])
+            elif isinstance(max_activating, list):
+                max_items = max_activating
+            else:
+                max_items = []
 
             if not max_items:
                 labels[neuron_idx] = "Unknown"

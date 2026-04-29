@@ -1130,6 +1130,28 @@ def load_inference_service(
     run_dir = Path(bundle["run_dir"])
     checkpoint_dir = run_dir / "checkpoints"
 
+    # The live NDCG holdout artifacts may not have been downloaded with the base run.
+    # If they are missing locally, try to fetch them from the same cloud run prefix.
+    holdout_files = [
+        run_dir / "data" / "test_holdout_target.npz",
+        run_dir / "data" / "test_user_ids.json",
+    ]
+    missing_holdout_files = [path for path in holdout_files if not path.exists()]
+    if missing_holdout_files:
+        cloud_storage = _get_cloud_storage_helper()
+        if cloud_storage:
+            run_id = bundle.get("run_id") or _extract_run_timestamp(selected_output_dir)
+            if run_id:
+                gcs_prefix = f"outputs/{run_id}/data"
+                for local_path in missing_holdout_files:
+                    gcs_name = f"{gcs_prefix}/{local_path.name}"
+                    if _download_gcs_file(cloud_storage, gcs_name, local_path):
+                        logger.info(
+                            "Downloaded missing holdout artifact from GCS: %s", gcs_name
+                        )
+        else:
+            logger.debug("GCS not configured; skipping on-demand holdout download")
+
     elsa_ckpt = checkpoint_dir / "elsa_best.pt"
     sae_ckpt = Path(bundle["sae_checkpoint"])
 
@@ -1138,7 +1160,12 @@ def load_inference_service(
     logger.info("Loading SAE from %s", sae_ckpt)
 
     service = InferenceService(
-        elsa_ckpt, sae_ckpt, config, labels=None, data_service=None
+        elsa_ckpt,
+        sae_ckpt,
+        config,
+        labels=None,
+        data_service=None,
+        training_dir=run_dir,
     )
     if HAS_STREAMLIT:
         if not hasattr(st.session_state, "_startup_diagnostics"):

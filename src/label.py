@@ -490,10 +490,10 @@ def _build_neuron_category_metadata(
     top_k: int = 10,
 ) -> dict:
     """Build per-neuron category metadata for the interpretability UI.
-    
+
     Uses the same aggregation as weighted-category labeling: activation sums
     grouped by category. This ensures consistency with the labeling pipeline.
-    
+
     Args:
         neuron_profiles: {neuron_idx: {"max_activating": {"items": [(id, activation), ...]}, ...}}
         business_metadata: {business_id: {name, categories, ...}}
@@ -505,12 +505,12 @@ def _build_neuron_category_metadata(
     for neuron_idx, profile in neuron_profiles.items():
         # Get ALL max-activating items (aggregate all, not limited by display top_k)
         max_items = profile.get("max_activating", {}).get("items", [])
-        
+
         # category_weights will store list of activations for each category
         # (needed to compute frequency later)
         category_weights: dict[str, list[float]] = {}
         category_sums: dict[str, float] = {}  # Total activation per category
-        
+
         top_items = []
         activation_values = []
 
@@ -549,7 +549,9 @@ def _build_neuron_category_metadata(
             # Aggregate across ALL items (consistent with weighted-category labeling)
             for category in categories:
                 category_weights.setdefault(category, []).append(activation_value)
-                category_sums[category] = category_sums.get(category, 0.0) + activation_value
+                category_sums[category] = (
+                    category_sums.get(category, 0.0) + activation_value
+                )
 
         metadata[str(neuron_idx)] = {
             "neuron_id": int(neuron_idx),
@@ -558,7 +560,9 @@ def _build_neuron_category_metadata(
             "category_sums": category_sums,  # For sorting by total contribution
             "top_categories": sorted(
                 category_weights.keys(),
-                key=lambda category: category_sums[category],  # Sort by SUM, not average
+                key=lambda category: category_sums[
+                    category
+                ],  # Sort by SUM, not average
                 reverse=True,
             ),
             "max_activation": max(activation_values) if activation_values else 0.0,

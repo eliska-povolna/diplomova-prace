@@ -7,6 +7,7 @@ import csv
 import hashlib
 import json
 import logging
+import re
 from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,6 +33,7 @@ from src.ui.services.steering_eval import (
     build_ndcg_from_recommendations,
     build_presence_ratio,
 )
+from src.utils.evaluation import ndcg_at_k
 
 try:
     import folium
@@ -66,10 +68,10 @@ def _compute_data_hash(
             "recommendations": [
                 {
                     "item_id": r.get("item_id"),
-                    "rank_after": r.get("rank_after"),
-                    "score": round(
-                        r.get("score", 0), 3
-                    ),  # Round to avoid float precision issues
+                    # "rank_after": r.get("rank_after"),
+                    # "score": round(
+                    #     r.get("score", 0), 3
+                    # ),  # Round to avoid float precision issues
                 }
                 for r in (recommendations or [])
             ],
@@ -85,6 +87,91 @@ def _compute_data_hash(
 
 def _demo_state_key(selected_user: str, suffix: str) -> str:
     return f"live_demo::{selected_user}::{suffix}"
+
+
+def _normalize_terms(text: str) -> set[str]:
+    return {
+        token for token in re.split(r"[^a-z0-9]+", str(text).lower()) if len(token) > 1
+    }
+
+
+def _recommendation_item_ids(recommendations: List[Dict]) -> List[int]:
+    item_ids: List[int] = []
+    for reco in recommendations or []:
+        item_id = reco.get("item_id") or reco.get("poi_idx")
+        if item_id is None:
+            continue
+        try:
+            item_ids.append(int(item_id))
+        except (TypeError, ValueError):
+            continue
+    return item_ids
+
+
+def _compute_live_ndcg(
+    inference, selected_user: str, recommendations: List[Dict]
+) -> float | None:
+    if not recommendations:
+        return None
+
+    try:
+        y_true = inference.get_user_ground_truth(selected_user)
+    except Exception:
+        return None
+
+    if y_true is None or len(y_true) == 0:
+        return None
+
+    item_ids = _recommendation_item_ids(recommendations)
+    if not item_ids:
+        return None
+
+    argsorted = np.asarray(item_ids, dtype=int)
+    k = min(len(argsorted), len(y_true))
+    if k <= 0:
+        return None
+
+    return float(ndcg_at_k(np.asarray(y_true), argsorted, k))
+
+
+def _format_ndcg_delta(before: float | None, after: float | None) -> str:
+    if before is None or after is None:
+        return "N/A"
+    if before <= 0:
+        if after <= 0:
+            return "0.0%"
+        return f"+{after * 100:.1f}%"
+    return f"{((after - before) / before) * 100.0:+.1f}%"
+
+
+def _compute_neuron_cpr(
+    label_method: str,
+    label_text: str,
+    recommendations: List[Dict],
+    poi_details_map: Dict,
+) -> float | None:
+    if label_method not in {"matrix-based", "weighted-category"}:
+        return None
+
+    label_terms = _normalize_terms(label_text)
+    if not label_terms or not recommendations:
+        return None
+
+    matches = 0
+    counted = 0
+    for reco in recommendations:
+        item_id = reco.get("item_id") or reco.get("poi_idx")
+        if item_id is None:
+            continue
+        counted += 1
+        details = poi_details_map.get(item_id, {}) if poi_details_map else {}
+        category_terms = _normalize_terms(details.get("category", ""))
+        if label_terms & category_terms:
+            matches += 1
+
+    if counted == 0:
+        return None
+    return float(matches) / float(counted)
 
 
 def merge_steering_vectors(
@@ -305,13 +392,13 @@ def _set_demo_recommendation_state(
     poi_details_map: Optional[Dict] = None,
 ) -> None:
     if base_recommendations is not None:
-        st.session_state[_demo_state_key(selected_user, "base_recommendations")] = (
-            base_recommendations
-        )
+        st.session_state[
+            _demo_state_key(selected_user, "base_recommendations")
+        ] = base_recommendations
     if steered_recommendations is not None:
-        st.session_state[_demo_state_key(selected_user, "steered_recommendations")] = (
-            steered_recommendations
-        )
+        st.session_state[
+            _demo_state_key(selected_user, "steered_recommendations")
+        ] = steered_recommendations
 
     active_config = active_steering_config
     if active_config is None:
@@ -319,9 +406,9 @@ def _set_demo_recommendation_state(
             _demo_state_key(selected_user, "active_steering_config")
         )
 
-    st.session_state[_demo_state_key(selected_user, "active_steering_config")] = (
-        active_config
-    )
+    st.session_state[
+        _demo_state_key(selected_user, "active_steering_config")
+    ] = active_config
 
     displayed = (
         steered_recommendations
@@ -370,13 +457,17 @@ def _clear_demo_steering_state(selected_user: str) -> None:
     st.session_state.current_recommendations = base
     st.session_state.steering_modified = False
     st.session_state.pop(_concept_metadata_key(selected_user), None)
-    
+
     # Reset concept steering panel checkbox states
-    keys_to_delete = [k for k in st.session_state.keys() if k.startswith(f"concept_select_") or k.startswith("concept_strength_")]
+    keys_to_delete = [
+        k
+        for k in st.session_state.keys()
+        if k.startswith(f"concept_select_") or k.startswith("concept_strength_")
+    ]
     for k in keys_to_delete:
         del st.session_state[k]
 
-@st.fragment
+
 def _render_action_buttons(selected_user: str):
     action_col_apply, action_col_reset = st.columns(2)
 
@@ -392,6 +483,7 @@ def _render_action_buttons(selected_user: str):
     )
 
     return apply_clicked, reset_clicked
+
 
 @st.fragment
 def _render_active_features_section(
@@ -426,7 +518,7 @@ def _render_active_features_section(
     try:
         user_z = inference.user_latents[selected_user]
         # Get ALL activations (large number to avoid filtering side effects)
-        all_activations = inference.get_top_activations(user_z, k=64)
+        all_activations = inference.get_top_activations(user_z, k=32)
 
         if all_activations:
             original_chart = st.session_state.get(
@@ -458,12 +550,12 @@ def _render_active_features_section(
         return []
 
 
-@st.fragment
 def render_steering_tabs(
     selected_user: str,
     inference,
     activations: List[Dict],
     steering_config: Optional[Dict] = None,
+    num_recommendations: int = 12,
 ) -> None:
     """Render neuron/concept steering tabs that only update draft state."""
     tab_neuron, tab_concept = st.tabs(["Neuron Steering", "Concept Steering"])
@@ -474,6 +566,7 @@ def render_steering_tabs(
             inference=inference,
             activations=activations,
             steering_config=steering_config,
+            num_recommendations=num_recommendations,
         )
 
     with tab_concept:
@@ -489,17 +582,118 @@ def render_steering_tabs(
             ] = dict(concept_draft)
 
 
+def _ensure_cpr_cache(
+    selected_user: str,
+    inference,
+    data,
+    num_recommendations: int,
+) -> Dict[int, tuple[float | None, float | None]]:
+    labels_service = st.session_state.get("labels")
+    selected_method = (
+        getattr(labels_service, "selected_method", "") if labels_service else ""
+    )
+
+    cpr_cache_key = _demo_state_key(selected_user, "cpr_values")
+    cpr_meta_key = _demo_state_key(selected_user, "cpr_values_meta")
+
+    steering_config = get_steering_config(st.session_state, selected_user)
+    steering_hash = steering_config_hash(steering_config)
+
+    expected_meta = {
+        "num_recommendations": int(num_recommendations),
+        "steering_hash": steering_hash,
+        "label_method": selected_method,
+    }
+
+    existing_meta = st.session_state.get(cpr_meta_key)
+    if existing_meta == expected_meta:
+        return dict(st.session_state.get(cpr_cache_key, {}) or {})
+
+    if selected_method not in {"matrix-based", "weighted-category"}:
+        st.session_state[cpr_cache_key] = {}
+        st.session_state[cpr_meta_key] = expected_meta
+        return {}
+
+    base_recommendations = list(
+        st.session_state.get(_demo_state_key(selected_user, "base_recommendations"), [])
+        or []
+    )[:num_recommendations]
+
+    displayed_recommendations = list(
+        st.session_state.get(
+            _demo_state_key(selected_user, "displayed_recommendations"), []
+        )
+        or []
+    )[:num_recommendations]
+
+    if not displayed_recommendations:
+        displayed_recommendations = base_recommendations
+
+    cached_poi_details = dict(
+        st.session_state.get(f"poi_details_map_{selected_user}", {}) or {}
+    )
+
+    needed_indices = set(_recommendation_item_ids(base_recommendations))
+    needed_indices.update(_recommendation_item_ids(displayed_recommendations))
+
+    missing_indices = [idx for idx in needed_indices if idx not in cached_poi_details]
+
+    if missing_indices and data is not None:
+        fetched = data.get_poi_details_batch(missing_indices)
+        cached_poi_details.update(fetched)
+        st.session_state[f"poi_details_map_{selected_user}"] = cached_poi_details
+
+    try:
+        user_z = inference.user_latents[selected_user]
+        activations = inference.get_top_activations(user_z, k=64)
+    except Exception:
+        activations = []
+
+    cpr_values = {}
+
+    for feature in activations:
+        neuron_idx = feature.get("neuron_idx")
+        label = feature.get("label", "")
+
+        if neuron_idx is None:
+            continue
+
+        base_cpr = _compute_neuron_cpr(
+            selected_method,
+            label,
+            base_recommendations,
+            cached_poi_details,
+        )
+
+        current_cpr = _compute_neuron_cpr(
+            selected_method,
+            label,
+            displayed_recommendations,
+            cached_poi_details,
+        )
+
+        cpr_values[int(neuron_idx)] = (base_cpr, current_cpr)
+
+    st.session_state[cpr_cache_key] = cpr_values
+    st.session_state[cpr_meta_key] = expected_meta
+
+    return cpr_values
+
+
 def _render_neuron_steering_draft(
     selected_user: str,
     inference,
     activations: List[Dict],
     steering_config: Optional[Dict] = None,
+    num_recommendations: int = 12,
 ) -> None:
-    """Render neuron sliders that only write pending draft steering values."""
+    labels_service = st.session_state.get("labels")
+
     info_section(
         "Steer Your Preferences",
         "Set target activations for your top features. The model blends baseline and steered "
-        "representations using alpha, then recomputes recommendations.",
+        "representations using alpha, then recomputes recommendations. CPR is shown live "
+        "for matrix-based and weighted-category labels only.",
     )
 
     if not activations:
@@ -513,12 +707,30 @@ Steer your preferences using this formula in the latent space:
 
 - You can set your preference for these concepts using the sliders below - if you move the slider to the right, you will see more, if you move it to the left, you will see less places activating this feature.
 - You can see the current and steered activation value under each slider.
-- For each label, concept presence ratio is computed, so you can see whether that feature is actually present in the recommendation set. (Unavailable for LLM features, choose matrix-based or weighted-category to see.)
 """
     )
+    if labels_service and getattr(labels_service, "selected_method", "") not in {
+        "matrix-based",
+        "weighted-category",
+    }:
+        info_section(
+            "🎯 Steering Metrics: NDCG available, CPR unavailable for LLM labeling methods",
+            "NDCG and CPR are computed on the currently visible recommendations. "
+            "NDCG compares the visible ranking against the held-out test split, and the delta shows the effect of steering versus the baseline ordering. You can see it on the top of the recommendation list."
+            "CPR reports how many visible recommendations match the selected label/category concept. You can see it under each label.",
+            "LLM-based labels show N/A as their evaluation would require token usage.",
+        )
+    else:
+        info_section(
+            "🎯 Steering Metrics available (CPR and NDCG)",
+            "NDCG and CPR are computed on the currently visible recommendations. "
+            "NDCG compares the visible ranking against the held-out test split, and the delta shows the effect of steering versus the baseline ordering. You can see it on the top of the recommendation list."
+            "CPR reports how many visible recommendations match the selected label/category concept. You can see it under each label.",
+        )
 
     active_config = get_steering_config(st.session_state, selected_user) or {}
     existing_neuron_values = dict(active_config.get("neuron_values") or {})
+
     try:
         current_activations = inference.get_user_steering(selected_user)
     except ValueError as e:
@@ -532,11 +744,24 @@ Steer your preferences using this formula in the latent space:
     draft_key = _demo_state_key(selected_user, "draft_neuron_values")
     existing_draft_values = dict(st.session_state.get(draft_key, {}) or {})
     merged_draft_values = dict(existing_draft_values)
+
     sliders_sync_key = _demo_state_key(selected_user, "sync_sliders_from_config")
     sync_sliders = bool(st.session_state.get(sliders_sync_key, False))
 
+    selected_method = (
+        getattr(labels_service, "selected_method", "") if labels_service else ""
+    )
+
+    cpr_values = _ensure_cpr_cache(
+        selected_user=selected_user,
+        inference=inference,
+        data=st.session_state.get("data"),
+        num_recommendations=num_recommendations,
+    )
+
     for row_idx in range(0, len(top_features), cols_per_row):
         cols = st.columns(cols_per_row)
+
         for col_idx, col in enumerate(cols):
             feature_idx = row_idx + col_idx
             if feature_idx >= len(top_features):
@@ -545,10 +770,13 @@ Steer your preferences using this formula in the latent space:
             feature = top_features[feature_idx]
             neuron_idx = feature["neuron_idx"]
             label = feature["label"]
+
             current_val = float(
                 current_activations.get(neuron_idx, feature.get("activation", 0.0))
             )
+
             slider_key = f"slider_{neuron_idx}_{selected_user}"
+
             active_or_current_value = float(
                 existing_neuron_values.get(neuron_idx, current_val)
             )
@@ -559,7 +787,9 @@ Steer your preferences using this formula in the latent space:
             with col:
                 formatted_label = format_feature_id(neuron_idx, label)
                 st.markdown(f"**{formatted_label}**")
+
                 slider_col, learn_col = st.columns([5, 1])
+
                 with slider_col:
                     user_profile = st.slider(
                         "Set your preference:",
@@ -569,15 +799,13 @@ Steer your preferences using this formula in the latent space:
                         key=slider_key,
                         help="If you want to see more of this feature, move the slider to the right. If less, move it to the left.",
                     )
-                with learn_col:
-                    # Use st.switch_page with the stored page object and query params
 
+                with learn_col:
                     if st.button(
                         "📚",
                         key=f"learn_{neuron_idx}_{selected_user}",
                         help="Learn more about this feature",
                     ):
-                        # Store feature ID in session_state for interpretability page to read
                         st.session_state["selected_feature_id"] = neuron_idx
                         interpretability_page = st.session_state.get(
                             "_interpretability_page"
@@ -590,7 +818,7 @@ Steer your preferences using this formula in the latent space:
                 else:
                     merged_draft_values.pop(neuron_idx, None)
 
-                if len(existing_neuron_values) > 0:
+                if existing_neuron_values:
                     blended_activation = current_val
                     try:
                         blended_activation = inference.get_steered_neuron_activation(
@@ -600,45 +828,95 @@ Steer your preferences using this formula in the latent space:
                         )
                     except Exception:
                         logger.error("Could not compute blended activation.")
+
                     st.caption(
-                    (
                         f"📊 Activation: {current_val:.2f} → steered to: {blended_activation:.2f}"
                     )
-                )
-                    
                 else:
-                    st.caption(
-                    (
-                        f"📊 Activation: {current_val:.2f}"
-                    )
-                )
-                
+                    st.caption(f"📊 Activation: {current_val:.2f}")
+
+                base_cpr, current_cpr = cpr_values.get(neuron_idx, (None, None))
+
+                if selected_method in {"matrix-based", "weighted-category"}:
+                    if base_cpr is not None and current_cpr is not None:
+                        if active_config:
+                            st.caption(f"🎯 CPR: {base_cpr:.1%} → {current_cpr:.1%}")
+                        else:
+                            st.caption(f"🎯 CPR: {base_cpr:.1%}")
+                    elif base_cpr is not None:
+                        st.caption(f"🎯 CPR: {base_cpr:.1%}")
+                    else:
+                        st.caption("🎯 CPR: N/A")
+                else:
+                    st.caption("🎯 CPR: N/A")
 
     st.session_state[draft_key] = merged_draft_values
-
     st.session_state[sliders_sync_key] = False
 
+    if active_config:
+        try:
+            original_activations = inference.get_user_steering(selected_user)
+
+            original_features = [
+                {
+                    **feat,
+                    "activation": original_activations.get(feat["neuron_idx"], 0.0),
+                }
+                for feat in top_features
+            ]
+
+            steered_activations = inference.get_steered_activations(
+                selected_user,
+                active_config.get("neuron_values", {}),
+                k=len(top_features),
+            )
+
+            st.session_state[
+                _demo_state_key(selected_user, "feature_chart_original")
+            ] = original_features
+
+            st.session_state[
+                _demo_state_key(selected_user, "feature_chart_steered")
+            ] = steered_activations
+
+        except Exception as e:
+            logger.debug(f"Could not compute steered activations chart: {e}")
+    else:
+        st.session_state[
+            _demo_state_key(selected_user, "feature_chart_original")
+        ] = None
+        st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
 
 
-def _recompute_recommendations_shared(selected_user: str, inference, data) -> None:
+def _recompute_recommendations_shared(
+    selected_user: str,
+    inference,
+    data,
+    *,
+    render_diagnostics: bool = True,
+) -> None:
     try:
         steering_config = get_steering_config(st.session_state, selected_user)
         steering_hash_key = _demo_state_key(selected_user, "steering_hash")
         current_hash = steering_config_hash(steering_config)
         previous_hash = st.session_state.get(steering_hash_key, "")
         steering_changed = current_hash != previous_hash
+
         force = st.session_state.get(
             _demo_state_key(selected_user, "force_recompute"), False
         )
+
         base_cache_key = _demo_state_key(selected_user, "base_recommendations")
+        full_cache_key = _demo_state_key(selected_user, "full_recommendations")
+
         current_base = st.session_state.get(base_cache_key)
         valid_item_ids = data.get_valid_item_ids()
 
-        num_recommendations = st.session_state.get(
-            "display_num_recommendations", 12
-        )
+        num_recommendations = st.session_state.get("display_num_recommendations", 12)
+
         TOP_K = 50
         baseline_recommendations = current_base
+
         if baseline_recommendations is None:
             baseline_recommendations = inference.get_recommendations_with_delta(
                 selected_user,
@@ -648,78 +926,25 @@ def _recompute_recommendations_shared(selected_user: str, inference, data) -> No
             )
             st.session_state[base_cache_key] = baseline_recommendations
 
-        if steering_changed or current_base is None or force:
+        inference_steering = to_inference_config(steering_config)
+        needs_model_recompute = steering_changed or force or current_base is None
+
+        if needs_model_recompute:
             recommendations_with_delta = baseline_recommendations
-            inference_steering = to_inference_config(steering_config)
-            if inference_steering:
-                recommendations_with_delta = (
-                    inference.get_recommendations_with_delta(
-                        selected_user,
-                        steering_config=inference_steering,
-                        top_k=TOP_K,
-                        valid_item_ids=valid_item_ids,
-                    )
-                )
-
-            visible_recommendations = (
-                recommendations_with_delta or baseline_recommendations
-            )[:num_recommendations]
-
-            visible_indices = [
-                r.get("item_id") or r.get("poi_idx")
-                for r in visible_recommendations
-                if (r.get("item_id") or r.get("poi_idx")) is not None
-            ]
-
-            cached_poi_details = dict(
-                st.session_state.get(f"poi_details_map_{selected_user}", {}) or {}
-            )
-
-            missing_indices = [
-                idx for idx in visible_indices if idx not in cached_poi_details
-            ]
-            if missing_indices:
-                fetched = data.get_poi_details_batch(missing_indices)
-                cached_poi_details.update(fetched)
-
-            final_recommendations = []
-            for reco in recommendations_with_delta[:TOP_K]:
-                idx = reco.get("item_id") or reco.get("poi_idx")
-                if idx in cached_poi_details:
-                    final_recommendations.append(reco)
-                if len(final_recommendations) >= num_recommendations:
-                    break
-            valid_baseline = [
-                reco
-                for reco in baseline_recommendations
-                if (reco.get("item_id") or reco.get("poi_idx")) in cached_poi_details
-            ]
-
-            _set_demo_recommendation_state(
-                selected_user,
-                base_recommendations=valid_baseline,
-                steered_recommendations=(
-                    final_recommendations if inference_steering else []
-                ),
-                active_steering_config=steering_config,
-                poi_details_map=cached_poi_details,
-            )
-            st.session_state[_demo_state_key(selected_user, "full_recommendations")] = (
-                recommendations_with_delta
-            )
-            st.session_state[steering_hash_key] = current_hash
 
             if inference_steering:
-                up = sum(
-                    1 for r in final_recommendations if r.get("position_delta", 0) < 0
-                )
-                down = sum(
-                    1 for r in final_recommendations if r.get("position_delta", 0) > 0
-                )
-                flat = sum(
-                    1 for r in final_recommendations if r.get("position_delta", 0) == 0
+                recommendations_with_delta = inference.get_recommendations_with_delta(
+                    selected_user,
+                    steering_config=inference_steering,
+                    top_k=TOP_K,
+                    valid_item_ids=valid_item_ids,
                 )
 
+            full_recommendations = list(
+                (recommendations_with_delta or baseline_recommendations)[:TOP_K]
+            )
+
+            if inference_steering:
                 base_score_by_item = {
                     int(r.get("item_id") or r.get("poi_idx")): float(r.get("score", 0.0))
                     for r in valid_baseline
@@ -727,7 +952,7 @@ def _recompute_recommendations_shared(selected_user: str, inference, data) -> No
                 }
 
                 score_deltas = []
-                for r in final_recommendations:
+                for r in full_recommendations:
                     item_idx = r.get("item_id") or r.get("poi_idx")
                     if item_idx in base_score_by_item:
                         score_deltas.append(
@@ -765,7 +990,7 @@ def _recompute_recommendations_shared(selected_user: str, inference, data) -> No
                             selected_user=selected_user,
                             pending_payload=pending_eval,
                             baseline_recommendations=valid_baseline,
-                            steered_recommendations=final_recommendations,
+                            steered_recommendations=full_recommendations,
                         )
                         if steering_eval_rows:
                             append_steering_eval_rows(steering_eval_rows)
@@ -780,12 +1005,108 @@ def _recompute_recommendations_shared(selected_user: str, inference, data) -> No
                         "or current alpha is too low for rank reordering."
                     )
         else:
-            logger.debug("Using cached recommendations (steering unchanged)")
-            _set_demo_recommendation_state(
-                selected_user,
-                active_steering_config=steering_config,
+            full_recommendations = list(st.session_state.get(full_cache_key, []) or [])
+            if not full_recommendations:
+                full_recommendations = list(baseline_recommendations[:TOP_K])
+
+        cached_poi_details = dict(
+            st.session_state.get(f"poi_details_map_{selected_user}", {}) or {}
+        )
+
+        visible_indices = set(
+            _recommendation_item_ids(full_recommendations[:num_recommendations])
+        )
+        visible_indices.update(
+            _recommendation_item_ids(baseline_recommendations[:num_recommendations])
+        )
+
+        missing_indices = [
+            idx for idx in visible_indices if idx not in cached_poi_details
+        ]
+
+        if missing_indices:
+            fetched = data.get_poi_details_batch(missing_indices)
+            cached_poi_details.update(fetched)
+
+        valid_baseline = [
+            reco
+            for reco in baseline_recommendations
+            if (reco.get("item_id") or reco.get("poi_idx")) is not None
+        ]
+
+        _set_demo_recommendation_state(
+            selected_user,
+            base_recommendations=valid_baseline,
+            steered_recommendations=(
+                full_recommendations if inference_steering else []
+            ),
+            active_steering_config=steering_config,
+            poi_details_map=cached_poi_details,
+        )
+
+        st.session_state[full_cache_key] = full_recommendations
+        st.session_state[steering_hash_key] = current_hash
+
+        _ensure_cpr_cache(
+            selected_user=selected_user,
+            inference=inference,
+            data=data,
+            num_recommendations=num_recommendations,
+        )
+
+        if render_diagnostics and needs_model_recompute and inference_steering:
+            up = sum(1 for r in full_recommendations if r.get("position_delta", 0) < 0)
+            down = sum(
+                1 for r in full_recommendations if r.get("position_delta", 0) > 0
             )
+            flat = sum(
+                1 for r in full_recommendations if r.get("position_delta", 0) == 0
+            )
+
+            base_score_by_item = {
+                int(r.get("item_id") or r.get("poi_idx")): float(r.get("score", 0.0))
+                for r in valid_baseline
+                if (r.get("item_id") or r.get("poi_idx")) is not None
+            }
+
+            score_deltas = []
+            for r in full_recommendations:
+                item_idx = r.get("item_id") or r.get("poi_idx")
+                if item_idx in base_score_by_item:
+                    score_deltas.append(
+                        float(r.get("score", 0.0)) - base_score_by_item[item_idx]
+                    )
+
+            avg_delta = float(np.mean(score_deltas)) if score_deltas else 0.0
+
+            st.markdown("#### Steering Diagnostics")
+
+            provenance = dict((steering_config or {}).get("provenance") or {})
+            last_neuron_updates = int(provenance.get("last_apply_neuron_updates", 0))
+            last_concept_updates = int(provenance.get("last_apply_concept_updates", 0))
+
+            source_breakdown_part = ""
+            if last_neuron_updates or last_concept_updates:
+                source_breakdown_part = (
+                    "Source breakdown: "
+                    f"neuron {last_neuron_updates}, concept {last_concept_updates} | "
+                )
+
+            st.caption(
+                f"Changed features: {len(inference_steering.get('neuron_values', {}))} | "
+                f"{source_breakdown_part}"
+                f"Rank delta: up {up}, down {down}, unchanged {flat} | "
+                f"Avg score delta: {avg_delta:+.4f}"
+            )
+
+            if up == 0 and down == 0:
+                st.info(
+                    "No rank change in the visible top-K. This usually means target activations are close to baseline "
+                    "or current alpha is too low for rank reordering."
+                )
+
         st.session_state[_demo_state_key(selected_user, "force_recompute")] = False
+
     except Exception as e:
         st.error(f"Failed to generate recommendations: {e}")
         logger.exception("Recommendation generation failed")
@@ -801,6 +1122,8 @@ def _render_poi_cards_section(
     photo_height_px: int,
     filtered_recommendations: list,
     poi_details_map: dict = None,
+    selected_user: str | None = None,
+    inference=None,
 ) -> None:
     """Isolated POI cards display fragment.
 
@@ -812,22 +1135,84 @@ def _render_poi_cards_section(
                         If provided, uses cached details instead of fetching.
     """
     if filtered_recommendations:
-        st.subheader("🏆 Recommended for You")
+        visible_ndcg_k = len(filtered_recommendations)
+        title_col, metric_col, info_col = st.columns([3, 1.1, 0.25])
+        with title_col:
+            st.subheader("🏆 Recommended for You")
+        with metric_col:
+            if selected_user and inference is not None:
+                base_recommendations = list(
+                    st.session_state.get(
+                        _demo_state_key(selected_user, "base_recommendations"), []
+                    )
+                    or []
+                )
+                base_recommendations = base_recommendations[:visible_ndcg_k]
+                current_ndcg = _compute_live_ndcg(
+                    inference,
+                    selected_user,
+                    filtered_recommendations,
+                )
+                baseline_ndcg = _compute_live_ndcg(
+                    inference,
+                    selected_user,
+                    base_recommendations,
+                )
+                if current_ndcg is not None:
+                    if st.session_state.get("steering_modified"):
+                        st.metric(
+                            f"NDCG@{visible_ndcg_k}",
+                            f"{current_ndcg:.3f}",
+                            delta=_format_ndcg_delta(baseline_ndcg, current_ndcg),
+                        )
+                    else:
+                        st.metric(f"NDCG@{visible_ndcg_k}", f"{current_ndcg:.3f}")
+                else:
+                    st.caption(f"NDCG@{visible_ndcg_k}: N/A")
+        with info_col:
+            st.button(
+                "ℹ️",
+                key=f"rec_info_{selected_user or 'global'}",
+                help=(
+                    "NDCG@k compares the shown recommendations against the held-out test split, "
+                    "where k equals the number of visible recommendations. It is computed live for the currently selected user."
+                ),
+            )
 
         responsive_cards_per_row = max(1, available_width // card_width_px)
         cols = st.columns(responsive_cards_per_row)
 
+        cached_poi_details = dict(
+            poi_details_map
+            or st.session_state.get(f"poi_details_map_{selected_user}", {})
+            or {}
+        )
+        missing_indices = [
+            idx
+            for idx in [
+                r.get("item_id") or r.get("poi_idx") for r in filtered_recommendations
+            ]
+            if idx is not None and idx not in cached_poi_details
+        ]
+        if missing_indices and data is not None:
+            fetched = data.get_poi_details_batch(missing_indices)
+            cached_poi_details.update(fetched)
+            if selected_user:
+                st.session_state[
+                    f"poi_details_map_{selected_user}"
+                ] = cached_poi_details
+
         valid_card_rows = []
         for reco in filtered_recommendations:
             poi_idx = reco.get("item_id") or reco.get("poi_idx")
-            if poi_idx not in poi_details_map:
+            if poi_idx not in cached_poi_details:
                 logger.debug(
                     "Skipping POI card for idx=%s (missing in batch POI details map)",
                     poi_idx,
                 )
                 continue
 
-            poi_details = poi_details_map.get(poi_idx)
+            poi_details = cached_poi_details.get(poi_idx)
             if not poi_details:
                 continue
             valid_card_rows.append((reco, poi_details))
@@ -1023,7 +1408,9 @@ def _render_map_section(
                 map_cache_key = f"cached_folium_map_{selected_user}_{data_hash}"
                 # cleanup old cached maps for this user
                 cache_prefix = f"cached_folium_map_{selected_user}_"
-                existing_keys = [k for k in st.session_state if k.startswith(cache_prefix)]
+                existing_keys = [
+                    k for k in st.session_state if k.startswith(cache_prefix)
+                ]
 
                 if len(existing_keys) > 3:
                     for k in existing_keys[:-3]:
@@ -1326,7 +1713,7 @@ def show():
             activations = _render_active_features_section(
                 selected_user=selected_user,
                 inference=inference,
-                num_features = st.session_state["display_num_features_slider"]
+                num_features=st.session_state["display_num_features_slider"],
             )
         else:
             user_z = inference.user_latents[selected_user]
@@ -1359,10 +1746,13 @@ def show():
             inference=inference,
             activations=activations,
             steering_config=active_config,
+            num_recommendations=num_recommendations,
         )
 
         draft_neuron_values = dict(st.session_state.get(draft_key, {}) or {})
-        concept_draft_key = _demo_state_key(selected_user, "draft_concept_neuron_values")
+        concept_draft_key = _demo_state_key(
+            selected_user, "draft_concept_neuron_values"
+        )
         draft_concept_neuron_values = dict(
             st.session_state.get(concept_draft_key, {}) or {}
         )
@@ -1399,7 +1789,6 @@ def show():
             st.caption(
                 f"Pending alpha change: current {active_alpha:.2f} → new {global_alpha:.2f}."
             )
-
 
         apply_clicked, reset_clicked = _render_action_buttons(selected_user)
         if reset_clicked:
@@ -1519,11 +1908,22 @@ def show():
         # ===================================================================
         # Section 3: Shared Recommendations Compute Block
         # ===================================================================
-        _recompute_recommendations_shared(
-            selected_user=selected_user,
-            inference=inference,
-            data=data,
-        )
+        # Check if recommendations need recomputation (steering changed, or initial load)
+        steering_config = get_steering_config(st.session_state, selected_user)
+        steering_hash_key = _demo_state_key(selected_user, "steering_hash")
+        current_steering_hash = steering_config_hash(steering_config)
+        previous_steering_hash = st.session_state.get(steering_hash_key, "")
+        steering_changed_check = current_steering_hash != previous_steering_hash
+
+        # Only recompute if steering changed, initial load, or Apply was clicked
+        if steering_changed_check or not st.session_state.get(
+            _demo_state_key(selected_user, "displayed_recommendations")
+        ):
+            _recompute_recommendations_shared(
+                selected_user=selected_user,
+                inference=inference,
+                data=data,
+            )
 
         displayed_recommendations = st.session_state.get(
             _demo_state_key(selected_user, "displayed_recommendations"),
@@ -1555,6 +1955,8 @@ def show():
             poi_details_map=st.session_state.get(
                 f"poi_details_map_{selected_user}", {}
             ),
+            selected_user=selected_user,
+            inference=inference,
         )
 
         # ===================================================================
@@ -1814,9 +2216,7 @@ def build_folium_map(
         # Add in REVERSE order so rank 1 appears on top (last added = highest z-index)
         # When we enumerate(reversed(pois)), we iterate: worst→...→best
         # This means rank 1 (best) is added LAST, so it appears on top ✓
-        logger.info(
-            f"Adding {len(pois)} recommendation markers in REVERSE order (so rank 1 is added last = on top)"
-        )
+        logger.info(f"Adding {len(pois)} recommendation markers")
         logger.debug(
             f"First POI in list (best/rank1): {pois[0].get('name', 'unknown')}"
         )

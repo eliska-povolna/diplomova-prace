@@ -70,8 +70,12 @@ def _aggregate_superfeature_categories(superfeature_context: dict, wordcloud_ser
     for _member_id, metadata in _get_superfeature_member_metadata(
         superfeature_context, wordcloud_service
     ):
-        for category, activations in (metadata.get("category_weights", {}) or {}).items():
-            cleaned = [float(value) for value in activations if isinstance(value, (int, float))]
+        for category, activations in (
+            metadata.get("category_weights", {}) or {}
+        ).items():
+            cleaned = [
+                float(value) for value in activations if isinstance(value, (int, float))
+            ]
             if cleaned:
                 category_values[category].extend(cleaned)
 
@@ -160,9 +164,13 @@ def _aggregate_superfeature_top_items(
     return aggregated
 
 
-def _aggregate_superfeature_wordcloud_frequencies(superfeature_context: dict, wordcloud_service):
+def _aggregate_superfeature_wordcloud_frequencies(
+    superfeature_context: dict, wordcloud_service
+):
     frequencies = defaultdict(float)
-    for item in _aggregate_superfeature_categories(superfeature_context, wordcloud_service):
+    for item in _aggregate_superfeature_categories(
+        superfeature_context, wordcloud_service
+    ):
         frequencies[item["category"]] = item["total_activation"]
     return dict(frequencies)
 
@@ -555,7 +563,7 @@ def show():
 
     with col_chart:
         st.subheader("🔥 Top Activating Categories")
-        
+
         with st.expander("ℹ️ How is this calculated?", expanded=False):
             if superfeature_context is not None:
                 st.write(
@@ -623,7 +631,7 @@ def show():
 
     with col_wordcloud:
         st.subheader("☁️ Wordcloud")
-        
+
         with st.expander("ℹ️ How is this calculated?", expanded=False):
             if superfeature_context is not None:
                 st.write(
@@ -674,7 +682,7 @@ def show():
     # Top activating businesses section
     if wordcloud_service:
         st.subheader("🏢 Top Activating Businesses")
-        
+
         with st.expander("ℹ️ How is this calculated?", expanded=False):
             if superfeature_context is not None:
                 st.write(
@@ -717,9 +725,7 @@ def show():
                         st.caption(f"**{business_name}**")
                     with col_stats:
                         if superfeature_context is not None:
-                            st.caption(
-                                f"Σ={activation:.2f} (n={item['frequency']})"
-                            )
+                            st.caption(f"Σ={activation:.2f} (n={item['frequency']})")
                         else:
                             st.caption(f"σ={activation:.2f}")
             else:
@@ -755,7 +761,7 @@ def show():
 
         if coactivation_service and neuron_idx is not None:
             st.subheader("Related Features")
-            
+
             with st.expander("ℹ️ How is this calculated?", expanded=False):
                 st.write(
                     "**Frequently Co-Activated** = features that activate together with this neuron (positive correlation)\n\n"

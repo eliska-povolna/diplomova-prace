@@ -327,7 +327,7 @@ def build_concept_mapping_payload(
     return {
         "concepts": concepts,
         "tag_names": list(tag_names),
-        "tag_to_neuron_tfidf": tag_to_neuron_tfidf,
+        "tag_to_neuron_tfidf": tag_to_neuron_tfidf.tolist(),
         "top_concepts_per_neuron": top_concepts_per_neuron,
     }
 

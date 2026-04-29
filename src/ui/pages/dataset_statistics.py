@@ -24,7 +24,8 @@ def _parse_attribute_count(value: Any) -> Optional[int]:
 
     def count_non_empty(d: dict) -> int:
         return sum(
-            1 for v in d.values()
+            1
+            for v in d.values()
             if v is not None and not (isinstance(v, str) and not v.strip())
         )
 
@@ -38,6 +39,7 @@ def _parse_attribute_count(value: Any) -> Optional[int]:
 
         try:
             import ast
+
             parsed = ast.literal_eval(text)
         except Exception:
             return None
@@ -46,6 +48,7 @@ def _parse_attribute_count(value: Any) -> Optional[int]:
             return count_non_empty(parsed)
 
     return None
+
 
 def _word_count(value: Any) -> Optional[int]:
     if value is None:
@@ -322,7 +325,7 @@ def show() -> None:
     kpi_cols[1].metric("Users", f"{int(summary.get('n_users', 0)):,}")
     kpi_cols[2].metric("Items", f"{int(summary.get('n_items', 0)):,}")
     kpi_cols[3].metric("Interactions", f"{int(summary.get('n_interactions', 0)):,}")
-    density_pct = float(summary.get('density_pct', 0.0))
+    density_pct = float(summary.get("density_pct", 0.0))
     sparsity_pct = max(0.0, 100.0 - density_pct)
     kpi_cols[4].metric("Density (positive)", f"{density_pct:.4f}%")
     kpi_cols[5].metric("Sparsity", f"{sparsity_pct:.4f}%")
@@ -522,7 +525,10 @@ def show() -> None:
         box_col1, box_col2, box_col3 = st.columns(3)
 
         with box_col1:
-            if not sample_business_df.empty and "categories" in sample_business_df.columns:
+            if (
+                not sample_business_df.empty
+                and "categories" in sample_business_df.columns
+            ):
                 plot_df = sample_business_df.copy()
                 plot_df["category_count"] = plot_df["categories"].map(
                     lambda value: len(
@@ -548,7 +554,10 @@ def show() -> None:
                 st.info("No category distribution data.")
 
         with box_col2:
-            if not sample_business_df.empty and "attributes" in sample_business_df.columns:
+            if (
+                not sample_business_df.empty
+                and "attributes" in sample_business_df.columns
+            ):
                 plot_df = sample_business_df.copy()
                 plot_df["attribute_count"] = plot_df["attributes"].map(
                     _parse_attribute_count
@@ -569,9 +578,7 @@ def show() -> None:
                         "Attributes are not available in the current business sample."
                     )
             else:
-                st.info(
-                    "Attributes are not available in the current business sample."
-                )
+                st.info("Attributes are not available in the current business sample.")
 
         with box_col3:
             if not sample_review_df.empty and "text" in sample_review_df.columns:
