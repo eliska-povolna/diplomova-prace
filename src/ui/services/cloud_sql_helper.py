@@ -171,7 +171,11 @@ class CloudSQLHelper:
                 )
 
         except Exception as e:
-            logger.error(f"Failed to connect to Cloud SQL: {e}")
+            logger.error(f"❌ Cloud SQL connection failed:")
+            logger.error(f"   Instance: {self.instance_connection_name}")
+            logger.error(f"   Database: {self.database}")
+            logger.error(f"   User: {self.user}")
+            logger.error(f"   Error: {type(e).__name__}: {e}")
             raise
 
     def execute_query(self, query: str, params: Optional[Dict] = None) -> List[Dict]:

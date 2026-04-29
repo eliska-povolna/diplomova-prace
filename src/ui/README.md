@@ -155,6 +155,13 @@ scores = sae.decode(z_steered)
 - Lazy loading (only downloaded when viewed)
 - ~98% of businesses have at least one photo
 
+### Current Data & Cache Flow
+
+- `src/ui/services/data_service.py` loads POI metadata lazily and falls back from Cloud SQL to local DuckDB.
+- The service keeps model indices aligned with `item2index.pkl` from training, so recommendation and interpretation views refer to the same items.
+- `src/precompute_ui_cache.py` can generate cached word clouds, neuron statistics, and test user embeddings under `outputs/<run_id>/precomputed_ui_cache/`.
+- The UI reads the latest completed run’s outputs, not arbitrary intermediate files.
+
 #### Performance Targets
 
 - **Encoding latency**: ~0.15s per user
@@ -172,67 +179,3 @@ GOOGLE_API_KEY = "your_gemini_api_key"
 MODEL_CHECKPOINT_DIR = "outputs/20260326_093131/checkpoints"
 NEURON_LABELS_PATH = "outputs/neuron_labels.json"
 ```
-
----
-
-### 🧪 Testing
-
-**Manual Testing Checklist**:
-
-- [ ] App launches without errors: `streamlit run main.py`
-- [ ] All 4 pages render and are navigable
-- [ ] Home page displays correct dataset stats
-- [ ] Results page loads metrics or placeholder data
-- [ ] User dropdown populates (top 50 users)
-- [ ] Feature activation chart displays
-- [ ] Steering sliders update without lag
-- [ ] Map renders with POI markers
-- [ ] POI cards display photos + details
-- [ ] Interpretability page shows neuron labels
-- [ ] Feature browser works (0-63 neuron range)
-- [ ] Navigation buttons work across pages
-
----
-
-### 🐛 Troubleshooting
-
-**"Models not loading"**:
-1. Check `model_checkpoint_dir` path exists
-2. Verify `elsa_best.pt` + `sae_best.pt` in checkpoint folder
-3. Confirm PyTorch version compatibility
-
-**"POI data not loading"**:
-1. Verify DuckDB path: `duckdb_path`
-2. Check Parquet files exist in `parquet_dir`
-3. Run: `duckdb yelp.duckdb "SELECT COUNT(*) FROM read_parquet('...')"`
-
-**"Photos not displaying"**:
-1. Confirm `yelp_academic_dataset_business.json` has `photos` field
-2. Check network access to Yelp CDN
-3. Try opening URLs manually in browser
-
-**"Slow recommendations"**:
-1. Reduce `num_recommendations` (slider max)
-2. Check inference latency on "Results" tab
-3. Increase `steering_alpha` for faster steering
-
----
-
-### 📈 Future Enhancements
-
-- [ ] Export recommendations as CSV
-- [ ] User feedback loop (like/dislike)
-- [ ] A/B testing framework
-- [ ] Real-time metric updates
-- [ ] Multi-user session management
-- [ ] Feature relationship graph visualization
-- [ ] Hypothesis testing interface
-
----
-
-### 📚 References
-
-- **IMPLEMENTATION_PLAN.md**: Full architecture + code examples
-- **EasyStudy Integration**: steering algorithm source
-- **Notebook**: `notebooks/03_neuron_labeling_demo.ipynb`
-- **Model Code**: `src/models/sae_cf_model.py`

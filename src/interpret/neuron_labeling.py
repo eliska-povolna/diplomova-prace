@@ -1,15 +1,11 @@
-"""Neuron labeling and interpretation using multiple approaches.
-
-This module provides two complementary methods for interpreting neurons:
-1. Tag-based labeling: Direct analysis of business categories/tags
-2. LLM-based labeling: Using Gemini API for deeper semantic interpretation
-"""
+"""Neuron labeling and interpretation using multiple approaches."""
 
 from __future__ import annotations
 
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from typing import Optional
@@ -19,6 +15,17 @@ import torch
 from scipy.spatial.distance import cosine
 
 logger = logging.getLogger(__name__)
+
+STOP_CATEGORIES = {"Restaurants", "Food"}
+
+
+def _rank_categories(category_counts: dict, max_tags_per_neuron: int = 3) -> list[str]:
+    """Return top categories, preferring specific labels over generic stop categories."""
+    ranked = sorted(category_counts.items(), key=lambda x: x[1], reverse=True)
+    specific = [(cat, score) for cat, score in ranked if cat not in STOP_CATEGORIES]
+    chosen = specific if specific else ranked
+    return [tag for tag, _count in chosen[:max_tags_per_neuron]]
+
 
 # Try to import secrets helper for Streamlit integration
 try:
@@ -37,6 +44,12 @@ except ImportError:
     logger.warning(
         "google-generativeai not installed. Install with: pip install google-generativeai"
     )
+
+from src.utils.gemini_models import select_gemini_model
+from src.interpret.prompts import (
+    NEURON_LABEL_SYSTEM_PROMPT,
+    SUPERFEATURE_SYSTEM_PROMPT,
+)
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -85,11 +98,7 @@ class NeuronLabeler(ABC):
 
 
 class TagBasedLabeler(NeuronLabeler):
-    """Label neurons based on business categories and tags.
-
-    Analyzes the top categories/tags in max-activating businesses
-    and uses TF-IDF to find the most discriminative ones.
-    """
+    """Label neurons from activation-weighted business categories."""
 
     def __init__(
         self,
@@ -97,7 +106,7 @@ class TagBasedLabeler(NeuronLabeler):
         max_tags_per_neuron: int = 3,
         item_index_to_business_id: dict = None,
     ):
-        super().__init__("tag-based")
+        super().__init__("weighted-category")
         self.min_tag_frequency = min_tag_frequency
         self.max_tags_per_neuron = max_tags_per_neuron
         self.item_index_to_business_id = item_index_to_business_id or {}
@@ -144,9 +153,8 @@ class TagBasedLabeler(NeuronLabeler):
                 labels[neuron_idx] = "Unknown"
                 continue
 
-            # Extract categories and tags from max-activating items
+            # Extract activation-weighted categories from max-activating items
             category_counts = defaultdict(int)
-            tag_counts = defaultdict(int)
 
             for item_id, activation in max_items[:10]:  # Top 10
                 # Resolve item_id to business metadata
@@ -172,23 +180,12 @@ class TagBasedLabeler(NeuronLabeler):
                 for cat in meta.get("categories", []):
                     category_counts[cat] += activation
 
-                # Count tags
-                for tag in meta.get("tags", []):
-                    tag_counts[tag] += activation
-
-            # Combine and sort
-            all_tags = {**category_counts, **tag_counts}
-            if not all_tags:
+            if not category_counts:
                 labels[neuron_idx] = "Unknown"
                 continue
 
-            # Get top tags
-            top_tags = sorted(all_tags.items(), key=lambda x: x[1], reverse=True)[
-                : self.max_tags_per_neuron
-            ]
-
             # Create label
-            tag_names = [tag for tag, _count in top_tags]
+            tag_names = _rank_categories(category_counts, self.max_tags_per_neuron)
             label = " and ".join(tag_names)
             labels[neuron_idx] = label[:100]  # Limit length
 
@@ -204,10 +201,12 @@ class LLMBasedLabeler(NeuronLabeler):
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-1.5-flash",
-        temperature: float = 0.3,
+        model_name: Optional[str] = None,
+        temperature: float = 0.1,
         max_retries: int = 3,
         rate_limit_delay: float = 1.0,
+        progress_log_every: int = 25,
+        request_timeout_sec: float = 60.0,
     ):
         super().__init__("llm-based")
 
@@ -218,6 +217,8 @@ class LLMBasedLabeler(NeuronLabeler):
         self.temperature = temperature
         self.max_retries = max_retries
         self.rate_limit_delay = rate_limit_delay
+        self.progress_log_every = progress_log_every
+        self.request_timeout_sec = request_timeout_sec
 
         # Setup API
         if api_key is None:
@@ -234,7 +235,35 @@ class LLMBasedLabeler(NeuronLabeler):
             )
 
         genai.configure(api_key=api_key)
-        logger.info(f"Gemini API configured. Model: {model_name}")
+        self.model_name = select_gemini_model(genai, model_name)
+        logger.info(
+            "Gemini API configured. Model=%s timeout=%ss retries=%s",
+            self.model_name,
+            self.request_timeout_sec,
+            self.max_retries,
+        )
+
+    def _generate_content_with_timeout(self, model, user_message: str):
+        """Run Gemini generation with a hard timeout so labeling cannot hang silently."""
+
+        def _call():
+            return model.generate_content(
+                user_message,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=self.temperature,
+                    max_output_tokens=100,
+                ),
+            )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_call)
+            try:
+                return future.result(timeout=self.request_timeout_sec)
+            except FuturesTimeoutError as exc:
+                future.cancel()
+                raise TimeoutError(
+                    f"Gemini request exceeded {self.request_timeout_sec}s timeout"
+                ) from exc
 
     def _format_max_activating(
         self,
@@ -243,7 +272,10 @@ class LLMBasedLabeler(NeuronLabeler):
     ) -> str:
         """Format max-activating examples for the prompt."""
         lines = []
-        for i, (bid, activation) in enumerate(max_items[:5], 1):  # Top 5
+        detailed_items = max_items[:5]
+        additional_items = max_items[5:15]
+
+        for i, (bid, activation) in enumerate(detailed_items, 1):
             meta = business_metadata.get(bid, {})
 
             # If no metadata found and bid is an index, try looking it up by position
@@ -260,31 +292,21 @@ class LLMBasedLabeler(NeuronLabeler):
                 line += f"\n   Categories: {categories}"
             lines.append(line)
 
-        return "\n".join(lines)
+        if additional_items:
+            lines.append("\nAdditional high-activation places:")
+            for i, (bid, activation) in enumerate(additional_items, 1):
+                meta = business_metadata.get(bid, {})
+                if not meta and isinstance(bid, int):
+                    business_list = list(business_metadata.values())
+                    if 0 <= bid < len(business_list):
+                        meta = business_list[bid]
 
-    def _format_zero_activating(
-        self,
-        zero_items: list[str],
-        business_metadata: dict,
-    ) -> str:
-        """Format zero-activating examples for the prompt."""
-        lines = []
-        for i, bid in enumerate(zero_items[:5], 1):  # Top 5
-            meta = business_metadata.get(bid, {})
-
-            # If no metadata found and bid is an index, try looking it up by position
-            if not meta and isinstance(bid, int):
-                business_list = list(business_metadata.values())
-                if 0 <= bid < len(business_list):
-                    meta = business_list[bid]
-
-            name = meta.get("name", "Unknown")
-            categories = ", ".join(meta.get("categories", [])[:2])
-
-            line = f"{i}. {name}"
-            if categories:
-                line += f" ({categories})"
-            lines.append(line)
+                name = meta.get("name", "Unknown")
+                categories = ", ".join(meta.get("categories", [])[:3])
+                line = f"{i}. {name} ({activation:.4f})"
+                if categories:
+                    line += f" - {categories}"
+                lines.append(line)
 
         return "\n".join(lines)
 
@@ -292,47 +314,29 @@ class LLMBasedLabeler(NeuronLabeler):
         self,
         neuron_idx: int,
         max_examples_text: str,
-        zero_examples_text: str,
+        review_examples_text: str = "",
     ) -> Optional[str]:
         """Interpret a single neuron using Gemini."""
-
-        system_prompt = """You are a meticulous recommender systems researcher analyzing neurons in a Point-of-Interest (POI) recommendation model. Your task is to determine what semantic concept or behavior this neuron represents.
-
-INPUT: Two sets of POIs:
-1. Max Activating Examples: POIs that strongly activate this neuron
-2. Zero Activating Examples: POIs that don't activate this neuron
-
-YOUR TASK:
-1. Analyze max-activating examples for common themes, categories, or concepts
-2. Rule out concepts that also appear in zero-activating examples
-3. Use Occam's razor to identify the simplest explanation
-4. Summarize in 1-8 words
-
-OUTPUT FORMAT: LABEL: <your_label>
-Return ONLY the label, nothing else."""
 
         user_message = f"""
 Max-activating examples:
 {max_examples_text}
+"""
+        if review_examples_text:
+            user_message += f"""
 
-Zero-activating examples:
-{zero_examples_text}
+Representative user reviews:
+{review_examples_text}
 """
 
         for attempt in range(self.max_retries):
             try:
                 model = genai.GenerativeModel(
                     model_name=self.model_name,
-                    system_instruction=system_prompt,
+                    system_instruction=NEURON_LABEL_SYSTEM_PROMPT,
                 )
 
-                response = model.generate_content(
-                    user_message,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=self.temperature,
-                        max_output_tokens=100,
-                    ),
-                )
+                response = self._generate_content_with_timeout(model, user_message)
 
                 if response.text:
                     text = response.text.strip()
@@ -361,7 +365,21 @@ Zero-activating examples:
         """Label neurons using Gemini API."""
         labels = {}
 
-        for neuron_idx, profile in sorted(neuron_profiles.items()):
+        total = len(neuron_profiles)
+        successes = 0
+
+        logger.info(
+            "Starting %s labeling for %s neurons with Gemini model %s (timeout=%ss, retries=%s)",
+            self.name,
+            total,
+            self.model_name,
+            self.request_timeout_sec,
+            self.max_retries,
+        )
+
+        for position, (neuron_idx, profile) in enumerate(
+            sorted(neuron_profiles.items()), 1
+        ):
             # Support multiple data formats:
             # Format 1: {"max_activating": {"indices": [...], "activations": [...]}}
             # Format 2: {"max_activating": {"items": [...]}}
@@ -378,33 +396,170 @@ Zero-activating examples:
                 elif "items" in max_activating:
                     max_items = max_activating.get("items", [])
 
-            # Similar for zero_activating
-            zero_activating = profile.get("zero_activating", {})
-            zero_items = []
+            if not max_items:
+                labels[neuron_idx] = "Unknown"
+                continue
 
-            if isinstance(zero_activating, dict):
-                # Try indices first
-                if "indices" in zero_activating:
-                    zero_items = zero_activating.get("indices", [])
-                # Fall back to items format
-                elif "items" in zero_activating:
-                    zero_items = zero_activating.get("items", [])
+            max_text = self._format_max_activating(max_items, business_metadata)
+            neuron_start = time.perf_counter()
+            logger.info(
+                "[%s] Labeling neuron %s (%s/%s)...",
+                self.name,
+                neuron_idx,
+                position,
+                total,
+            )
+            label = self._interpret_single(neuron_idx, max_text)
+
+            if label:
+                labels[neuron_idx] = label
+                successes += 1
+            else:
+                labels[neuron_idx] = "Unknown"
+            elapsed = time.perf_counter() - neuron_start
+            logger.info(
+                "[%s] Neuron %s done in %.1fs -> %s",
+                self.name,
+                neuron_idx,
+                elapsed,
+                labels[neuron_idx],
+            )
+
+            if (
+                position == 1
+                or position == total
+                or position % self.progress_log_every == 0
+            ):
+                logger.info(
+                    "[%s] Progress %s/%s (%.1f%%) successes=%s failures=%s",
+                    self.name,
+                    position,
+                    total,
+                    100.0 * position / max(total, 1),
+                    successes,
+                    position - successes,
+                )
+
+            # Rate limiting
+            time.sleep(self.rate_limit_delay)
+
+        return labels
+
+
+class ReviewBasedLLMLabeler(LLMBasedLabeler):
+    """Label neurons using metadata plus top useful review snippets."""
+
+    def __init__(
+        self,
+        review_lookup: Optional[dict[str, list[dict]]] = None,
+        max_reviews_per_business: int = 2,
+        max_review_chars: int = 240,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.name = "llm-review-based"
+        self.review_lookup = review_lookup or {}
+        self.max_reviews_per_business = max_reviews_per_business
+        self.max_review_chars = max_review_chars
+
+    def _format_reviews(
+        self, max_items: list[tuple[str, float]], business_metadata: dict
+    ) -> str:
+        lines = []
+        for business_id, _activation in max_items[:5]:
+            business_key = str(business_id)
+            reviews = self.review_lookup.get(business_key, [])[
+                : self.max_reviews_per_business
+            ]
+            if not reviews:
+                continue
+
+            meta = business_metadata.get(business_key, {})
+            business_name = meta.get("name", business_key)
+            lines.append(f"{business_name}:")
+            for review in reviews:
+                text = str(review.get("text", "")).strip().replace("\n", " ")
+                if not text:
+                    continue
+                useful = review.get("useful", 0)
+                stars = review.get("stars")
+                clipped = text[: self.max_review_chars].strip()
+                suffix = "..." if len(text) > self.max_review_chars else ""
+                if stars is not None:
+                    lines.append(
+                        f'- Useful {useful}, Stars {stars}: "{clipped}{suffix}"'
+                    )
+                else:
+                    lines.append(f'- Useful {useful}: "{clipped}{suffix}"')
+        return "\n".join(lines)
+
+    def label_neurons(
+        self,
+        neuron_profiles: dict,
+        business_metadata: dict,
+    ) -> dict[int, str]:
+        labels = {}
+        total = len(neuron_profiles)
+        successes = 0
+        logger.info("Preparing review-enriched prompts for %s neurons", total)
+
+        for position, (neuron_idx, profile) in enumerate(
+            sorted(neuron_profiles.items()), 1
+        ):
+            # Parse max_items from various profile formats (reuse logic from LLMBasedLabeler)
+            max_activating = profile.get("max_activating", {})
+            if isinstance(max_activating, dict):
+                max_items = max_activating.get("items", [])
+            elif isinstance(max_activating, list):
+                max_items = max_activating
+            else:
+                max_items = []
 
             if not max_items:
                 labels[neuron_idx] = "Unknown"
                 continue
 
             max_text = self._format_max_activating(max_items, business_metadata)
-            zero_text = self._format_zero_activating(zero_items, business_metadata)
+            review_text = self._format_reviews(max_items, business_metadata)
 
-            label = self._interpret_single(neuron_idx, max_text, zero_text)
-
+            neuron_start = time.perf_counter()
+            logger.info(
+                "[%s] Labeling neuron %s (%s/%s)...",
+                self.name,
+                neuron_idx,
+                position,
+                total,
+            )
+            label = self._interpret_single(
+                neuron_idx,
+                max_text,
+                review_examples_text=review_text,
+            )
+            labels[neuron_idx] = label or "Unknown"
             if label:
-                labels[neuron_idx] = label
-            else:
-                labels[neuron_idx] = "Unknown"
-
-            # Rate limiting
+                successes += 1
+            elapsed = time.perf_counter() - neuron_start
+            logger.info(
+                "[%s] Neuron %s done in %.1fs -> %s",
+                self.name,
+                neuron_idx,
+                elapsed,
+                labels[neuron_idx],
+            )
+            if (
+                position == 1
+                or position == total
+                or position % self.progress_log_every == 0
+            ):
+                logger.info(
+                    "[%s] Progress %s/%s (%.1f%%) successes=%s failures=%s",
+                    self.name,
+                    position,
+                    total,
+                    100.0 * position / max(total, 1),
+                    successes,
+                    position - successes,
+                )
             time.sleep(self.rate_limit_delay)
 
         return labels
@@ -488,10 +643,18 @@ class SuperfeatureGenerator:
     def __init__(
         self,
         similarity_threshold: float = 0.7,
+        max_cluster_size: int = 25,
+        min_mean_similarity: Optional[float] = None,
         api_key: Optional[str] = None,
-        model_name: str = "gemini-1.5-flash",
+        model_name: Optional[str] = None,
     ):
         self.similarity_threshold = similarity_threshold
+        self.max_cluster_size = max_cluster_size
+        self.min_mean_similarity = (
+            min_mean_similarity
+            if min_mean_similarity is not None
+            else min(0.95, similarity_threshold + 0.08)
+        )
 
         if not HAS_GEMINI:
             raise ImportError("google-generativeai not installed")
@@ -507,7 +670,7 @@ class SuperfeatureGenerator:
             raise ValueError("Gemini API key not found")
 
         genai.configure(api_key=api_key)
-        self.model_name = model_name
+        self.model_name = select_gemini_model(genai, model_name)
 
     def cluster_neurons(
         self,
@@ -532,12 +695,28 @@ class SuperfeatureGenerator:
         clusters = {}
         cluster_id = 0
 
+        def _mean_cluster_similarity(cluster_positions: list[int]) -> float:
+            if len(cluster_positions) < 2:
+                return 1.0
+            values = []
+            for left in range(len(cluster_positions)):
+                for right in range(left + 1, len(cluster_positions)):
+                    values.append(
+                        float(
+                            similarity_matrix[
+                                cluster_positions[left], cluster_positions[right]
+                            ]
+                        )
+                    )
+            return float(np.mean(values)) if values else 1.0
+
         for i, neuron_a in enumerate(neuron_indices):
             if i in clustered:
                 continue
 
             # Start new cluster
             cluster = [neuron_a]
+            cluster_positions = [i]
             clustered.add(i)
 
             # Find similar neurons
@@ -547,9 +726,29 @@ class SuperfeatureGenerator:
 
                 if similarity_matrix[i, j] >= self.similarity_threshold:
                     cluster.append(neuron_b)
+                    cluster_positions.append(j)
                     clustered.add(j)
 
             if len(cluster) >= 2:  # Only save clusters with 2+ neurons
+                if len(cluster) > self.max_cluster_size:
+                    logger.info(
+                        "Skipping broad superfeature cluster seeded by neuron %s (%s neurons > max %s)",
+                        neuron_a,
+                        len(cluster),
+                        self.max_cluster_size,
+                    )
+                    continue
+
+                mean_similarity = _mean_cluster_similarity(cluster_positions)
+                if mean_similarity < self.min_mean_similarity:
+                    logger.info(
+                        "Skipping low-coherence superfeature cluster seeded by neuron %s (mean similarity %.3f < %.3f)",
+                        neuron_a,
+                        mean_similarity,
+                        self.min_mean_similarity,
+                    )
+                    continue
+
                 clusters[cluster_id] = sorted(cluster)
                 cluster_id += 1
 
@@ -574,24 +773,19 @@ class SuperfeatureGenerator:
         if len(similar_labels) < 2:
             return None
 
-        system_prompt = """You are a recommender systems expert. Given a group of related semantic labels, find an abstract overarching concept that represents them.
-
-OUTPUT FORMAT: SUPERLABEL: <label>
-Return ONLY the super-label (1-5 words), nothing else."""
-
         label_list = "- " + "\n- ".join(similar_labels)
         user_message = f"Labels to synthesize:\n{label_list}"
 
         try:
             model = genai.GenerativeModel(
                 model_name=self.model_name,
-                system_instruction=system_prompt,
+                system_instruction=SUPERFEATURE_SYSTEM_PROMPT,
             )
 
             response = model.generate_content(
                 user_message,
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
+                    temperature=0.1,
                     max_output_tokens=50,
                 ),
             )
@@ -629,8 +823,10 @@ Return ONLY the super-label (1-5 words), nothing else."""
             {superfeature_id: {"neurons": [...], "label": str}}
         """
         superfeatures = {}
+        total = len(clusters)
+        logger.info("Starting Gemini superfeature naming for %s clusters", total)
 
-        for cluster_id, neuron_list in clusters.items():
+        for position, (cluster_id, neuron_list) in enumerate(clusters.items(), 1):
             similar_labels = [labels[nid] for nid in neuron_list]
             superlabel = self.generate_superlabel(similar_labels)
 
@@ -643,6 +839,13 @@ Return ONLY the super-label (1-5 words), nothing else."""
                 logger.info(
                     f"Superfeature {cluster_id}: {superlabel} "
                     f"({len(neuron_list)} neurons)"
+                )
+            if position == 1 or position == total or position % 10 == 0:
+                logger.info(
+                    "[superfeatures] Progress %s/%s (%.1f%%)",
+                    position,
+                    total,
+                    100.0 * position / max(total, 1),
                 )
 
         return superfeatures

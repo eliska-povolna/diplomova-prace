@@ -7,6 +7,7 @@ that maximally activate each neuron.
 
 import json
 import logging
+import pickle
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,19 @@ try:
     HAS_WORDCLOUD = True
 except ImportError:
     HAS_WORDCLOUD = False
+
+# Conditional Streamlit import for caching
+try:
+    from streamlit import cache_data
+
+    HAS_STREAMLIT = True
+except ImportError:
+    HAS_STREAMLIT = False
+
+    # Dummy decorator for non-Streamlit contexts
+    def cache_data(func):
+        return func
+
 
 logger = logging.getLogger(__name__)
 
@@ -67,24 +81,84 @@ class WordcloudService:
             logger.error(f"Failed to load category metadata: {e}")
 
     def _load_labels(self, labels_path: Path):
-        """Load neuron labels from JSON file."""
+        """Load neuron labels from a file or a labels artifact directory.
+
+        Supported inputs:
+        - JSON file (`neuron_labels.json`, `labels.json`, etc.)
+        - Pickle file (`labels_*.pkl`)
+        - Directory containing run-scoped label artifacts (`neuron_interpretations/`)
+        """
         if not labels_path.exists():
             logger.warning(f"Labels not found: {labels_path}")
             return
 
+        if labels_path.is_dir():
+            self._load_labels_from_directory(labels_path)
+            return
+
         try:
-            with open(labels_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            if labels_path.suffix.lower() == ".pkl":
+                with open(labels_path, "rb") as f:
+                    data = pickle.load(f)
+            else:
+                with open(labels_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
             # Handle both flat dict and nested "neuron_labels" structure
-            if "neuron_labels" in data:
+            if isinstance(data, dict) and "neuron_labels" in data:
                 self.labels = data["neuron_labels"]
+            elif isinstance(data, dict) and "methods" in data:
+                methods = data.get("methods") or {}
+                selected_method = str(
+                    data.get("selected_method") or "weighted-category"
+                )
+                selected_payload = methods.get(selected_method)
+                if selected_payload is None and methods:
+                    selected_payload = next(iter(methods.values()))
+                if isinstance(selected_payload, dict):
+                    self.labels = {str(k): str(v) for k, v in selected_payload.items()}
+                else:
+                    self.labels = {}
             else:
-                self.labels = data
+                self.labels = (
+                    {str(k): str(v) for k, v in data.items()}
+                    if isinstance(data, dict)
+                    else {}
+                )
 
             logger.info(f"Loaded labels for {len(self.labels)} neurons")
         except Exception as e:
             logger.error(f"Failed to load labels: {e}")
+
+    def _load_labels_from_directory(self, labels_dir: Path) -> None:
+        """Load labels from a run-scoped neuron_interpretations directory."""
+        # Preferred order: explicit JSON summary, then weighted-category PKL, then first PKL.
+        candidates: List[Path] = []
+        for filename in ("neuron_labels.json", "labels.json"):
+            candidate = labels_dir / filename
+            if candidate.exists():
+                candidates.append(candidate)
+
+        weighted_pkl = labels_dir / "labels_weighted-category.pkl"
+        if weighted_pkl.exists():
+            candidates.append(weighted_pkl)
+
+        for pkl_file in sorted(labels_dir.glob("labels_*.pkl")):
+            if pkl_file not in candidates:
+                candidates.append(pkl_file)
+
+        if not candidates:
+            logger.warning("No label artifacts found in %s", labels_dir)
+            return
+
+        for candidate in candidates:
+            before = len(self.labels)
+            self._load_labels(candidate)
+            if len(self.labels) > 0:
+                logger.info("Loaded labels from %s", candidate)
+                return
+            if len(self.labels) == before:
+                continue
 
     def get_neuron_label(self, neuron_id: int) -> str:
         """Get readable label for a neuron."""
@@ -117,13 +191,22 @@ class WordcloudService:
         self, neuron_id: int, top_k: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Get top categories by average activation strength.
+        Get top categories by total activation strength (sum, not average).
 
-        Returns list of dicts with category name, average activation strength,
-        frequency, and activation range.
+        This uses the same aggregation as weighted-category labeling:
+        categories are ranked by their total activation contribution.
+
+        Returns list of dicts with:
+        - category: name
+        - total_activation: sum of activations where this category appeared
+        - avg_activation: mean activation (for display/comparison)
+        - frequency: number of items with this category
+        - max_activation: highest single item activation
+        - min_activation: lowest single item activation
         """
         metadata = self.category_metadata.get(str(neuron_id), {})
         category_weights = metadata.get("category_weights", {})
+        category_sums = metadata.get("category_sums", {})
 
         if not category_weights:
             return []
@@ -132,12 +215,14 @@ class WordcloudService:
         categories_with_stats = []
         for category, activations in category_weights.items():
             if activations:
-                avg_strength = sum(activations) / len(activations)
+                total_activation = sum(activations)
+                avg_strength = total_activation / len(activations)
                 max_strength = max(activations)
                 min_strength = min(activations)
                 categories_with_stats.append(
                     {
                         "category": category,
+                        "total_activation": float(total_activation),
                         "avg_activation": float(avg_strength),
                         "max_activation": float(max_strength),
                         "min_activation": float(min_strength),
@@ -145,8 +230,9 @@ class WordcloudService:
                     }
                 )
 
-        # Sort by average activation strength (descending)
-        categories_with_stats.sort(key=lambda x: x["avg_activation"], reverse=True)
+        # Sort by TOTAL activation strength (sum), not average
+        # This is consistent with weighted-category labeling
+        categories_with_stats.sort(key=lambda x: x["total_activation"], reverse=True)
 
         logger.debug(
             f"Neuron {neuron_id}: found {len(categories_with_stats)} categories with activation data"
@@ -241,7 +327,56 @@ class WordcloudService:
             logger.error(f"Failed to generate wordcloud: {e}")
             return None
 
-    def generate_wordcloud_fig(self, neuron_id: int, figsize: tuple = (8, 6), **kwargs):
+    def generate_wordcloud_from_frequencies(
+        self,
+        frequencies: Dict[str, float],
+        title: str = "Feature Summary",
+        figsize: tuple = (8, 6),
+        width: int = 400,
+        height: int = 300,
+        background_color: str = "white",
+        colormap: str = "viridis",
+    ):
+        """Generate a wordcloud figure from a precomputed frequency mapping."""
+        if not HAS_WORDCLOUD:
+            logger.warning("wordcloud library not installed")
+            return None
+
+        cleaned_frequencies = {
+            str(category): max(1.0, float(weight))
+            for category, weight in (frequencies or {}).items()
+            if weight is not None and float(weight) > 0
+        }
+        if not cleaned_frequencies:
+            logger.debug("No frequencies provided for wordcloud generation")
+            return None
+
+        try:
+            import matplotlib.pyplot as plt
+
+            wc = WordCloud(
+                width=width,
+                height=height,
+                background_color=background_color,
+                colormap=colormap,
+                relative_scaling=0.5,
+                min_font_size=8,
+            ).generate_from_frequencies(cleaned_frequencies)
+
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.imshow(wc, interpolation="bilinear")
+            ax.set_axis_off()
+            ax.set_title(title, fontsize=14, fontweight="bold", pad=20)
+            plt.tight_layout()
+            return fig
+        except Exception as e:
+            logger.error(f"Failed to generate wordcloud from frequencies: {e}")
+            return None
+
+    @cache_data
+    def generate_wordcloud_fig(
+        _self, neuron_id: int, figsize: tuple = (8, 6), **kwargs
+    ):
         """
         Generate matplotlib figure with wordcloud.
 
@@ -255,7 +390,7 @@ class WordcloudService:
         """
         import matplotlib.pyplot as plt
 
-        wc = self.generate_wordcloud(neuron_id, **kwargs)
+        wc = _self.generate_wordcloud(neuron_id, **kwargs)
         if wc is None:
             return None
 
@@ -264,7 +399,7 @@ class WordcloudService:
         ax.set_axis_off()
 
         # Add title with neuron label
-        label = self.get_neuron_label(neuron_id)
+        label = _self.get_neuron_label(neuron_id)
         ax.set_title(
             f"Feature {neuron_id}: {label}", fontsize=14, fontweight="bold", pad=20
         )

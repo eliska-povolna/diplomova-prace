@@ -13,13 +13,13 @@ Supports multiple credential sources:
 
 Usage:
     from src.ui.services.gemini_labeling_service import GeminiLabelingService
-    
+
     # Auto-detects credentials:
     labeler = GeminiLabelingService()
-    
+
     # Or explicitly provide API key:
     labeler = GeminiLabelingService(api_key="your-key")
-    
+
     labels = labeler.label_neurons_with_verification(neurons_data)
 """
 
@@ -46,6 +46,7 @@ from .secrets_helper import (
     get_gcp_project,
     get_gcp_region,
 )
+from src.utils.gemini_models import select_gemini_model
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ logger = logging.getLogger(__name__)
 class GeminiLabelingService:
     """Service for AI-powered neuron labeling with verification."""
 
-    def __init__(self, api_key: Optional[str] = None, model: str = "gemini-1.5-flash"):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         """
         Initialize Gemini labeling service.
 
@@ -77,9 +78,11 @@ class GeminiLabelingService:
         if self.api_key:
             try:
                 genai.configure(api_key=self.api_key)
-                self.model = genai.GenerativeModel(model)
-                self.model_name = model
-                logger.info(f"✅ Initialized Gemini with direct API key using {model}")
+                self.model_name = select_gemini_model(genai, model)
+                self.model = genai.GenerativeModel(self.model_name)
+                logger.info(
+                    f"✅ Initialized Gemini with direct API key using {self.model_name}"
+                )
                 return
             except Exception as e:
                 logger.warning(f"Failed to init Gemini with API key: {e}")
@@ -98,10 +101,10 @@ class GeminiLabelingService:
                     # Import and use Vertex AI Generative models
                     from vertexai.generative_models import GenerativeModel
 
-                    self.model = GenerativeModel(model)
-                    self.model_name = model
+                    self.model_name = model or "gemini-2.5-flash-lite"
+                    self.model = GenerativeModel(self.model_name)
                     self.use_vertex_ai = True
-                    msg = f"✅ Initialized Gemini via Vertex AI ({project_id}) using {model}"
+                    msg = f"✅ Initialized Gemini via Vertex AI ({project_id}) using {self.model_name}"
                     logger.info(msg)
                     return
             except Exception as e:
@@ -110,9 +113,9 @@ class GeminiLabelingService:
         # Fallback: Try with Application Default Credentials and genai
         try:
             genai.configure(api_key=None)  # Uses Application Default Credentials
-            self.model = genai.GenerativeModel(model)
-            self.model_name = model
-            msg = f"✅ Initialized Gemini with Application Default Credentials using {model}"
+            self.model_name = select_gemini_model(genai, model)
+            self.model = genai.GenerativeModel(self.model_name)
+            msg = f"✅ Initialized Gemini with Application Default Credentials using {self.model_name}"
             logger.info(msg)
             return
         except Exception as e:

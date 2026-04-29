@@ -3,8 +3,10 @@
 import json
 import logging
 import os
+import pickle
+import mimetypes
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 try:
     from google.cloud import storage
@@ -161,6 +163,49 @@ class CloudStorageHelper:
             logger.error(f"Failed to upload {local_path} to GCS: {e}")
             return False
 
+    def upload_file(
+        self,
+        local_path: str,
+        gcs_path: str,
+        content_type: Optional[str] = None,
+        metadata: Optional[Dict] = None,
+    ) -> bool:
+        """Upload an arbitrary file to GCS.
+
+        Args:
+            local_path: Local file path
+            gcs_path: Destination object path in bucket
+            content_type: Optional MIME type override
+            metadata: Optional object metadata
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            source_path = Path(local_path)
+            if not source_path.exists() or not source_path.is_file():
+                logger.error(f"Local file does not exist: {source_path}")
+                return False
+
+            if content_type is None:
+                guessed_type, _ = mimetypes.guess_type(str(source_path))
+                content_type = guessed_type or "application/octet-stream"
+
+            blob = self.bucket.blob(gcs_path)
+            blob.upload_from_filename(str(source_path), content_type=content_type)
+
+            if metadata:
+                blob.metadata = metadata
+                blob.patch()
+
+            logger.info(
+                f"✅ Uploaded {source_path.name} → gs://{self.bucket_name}/{gcs_path}"
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to upload {local_path} to GCS: {e}")
+            return False
+
     def download_json(self, gcs_path: str, local_path: Optional[Path] = None) -> Dict:
         """
         Download and parse JSON file from GCS.
@@ -193,6 +238,35 @@ class CloudStorageHelper:
         """Read JSON from GCS without saving locally."""
         return self.download_json(gcs_path)
 
+    def read_pickle(self, gcs_path: str) -> Any:
+        """
+        Download and unpickle binary object from GCS.
+
+        ⚠️ SECURITY WARNING: Unpickling untrusted data can execute arbitrary code.
+        Only use this method with pickles from trusted sources (e.g., your own precomputed files).
+
+        For untrusted data, use safe alternatives like JSON or Parquet instead.
+        If pickles must be used, ensure:
+        - Bucket has restricted IAM permissions (only your app can write)
+        - Object versioning is enabled to prevent tampering
+        - Files are checksummed/signed before use
+
+        Args:
+            gcs_path: GCS path to pickle file
+
+        Returns:
+            Unpickled Python object (or None on error)
+        """
+        try:
+            blob = self.bucket.blob(gcs_path)
+            content = blob.download_as_bytes()
+            data = pickle.loads(content)
+            logger.info(f"✅ Downloaded pickle from {gcs_path}")
+            return data
+        except Exception as e:
+            logger.error(f"Failed to download pickle from {gcs_path}: {e}")
+            return None
+
     def list_files(self, prefix: str = "") -> list:
         """List all files in GCS bucket with optional prefix."""
         try:
@@ -221,3 +295,51 @@ class CloudStorageHelper:
         except Exception as e:
             logger.warning(f"Error checking existence of {gcs_path}: {e}")
             return False
+
+    def get_photo_url(self, gcs_path: str, expiration_hours: int = 24) -> Optional[str]:
+        """
+        Get a signed URL for a photo in GCS (valid for specified hours).
+
+        Args:
+            gcs_path: GCS path to photo (e.g., 'photos/photo_id.jpg')
+            expiration_hours: URL expiration time in hours (default 24)
+
+        Returns:
+            Signed URL string or None if photo doesn't exist
+        """
+        try:
+            blob = self.bucket.blob(gcs_path)
+            if not blob.exists():
+                return None
+
+            from datetime import timedelta
+
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(hours=expiration_hours),
+                method="GET",
+            )
+            logger.debug(f"Generated signed URL for {gcs_path}")
+            return url
+        except Exception as e:
+            logger.error(f"Failed to generate signed URL for {gcs_path}: {e}")
+            return None
+
+    def download_photo_bytes(self, gcs_path: str) -> Optional[bytes]:
+        """
+        Download photo bytes from GCS (useful for Streamlit st.image()).
+
+        Args:
+            gcs_path: GCS path to photo
+
+        Returns:
+            Photo bytes or None if failed
+        """
+        try:
+            blob = self.bucket.blob(gcs_path)
+            photo_bytes = blob.download_as_bytes()
+            logger.debug(f"Downloaded photo bytes from {gcs_path}")
+            return photo_bytes
+        except Exception as e:
+            logger.error(f"Failed to download photo from {gcs_path}: {e}")
+            return None

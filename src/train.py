@@ -1,7 +1,7 @@
 """Training entry point for ELSA + TopK SAE POI recommender.
 
 Pipeline:
-  1. Load Yelp review/business data from Parquet via DuckDB
+    1. Load Yelp review/business data from DuckDB
   2. Build CSR matrix from interactions
   3. Train ELSA model on CSR matrix
   4. Encode users with ELSA (frozen), get latent vectors
@@ -16,24 +16,1067 @@ Usage
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
+import os
+import pickle
+import subprocess
+import sys
+import time
+import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Optional
 
 import numpy as np
+import yaml
 import torch
 import torch.optim as optim
+from scipy.sparse import csr_matrix
 from sklearn.model_selection import train_test_split
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, TensorDataset
 
-from src.data.preprocessing import apply_kcore_filtering, build_csr
-from src.data.yelp_loader import load_businesses, load_reviews
+from src.data.shared_preprocessing_cache import (
+    build_preprocessing_cache_key,
+    get_shared_preprocessing_cache_dir,
+    prepare_shared_preprocessing_cache,
+    shared_preprocessing_manifest_path,
+)
+from src.data.run_artifacts import build_shared_data_manifest, shared_data_manifest_path
 from src.models.collaborative_filtering import ELSA, NMSELoss
 from src.models.sparse_autoencoder import TopKSAE
-from src.utils import CheckpointManager, Config, load_config, setup_logger
+from src.run_registry import RunRegistry, create_run_id, write_latest_run_pointer
+from src.ui.services.secrets_helper import get_cloud_storage_bucket
+from src.utils import (
+    CheckpointManager,
+    Config,
+    build_dataloader_generator,
+    load_config,
+    set_global_reproducibility,
+    setup_logger,
+)
+from src.utils.evaluation import (
+    build_holdout_split_sparse,
+    compare_model_performance,
+    compute_coverage,
+    compute_holdout_diagnostics,
+    compute_score_diagnostics,
+    compute_entropy,
+    evaluate_recommendations_batched,
+    benchmark_inference,
+    print_evaluation_report,
+    save_holdout_split_artifacts,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _load_yaml_dict(path: str | Path) -> dict:
+    path = Path(path)
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"YAML config must be a dictionary: {path}")
+    return data
+
+
+def _deep_merge_dict(base: dict, override: dict) -> dict:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _expand_sweep_dict(mapping: dict) -> list[dict]:
+    """Expand a dict with list-valued leaves into a cartesian product of variants."""
+
+    def _expand_node(node):
+        if isinstance(node, dict):
+            variants = [{}]
+            for key, value in node.items():
+                child_variants = _expand_node(value)
+                next_variants = []
+                for current in variants:
+                    for child in child_variants:
+                        combined = copy.deepcopy(current)
+                        combined[key] = copy.deepcopy(child)
+                        next_variants.append(combined)
+                variants = next_variants
+            return variants
+
+        if isinstance(node, list):
+            return [copy.deepcopy(item) for item in node]
+
+        return [copy.deepcopy(node)]
+
+    return _expand_node(mapping)
+
+
+def _write_experiment_pointer(experiment_dir: Path) -> Path:
+    pointer_path = Path.cwd() / "outputs" / "LATEST_EXPERIMENT.txt"
+    pointer_path.parent.mkdir(parents=True, exist_ok=True)
+    pointer_path.write_text(str(experiment_dir), encoding="utf-8")
+    logger.info(
+        f"Latest experiment pointer updated: {pointer_path} -> {experiment_dir}"
+    )
+    return pointer_path
+
+
+def _save_yaml(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+
+
+def _build_elsa_signature(config_dict: dict) -> str:
+    """Build a stable signature for deciding whether ELSA can be reused."""
+    elsa = config_dict.get("elsa", {})
+    signature = {
+        "preprocessing_cache_key": build_preprocessing_cache_key(config_dict),
+        "latent_dim": elsa.get("latent_dim"),
+        "learning_rate": elsa.get("learning_rate"),
+        "batch_size": elsa.get("batch_size"),
+        "num_epochs": elsa.get("num_epochs"),
+        "patience": elsa.get("patience"),
+        "weight_decay": elsa.get("weight_decay"),
+        "seed": config_dict.get("data", {}).get("seed"),
+    }
+    return json.dumps(signature, sort_keys=True)
+
+
+def _load_checkpoint_payload(checkpoint_path: Path) -> dict[str, Any]:
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict) or "model_state_dict" not in payload:
+        raise ValueError(f"Invalid checkpoint format: {checkpoint_path}")
+    return payload
+
+
+def _iter_candidate_output_runs(outputs_dir: Path) -> list[Path]:
+    if not outputs_dir.exists():
+        return []
+    runs = []
+    for path in outputs_dir.iterdir():
+        if path.is_dir() and len(path.name) == 15 and path.name[8] == "_":
+            runs.append(path)
+    return sorted(runs, key=lambda p: p.name, reverse=True)
+
+
+def _resolve_elsa_checkpoint_path(
+    args: argparse.Namespace,
+    *,
+    config: Config,
+    expected_n_items: int,
+) -> Path:
+    if args.elsa_checkpoint:
+        checkpoint_path = Path(args.elsa_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"--elsa-checkpoint does not exist: {checkpoint_path}"
+            )
+        payload = _load_checkpoint_payload(checkpoint_path)
+        metadata = payload.get("metadata", {}) or {}
+        n_items_meta = metadata.get("n_items")
+        latent_dim_meta = metadata.get("latent_dim")
+        expected_latent_dim = int(config["elsa"]["latent_dim"])
+        if n_items_meta not in (None, expected_n_items):
+            raise RuntimeError(
+                f"ELSA checkpoint n_items mismatch: expected {expected_n_items}, found {n_items_meta} in {checkpoint_path}"
+            )
+        if latent_dim_meta not in (None, expected_latent_dim):
+            raise RuntimeError(
+                f"ELSA checkpoint latent_dim mismatch: expected {expected_latent_dim}, found {latent_dim_meta} in {checkpoint_path}"
+            )
+        return checkpoint_path
+
+    outputs_dir = Path(config["output"]["base_dir"])
+    expected_latent_dim = int(config["elsa"]["latent_dim"])
+    for run_dir in _iter_candidate_output_runs(outputs_dir):
+        checkpoint_path = run_dir / "checkpoints" / "elsa_best.pt"
+        if not checkpoint_path.exists():
+            continue
+        try:
+            payload = _load_checkpoint_payload(checkpoint_path)
+            metadata = payload.get("metadata", {}) or {}
+            n_items_meta = metadata.get("n_items")
+            latent_dim_meta = metadata.get("latent_dim")
+            if n_items_meta not in (None, expected_n_items):
+                continue
+            if latent_dim_meta not in (None, expected_latent_dim):
+                continue
+            logger.info(
+                "Resolved reusable ELSA checkpoint: %s (n_items=%s, latent_dim=%s)",
+                checkpoint_path,
+                n_items_meta,
+                latent_dim_meta,
+            )
+            return checkpoint_path
+        except Exception as e:
+            logger.debug(
+                "Skipping incompatible ELSA checkpoint %s: %s", checkpoint_path, e
+            )
+
+    raise FileNotFoundError(
+        "Could not resolve a compatible ELSA checkpoint for --skip-elsa. "
+        f"Expected n_items={expected_n_items}, latent_dim={expected_latent_dim}. "
+        "Provide --elsa-checkpoint explicitly or run one full training first."
+    )
+
+
+def _load_elsa_from_checkpoint(
+    *,
+    checkpoint_path: Path,
+    config: Config,
+    n_items: int,
+    checkpoint_mgr: CheckpointManager,
+    device: str,
+) -> tuple[ELSA, float, dict]:
+    elsa_cfg = config["elsa"]
+    model = ELSA(n_items, latent_dim=int(elsa_cfg["latent_dim"])).to(device)
+    payload = _load_checkpoint_payload(checkpoint_path)
+    metadata = payload.get("metadata", {}) or {}
+    n_items_meta = metadata.get("n_items")
+    latent_dim_meta = metadata.get("latent_dim")
+    if n_items_meta not in (None, n_items):
+        raise RuntimeError(
+            f"ELSA checkpoint n_items mismatch: expected {n_items}, found {n_items_meta} in {checkpoint_path}"
+        )
+    if latent_dim_meta not in (None, int(elsa_cfg["latent_dim"])):
+        raise RuntimeError(
+            f"ELSA checkpoint latent_dim mismatch: expected {elsa_cfg['latent_dim']}, found {latent_dim_meta} in {checkpoint_path}"
+        )
+
+    model.load_state_dict(payload["model_state_dict"])
+    model.eval()
+    checkpoint_mgr.save(
+        model,
+        epoch=payload.get("epoch"),
+        metrics=payload.get("metrics", {}),
+        name="elsa_best",
+        metadata={
+            "n_items": int(n_items),
+            "latent_dim": int(elsa_cfg["latent_dim"]),
+        },
+    )
+    logger.info(
+        "Loaded ELSA checkpoint and materialized into this run: %s", checkpoint_path
+    )
+    return (
+        model,
+        float("nan"),
+        {
+            "best_epoch": int(payload.get("epoch") or 0),
+            "final_epoch": int(payload.get("epoch") or 0),
+            "training_time_sec": 0.0,
+            "early_stop_reason": "skipped_training_reused_checkpoint",
+        },
+    )
+
+
+def _resolve_sae_checkpoint_path(
+    args: argparse.Namespace,
+    *,
+    config: Config,
+) -> Path:
+    sae_cfg = config["sae"]
+    elsa_cfg = config["elsa"]
+    expected_width_ratio = int(sae_cfg["width_ratio"])
+    expected_k = int(sae_cfg["k"])
+    expected_latent_dim = int(elsa_cfg["latent_dim"])
+    expected_hidden_dim = expected_width_ratio * expected_latent_dim
+    expected_filename = f"sae_r{expected_width_ratio}_k{expected_k}_best.pt"
+
+    if args.sae_checkpoint:
+        checkpoint_path = Path(args.sae_checkpoint).expanduser().resolve()
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(
+                f"--sae-checkpoint does not exist: {checkpoint_path}"
+            )
+        return checkpoint_path
+
+    outputs_dir = Path(config["output"]["base_dir"])
+    for run_dir in _iter_candidate_output_runs(outputs_dir):
+        checkpoint_path = run_dir / "checkpoints" / expected_filename
+        if not checkpoint_path.exists():
+            continue
+        try:
+            payload = _load_checkpoint_payload(checkpoint_path)
+            metadata = payload.get("metadata", {}) or {}
+            k_meta = metadata.get("k")
+            wr_meta = metadata.get("width_ratio")
+            latent_dim_meta = metadata.get("latent_dim")
+            if k_meta not in (None, expected_k):
+                continue
+            if wr_meta not in (None, expected_width_ratio):
+                continue
+            if latent_dim_meta not in (None, expected_latent_dim):
+                continue
+            logger.info(
+                "Resolved reusable SAE checkpoint: %s (k=%s, width_ratio=%s, latent_dim=%s)",
+                checkpoint_path,
+                k_meta,
+                wr_meta,
+                latent_dim_meta,
+            )
+            return checkpoint_path
+        except Exception as e:
+            logger.debug(
+                "Skipping incompatible SAE checkpoint %s: %s", checkpoint_path, e
+            )
+
+    raise FileNotFoundError(
+        "Could not resolve a compatible SAE checkpoint for --skip-sae. "
+        f"Expected hidden_dim={expected_hidden_dim}, k={expected_k}. "
+        "Provide --sae-checkpoint explicitly or run one full training first."
+    )
+
+
+def _load_sae_from_checkpoint(
+    *,
+    checkpoint_path: Path,
+    config: Config,
+    checkpoint_mgr: CheckpointManager,
+    device: str,
+) -> tuple[TopKSAE, float, dict]:
+    sae_cfg = config["sae"]
+    elsa_cfg = config["elsa"]
+    hidden_dim = int(sae_cfg["width_ratio"]) * int(elsa_cfg["latent_dim"])
+    model = TopKSAE(
+        input_dim=int(elsa_cfg["latent_dim"]),
+        hidden_dim=hidden_dim,
+        k=int(sae_cfg["k"]),
+        l1_coef=float(sae_cfg["l1_coef"]),
+    ).to(device)
+    payload = _load_checkpoint_payload(checkpoint_path)
+    metadata = payload.get("metadata", {}) or {}
+    if metadata.get("k") not in (None, int(sae_cfg["k"])):
+        raise RuntimeError(
+            f"SAE checkpoint k mismatch: expected {sae_cfg['k']}, found {metadata.get('k')} in {checkpoint_path}"
+        )
+    if metadata.get("width_ratio") not in (None, int(sae_cfg["width_ratio"])):
+        raise RuntimeError(
+            f"SAE checkpoint width_ratio mismatch: expected {sae_cfg['width_ratio']}, found {metadata.get('width_ratio')} in {checkpoint_path}"
+        )
+    if metadata.get("latent_dim") not in (None, int(elsa_cfg["latent_dim"])):
+        raise RuntimeError(
+            f"SAE checkpoint latent_dim mismatch: expected {elsa_cfg['latent_dim']}, found {metadata.get('latent_dim')} in {checkpoint_path}"
+        )
+    model.load_state_dict(payload["model_state_dict"])
+    model.eval()
+    checkpoint_mgr.save(
+        model,
+        epoch=payload.get("epoch"),
+        metrics=payload.get("metrics", {}),
+        name=f"sae_r{sae_cfg['width_ratio']}_k{sae_cfg['k']}_best",
+        metadata={
+            "k": int(sae_cfg["k"]),
+            "width_ratio": int(sae_cfg["width_ratio"]),
+            "latent_dim": int(elsa_cfg["latent_dim"]),
+        },
+    )
+    logger.info(
+        "Loaded SAE checkpoint and materialized into this run: %s", checkpoint_path
+    )
+    return (
+        model,
+        float("nan"),
+        {
+            "best_epoch": int(payload.get("epoch") or 0),
+            "final_epoch": int(payload.get("epoch") or 0),
+            "training_time_sec": 0.0,
+            "early_stop_reason": "skipped_training_reused_checkpoint",
+        },
+    )
+
+
+def _upload_experiment_manifest_to_cloud(
+    experiment_dir: Path, experiment_id: str
+) -> bool:
+    """Upload experiment sweep metadata so the UI can discover it from GCS."""
+    try:
+        gcs_bucket_name = get_cloud_storage_bucket()
+        if not gcs_bucket_name:
+            logger.info("GCS_BUCKET_NAME not set, skipping experiment manifest upload")
+            return True
+
+        from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+        cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
+        manifest_path = experiment_dir / "manifest.json"
+        if manifest_path.exists():
+            cloud_storage.upload_json(
+                manifest_path,
+                f"experiments/{experiment_id}/manifest.json",
+                metadata={"timestamp": experiment_id, "type": "experiment_manifest"},
+            )
+
+        latest_pointer = Path.cwd() / "outputs" / "LATEST_EXPERIMENT.txt"
+        if latest_pointer.exists():
+            blob = cloud_storage.bucket.blob("experiments/LATEST_EXPERIMENT.txt")
+            blob.upload_from_filename(str(latest_pointer), content_type="text/plain")
+
+        logger.info(f"✅ Uploaded experiment manifest to GCS: {experiment_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to upload experiment manifest to GCS: {e}")
+        return False
+
+
+def _run_experiment_sweep(args: argparse.Namespace) -> None:
+    """Run multiple training jobs from an experiments YAML file."""
+
+    project_root = Path(__file__).resolve().parent.parent
+    experiment_config = _load_yaml_dict(args.config)
+    if "experiments" not in experiment_config:
+        raise ValueError(
+            f"{args.config} does not contain an 'experiments' list; use normal training mode instead."
+        )
+
+    base_config = _load_yaml_dict(args.base_config)
+    experiments = experiment_config.get("experiments", [])
+    if not experiments:
+        logger.warning("No experiments defined in experiments file")
+        return
+
+    output_base = Path(base_config.get("output", {}).get("base_dir", "outputs"))
+    experiment_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_dir = output_base / "experiments" / experiment_id
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    _write_experiment_pointer(experiment_dir)
+
+    manifest: dict = {
+        "experiment_id": experiment_id,
+        "created": datetime.now().isoformat(),
+        "source_config": str(Path(args.config).resolve()),
+        "base_config": str(Path(args.base_config).resolve()),
+        "runs": [],
+    }
+
+    logger.info("=" * 60)
+    logger.info("EXPERIMENT SWEEP MODE")
+    logger.info(f"Experiment ID: {experiment_id}")
+    logger.info(f"Experiments config: {args.config}")
+    logger.info(f"Base config: {args.base_config}")
+    logger.info("=" * 60)
+
+    total_runs = 0
+    prepared_cache_keys: set[str] = set()
+    elsa_checkpoint_by_signature: dict[str, Path] = {}
+    for experiment in experiments:
+        experiment_name = experiment.get("name", "unnamed_experiment")
+        experiment_desc = experiment.get("description", "")
+        sweep_source = {
+            key: value
+            for key, value in experiment.items()
+            if key not in {"name", "description"}
+        }
+        variants = _expand_sweep_dict(sweep_source)
+
+        logger.info(
+            f"Experiment '{experiment_name}' -> {len(variants)} run(s): {experiment_desc}"
+        )
+
+        for variant_idx, variant in enumerate(variants, start=1):
+            total_runs += 1
+            resolved_config = _deep_merge_dict(base_config, variant)
+            resolved_config["experiment"] = {
+                "experiment_id": experiment_id,
+                "experiment_name": experiment_name,
+                "experiment_description": experiment_desc,
+                "variant_index": variant_idx,
+                "variant_count": len(variants),
+            }
+
+            run_name = f"{experiment_name}_run{variant_idx:03d}"
+            run_config_path = experiment_dir / f"{run_name}.yaml"
+            _save_yaml(run_config_path, resolved_config)
+
+            logger.info("-" * 60)
+            logger.info(
+                f"[{total_runs}] Running {run_name} (variant {variant_idx}/{len(variants)})"
+            )
+            logger.info("Resolved config saved to: %s", run_config_path)
+
+            command = [
+                sys.executable,
+                "-m",
+                "src.train",
+                "--config",
+                str(run_config_path),
+            ]
+            cache_key = build_preprocessing_cache_key(resolved_config)
+            elsa_signature = _build_elsa_signature(resolved_config)
+            if args.skip_preprocessing or cache_key in prepared_cache_keys:
+                command.append("--skip-preprocessing")
+
+            reuse_checkpoint = elsa_checkpoint_by_signature.get(elsa_signature)
+            if reuse_checkpoint and reuse_checkpoint.exists():
+                command.append("--skip-elsa")
+                command.extend(["--elsa-checkpoint", str(reuse_checkpoint)])
+                logger.info(
+                    "Reusing ELSA checkpoint for matching signature: %s",
+                    reuse_checkpoint,
+                )
+            elif args.skip_elsa:
+                command.append("--skip-elsa")
+            if args.skip_sae:
+                command.append("--skip-sae")
+            if args.elsa_checkpoint and not reuse_checkpoint:
+                command.extend(["--elsa-checkpoint", args.elsa_checkpoint])
+            if args.sae_checkpoint:
+                command.extend(["--sae-checkpoint", args.sae_checkpoint])
+
+            result = subprocess.run(command, cwd=project_root)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Experiment run failed: {run_name} (exit code {result.returncode})"
+                )
+            prepared_cache_keys.add(cache_key)
+
+            latest_run_path = Path.cwd() / "outputs" / "LATEST_RUN.txt"
+            if latest_run_path.exists():
+                run_dir = Path(latest_run_path.read_text(encoding="utf-8").strip())
+            else:
+                run_dir = Path("outputs")
+
+            produced_elsa_checkpoint = run_dir / "checkpoints" / "elsa_best.pt"
+            if produced_elsa_checkpoint.exists():
+                elsa_checkpoint_by_signature[elsa_signature] = produced_elsa_checkpoint
+
+            summary_path = run_dir / "summary.json"
+            summary = None
+            if summary_path.exists():
+                try:
+                    with summary_path.open("r", encoding="utf-8") as f:
+                        summary = json.load(f)
+                except Exception as exc:
+                    logger.warning(f"Could not load summary for {run_name}: {exc}")
+
+            manifest["runs"].append(
+                {
+                    "run_name": run_name,
+                    "experiment_name": experiment_name,
+                    "variant_index": variant_idx,
+                    "run_dir": str(run_dir),
+                    "config_path": str(run_config_path),
+                    "summary_path": str(summary_path),
+                    "summary": summary,
+                    "parameters": variant,
+                }
+            )
+
+    manifest_path = experiment_dir / "manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    logger.info(f"Saved experiment manifest: {manifest_path}")
+    _upload_experiment_manifest_to_cloud(experiment_dir, experiment_id)
+    logger.info(f"Total experiment runs completed: {total_runs}")
+
+
+def _build_business_metadata_from_db(
+    db_path: str | Path,
+    item_map_after_kcore: dict,
+    state_filter: str | None = None,
+) -> dict:
+    """Build business metadata for the items that survived k-core filtering."""
+    businesses = load_businesses(
+        db_path=db_path,
+        state_filter=state_filter,
+        min_review_count=0,
+    )
+
+    item_ids = {str(business_id) for business_id in item_map_after_kcore.keys()}
+    businesses = businesses[businesses["business_id"].astype(str).isin(item_ids)]
+
+    business_metadata = {}
+    for _, row in businesses.iterrows():
+        categories = []
+        if "categories" in row and row["categories"] is not None:
+            categories = [
+                category.strip()
+                for category in str(row["categories"]).split(",")
+                if category.strip()
+            ]
+
+        business_metadata[str(row["business_id"])] = {
+            "name": row.get("name", "Unknown"),
+            "city": row.get("city", "Unknown"),
+            "state": row.get("state", "Unknown"),
+            "categories": categories,
+            "stars": row.get("stars", None),
+            "review_count": row.get("review_count", None),
+        }
+
+    return business_metadata
+
+
+def _score_elsa_batch(elsa_model: ELSA, batch: np.ndarray, device: str) -> np.ndarray:
+    batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        scores = elsa_model.decode(elsa_model.encode(batch_tensor)).cpu().numpy()
+    scores = scores - batch
+    scores[batch > 0] = -np.inf
+    return scores
+
+
+def _score_sae_batch(
+    elsa_model: ELSA,
+    sae_model: TopKSAE,
+    batch: np.ndarray,
+    device: str,
+) -> np.ndarray:
+    batch_tensor = torch.tensor(batch, dtype=torch.float32, device=device)
+    with torch.no_grad():
+        scores = (
+            elsa_model.decode(
+                sae_model.decode(sae_model.encode(elsa_model.encode(batch_tensor)))
+            )
+            .cpu()
+            .numpy()
+        )
+    scores = scores - batch
+    scores[batch > 0] = -np.inf
+    return scores
+
+
+def _compute_auxiliary_metrics(
+    elsa_model: ELSA,
+    sae_model: TopKSAE,
+    X_input_csr,
+    *,
+    device: str,
+    batch_size: int,
+    top_k: int,
+) -> tuple[float, float, dict[str, float]]:
+    n_items = X_input_csr.shape[1]
+    item_counts = np.zeros(n_items, dtype=np.int64)
+    total_recommendations = 0
+    latency_sample_scores: list[np.ndarray] = []
+    collected_latency_users = 0
+    target_latency_users = min(100, X_input_csr.shape[0])
+
+    for start in range(0, X_input_csr.shape[0], batch_size):
+        end = min(start + batch_size, X_input_csr.shape[0])
+        batch = X_input_csr[start:end].toarray().astype(np.float32)
+        scores = _score_sae_batch(elsa_model, sae_model, batch, device)
+
+        top_items = np.argsort(-scores, axis=1)[:, :top_k]
+        for row in top_items:
+            item_counts[row] += 1
+        total_recommendations += top_items.size
+
+        if collected_latency_users < target_latency_users:
+            take = min(scores.shape[0], target_latency_users - collected_latency_users)
+            latency_sample_scores.append(scores[:take])
+            collected_latency_users += take
+
+    coverage = float(np.count_nonzero(item_counts) / n_items) if n_items > 0 else 0.0
+
+    if total_recommendations > 0 and n_items > 1:
+        probs = item_counts[item_counts > 0] / total_recommendations
+        entropy = float(-np.sum(probs * np.log(probs)) / np.log(n_items))
+    else:
+        entropy = 0.0
+
+    latency_metrics = {"mean_ms": 0.0, "p50_ms": 0.0, "p95_ms": 0.0, "max_ms": 0.0}
+    if latency_sample_scores:
+        latency_metrics = benchmark_inference(
+            np.vstack(latency_sample_scores),
+            n_samples=min(100, collected_latency_users),
+        )
+
+    return coverage, entropy, latency_metrics
+
+
+def upload_results_to_cloud(output_dir: Path, timestamp: str) -> bool:
+    """
+    Upload training results to GCS if configured.
+
+    Args:
+        output_dir: Local output directory with results
+        timestamp: Training timestamp (YYYYMMDD_HHMMSS)
+
+    Returns:
+        True if uploaded or not configured, False if upload failed
+    """
+    try:
+        gcs_bucket_name = get_cloud_storage_bucket()
+        if not gcs_bucket_name:
+            logger.info("GCS_BUCKET_NAME not set, skipping cloud upload")
+            return True
+
+        from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+        cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
+        logger.info(f"Uploading results to GCS bucket: {gcs_bucket_name}")
+
+        gcs_prefix = f"outputs/{timestamp}"
+
+        def _upload_file(
+            local_file: Path, gcs_path: str, content_type: Optional[str] = None
+        ) -> None:
+            if not local_file.exists():
+                return
+            blob = cloud_storage.bucket.blob(gcs_path)
+            if content_type:
+                blob.upload_from_filename(str(local_file), content_type=content_type)
+            else:
+                blob.upload_from_filename(str(local_file))
+            logger.info(
+                f"✅ Uploaded {local_file.name} → gs://{gcs_bucket_name}/{gcs_path}"
+            )
+
+        # Upload summary.json
+        summary_path = output_dir / "summary.json"
+        if summary_path.exists():
+            cloud_storage.upload_json(
+                summary_path,
+                f"{gcs_prefix}/summary.json",
+                metadata={"timestamp": timestamp, "type": "training_summary"},
+            )
+
+        # Upload resolved config for experiment comparison / ablations
+        config_path = output_dir / "resolved_config.yaml"
+        if config_path.exists():
+            blob = cloud_storage.bucket.blob(f"{gcs_prefix}/resolved_config.yaml")
+            blob.upload_from_filename(str(config_path), content_type="text/yaml")
+
+        # Upload training_results.json
+        results_path = output_dir / "training_results.json"
+        if results_path.exists():
+            cloud_storage.upload_json(
+                results_path,
+                f"{gcs_prefix}/training_results.json",
+                metadata={"timestamp": timestamp, "type": "training_results"},
+            )
+
+        # Upload ranking metrics report (text)
+        report_path = output_dir / "ranking_metrics_report.txt"
+        _upload_file(
+            report_path, f"{gcs_prefix}/ranking_metrics_report.txt", "text/plain"
+        )
+
+        # Upload model checkpoints so the Streamlit Cloud UI can load inference models
+        checkpoints_dir = output_dir / "checkpoints"
+        if checkpoints_dir.exists():
+            for checkpoint_file in checkpoints_dir.glob("*.pt"):
+                _upload_file(
+                    checkpoint_file,
+                    f"{gcs_prefix}/checkpoints/{checkpoint_file.name}",
+                    "application/octet-stream",
+                )
+
+        # Upload interpretability artifacts used by the UI
+        interpretations_dir = output_dir / "neuron_interpretations"
+        if interpretations_dir.exists():
+            for artifact_file in interpretations_dir.glob("*"):
+                if artifact_file.is_file():
+                    content_type = (
+                        "application/json"
+                        if artifact_file.suffix.lower() == ".json"
+                        else "application/octet-stream"
+                    )
+                    _upload_file(
+                        artifact_file,
+                        f"{gcs_prefix}/neuron_interpretations/{artifact_file.name}",
+                        content_type,
+                    )
+
+        _upload_file(
+            output_dir / "neuron_category_metadata.json",
+            f"{gcs_prefix}/neuron_category_metadata.json",
+            "application/json",
+        )
+        _upload_file(
+            output_dir / "neuron_coactivation.json",
+            f"{gcs_prefix}/neuron_coactivation.json",
+            "application/json",
+        )
+
+        precomputed_cache_dir = (
+            output_dir / "precomputed_ui_cache" / "neuron_wordclouds"
+        )
+        if precomputed_cache_dir.exists():
+            for cache_file in precomputed_cache_dir.glob("*"):
+                if cache_file.is_file():
+                    content_type = (
+                        "application/json"
+                        if cache_file.suffix.lower() == ".json"
+                        else "application/octet-stream"
+                    )
+                    _upload_file(
+                        cache_file,
+                        f"{gcs_prefix}/precomputed_ui_cache/neuron_wordclouds/{cache_file.name}",
+                        content_type,
+                    )
+
+        # Small pipeline metadata useful for cloud diagnostics
+        for metadata_file in [
+            output_dir / "data" / "shared_data_manifest.json",
+            output_dir / "data" / "train_user_ids.json",
+            output_dir / "data" / "test_user_ids.json",
+            output_dir / "data" / "val_user_ids.json",
+            output_dir / "data" / "test_users_top50.json",
+            output_dir / "data" / "evaluation_protocol.json",
+            output_dir / "data" / "test_holdout_input.npz",
+            output_dir / "data" / "test_holdout_target.npz",
+            output_dir / "data" / "test_holdout_metadata.json",
+        ]:
+            _upload_file(
+                metadata_file,
+                (
+                    f"{gcs_prefix}/data/{metadata_file.name}"
+                    if metadata_file.parent.name == "data"
+                    else f"{gcs_prefix}/{metadata_file.name}"
+                ),
+                (
+                    "application/json"
+                    if metadata_file.suffix.lower() == ".json"
+                    else "application/octet-stream"
+                ),
+            )
+
+        logger.info(
+            f"✅ Training results uploaded to gs://{gcs_bucket_name}/{gcs_prefix}/"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"Failed to upload results to cloud: {e}")
+        logger.warning(
+            "Continuing with local-only results (app won't access them on cloud)"
+        )
+        return False
+
+
+def precompute_user_csr_matrices(
+    reviews_df,
+    item_map_after_kcore,
+    output_dir: Path,
+    upload_to_cloud: bool = True,
+    top_n_users: int = 50,
+    allowed_user_ids: Optional[list[str]] = None,
+):
+    """
+    Precompute CSR matrices for top-N users (for Streamlit app).
+
+    Builds a 1×n_items sparse matrix for each user representing their interaction history.
+    Only computes for the top N users by interaction count (default: 50 for Streamlit demo).
+    This enables fast lookup in the Streamlit app without querying the database each time.
+
+    Args:
+        reviews_df: DataFrame with user_id and business_id columns
+        item_map_after_kcore: business_id -> model_index mapping (filtered)
+        output_dir: Training output directory for saving results
+        upload_to_cloud: Whether to upload to Cloud Storage
+        top_n_users: Number of top users to precompute (default: 50)
+        allowed_user_ids: Optional allowlist of users to consider. If provided,
+            ranking is done only within this subset.
+
+    Returns:
+        Dict of {user_id: csr_matrix}
+    """
+    logger.info("=" * 60)
+    logger.info("PRECOMPUTING USER CSR MATRICES")
+    logger.info("=" * 60)
+
+    precomp_dir = output_dir / "precomputed"
+    precomp_dir.mkdir(parents=True, exist_ok=True)
+
+    local_path = precomp_dir / "user_csr_matrices.pkl"
+
+    n_items = len(item_map_after_kcore)
+
+    candidate_reviews = reviews_df
+    if allowed_user_ids is not None:
+        allowed_user_ids = list(dict.fromkeys(allowed_user_ids))
+        candidate_reviews = reviews_df[reviews_df["user_id"].isin(allowed_user_ids)]
+        logger.info(
+            f"Restricting user CSR precompute to {len(allowed_user_ids)} allowed users"
+        )
+
+    # Find top N users by interaction count
+    user_interaction_counts = (
+        candidate_reviews.groupby("user_id").size().sort_values(ascending=False)
+    )
+    top_users = user_interaction_counts.head(top_n_users).index.tolist()
+
+    logger.info(
+        f"Total users in dataset: {len(user_interaction_counts)}, using top {len(top_users)} by interaction count"
+    )
+    logger.info(
+        f"Interaction distribution - min: {user_interaction_counts[top_users].min()}, max: {user_interaction_counts[top_users].max()}"
+    )
+
+    # Filter reviews to only top users
+    reviews_filtered = candidate_reviews[candidate_reviews["user_id"].isin(top_users)]
+    all_users = reviews_filtered["user_id"].unique()
+
+    logger.info(f"Building CSR matrices for {len(all_users)} users, {n_items} items...")
+
+    user_matrices = {}
+    failed_users = []
+    matrices_built = 0
+
+    for user_idx, user_id in enumerate(all_users, 1):
+        try:
+            # Get all interactions for this user (from filtered reviews)
+            user_reviews = reviews_filtered[reviews_filtered["user_id"] == user_id]
+            business_ids = user_reviews["business_id"].values
+
+            # Map business IDs to model indices (skip if not in filtered set)
+            poi_indices = [
+                item_map_after_kcore[bid]
+                for bid in business_ids
+                if bid in item_map_after_kcore
+            ]
+
+            if not poi_indices:
+                failed_users.append((user_id, "no_valid_interactions"))
+                continue
+
+            # Build CSR matrix: 1 row (user), n_items columns
+            row = np.zeros(len(poi_indices), dtype=int)
+            col = np.array(poi_indices, dtype=int)
+            data_vals = np.ones(len(poi_indices), dtype=np.float32)
+
+            user_csr = csr_matrix((data_vals, (row, col)), shape=(1, n_items))
+            user_matrices[user_id] = user_csr
+            matrices_built += 1
+
+            if user_idx % 500 == 0 or user_idx == len(all_users):
+                logger.info(
+                    f"[{user_idx}/{len(all_users)}] Built {matrices_built} matrices..."
+                )
+
+        except Exception as e:
+            logger.debug(f"Failed to build matrix for user {user_id}: {e}")
+            failed_users.append((user_id, str(e)))
+
+    logger.info(f"✅ Successfully built {matrices_built} user CSR matrices")
+
+    if failed_users:
+        logger.warning(f"⚠️ Failed for {len(failed_users)} users")
+
+    # Save locally
+    logger.info(f"💾 Saving {matrices_built} matrices to {local_path}...")
+    try:
+        with open(local_path, "wb") as f:
+            pickle.dump(user_matrices, f)
+        file_size_mb = local_path.stat().st_size / (1024 * 1024)
+        logger.info(f"✅ Saved locally: {local_path} ({file_size_mb:.1f} MB)")
+    except Exception as e:
+        logger.error(f"❌ Failed to save locally: {e}")
+        return {}
+
+    # Upload to cloud
+    if upload_to_cloud:
+        try:
+            gcs_bucket_name = get_cloud_storage_bucket()
+            if not gcs_bucket_name:
+                logger.info(
+                    "GCS not configured, skipping cloud upload of user matrices"
+                )
+                return user_matrices
+
+            from src.ui.services.cloud_storage_helper import CloudStorageHelper
+
+            cloud_storage = CloudStorageHelper(bucket_name=gcs_bucket_name)
+            gcs_paths = [f"outputs/{output_dir.name}/precomputed/user_csr_matrices.pkl"]
+            if allowed_user_ids is None:
+                gcs_paths.append("metadata/user_csr_matrices.pkl")
+
+            for gcs_path in gcs_paths:
+                blob = cloud_storage.bucket.blob(gcs_path)
+                blob.upload_from_filename(str(local_path))
+                logger.info(f"✓ Uploaded to gs://{gcs_bucket_name}/{gcs_path}")
+        except Exception as e:
+            logger.warning(f"⚠️ Cloud upload failed (app will use local file): {e}")
+
+    return user_matrices
+
+
+def persist_test_user_artifacts(
+    output_dir: Path,
+    reviews_df,
+    train_user_ids: list[str],
+    test_user_ids: list[str],
+    val_user_ids: list[str],
+    *,
+    top_k: int = 50,
+    evaluation_protocol: Optional[dict] = None,
+    holdout_input_csr=None,
+    holdout_target_csr=None,
+    holdout_split: str = "test",
+    holdout_metadata: Optional[dict] = None,
+) -> dict[str, Path]:
+    """Persist run-scoped split artifacts for the UI and deterministic evaluation."""
+    data_dir = output_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    train_ids_path = data_dir / "train_user_ids.json"
+    test_ids_path = data_dir / "test_user_ids.json"
+    val_ids_path = data_dir / "val_user_ids.json"
+    top_users_path = data_dir / "test_users_top50.json"
+    evaluation_protocol_path = data_dir / "evaluation_protocol.json"
+
+    interaction_counts = (
+        reviews_df[reviews_df["user_id"].isin(test_user_ids)]
+        .groupby("user_id")
+        .size()
+        .sort_values(ascending=False)
+    )
+
+    top_users = [
+        {"id": str(user_id), "interactions": int(count)}
+        for user_id, count in interaction_counts.head(top_k).items()
+    ]
+
+    train_ids_path.write_text(
+        json.dumps([str(uid) for uid in train_user_ids], indent=2)
+    )
+    test_ids_path.write_text(json.dumps([str(uid) for uid in test_user_ids], indent=2))
+    val_ids_path.write_text(json.dumps([str(uid) for uid in val_user_ids], indent=2))
+    top_users_path.write_text(json.dumps(top_users, indent=2))
+    evaluation_protocol_path.write_text(json.dumps(evaluation_protocol or {}, indent=2))
+
+    holdout_artifacts: dict[str, Path] = {}
+    if holdout_input_csr is not None and holdout_target_csr is not None:
+        holdout_artifacts = save_holdout_split_artifacts(
+            data_dir,
+            holdout_input_csr,
+            holdout_target_csr,
+            split=holdout_split,
+            metadata=holdout_metadata or {},
+        )
+        logger.info(
+            "Saved exact %s holdout replay artifacts to %s",
+            holdout_split,
+            data_dir,
+        )
+
+    logger.info("Saved train/test user artifacts to %s", data_dir)
+    logger.info("Saved %d ranked test users for UI", len(top_users))
+
+    artifacts = {
+        "train_user_ids": train_ids_path,
+        "test_user_ids": test_ids_path,
+        "val_user_ids": val_ids_path,
+        "test_users_top50": top_users_path,
+        "evaluation_protocol": evaluation_protocol_path,
+    }
+    if holdout_artifacts:
+        artifacts.update(
+            {
+                f"{holdout_split}_holdout_input": holdout_artifacts["input"],
+                f"{holdout_split}_holdout_target": holdout_artifacts["target"],
+                f"{holdout_split}_holdout_metadata": holdout_artifacts["metadata"],
+            }
+        )
+    return artifacts
 
 
 class SparseDataset(Dataset):
@@ -51,14 +1094,74 @@ class SparseDataset(Dataset):
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command-line arguments."""
+    """Parse command-line arguments.
+
+    Examples
+    --------
+    # Full pipeline (default)
+    python -m src.train --config configs/default.yaml
+
+    # Only train ELSA (reuse existing preprocessing)
+    python -m src.train --config configs/default.yaml --skip-sae
+
+    # Only train SAE (reuse existing ELSA + preprocessing)
+    python -m src.train --config configs/default.yaml --skip-elsa
+
+    # Skip preprocessing, require an existing shared preprocessing cache
+    python -m src.train --config configs/default.yaml --skip-preprocessing
+
+    # Experiments: try different SAE hyperparams without retraining ELSA
+    python -m src.train --config configs/default.yaml --skip-elsa --skip-preprocessing
+
+    """
     parser = argparse.ArgumentParser(
         description="Train ELSA + TopK SAE POI recommender",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="Component selection:\n"
+        "  --skip-preprocessing  Require existing shared preprocessing cache; do not rebuild raw preprocessing\n"
+        "  --skip-elsa           Skip ELSA training (reuse best checkpoint)\n"
+        "  --skip-sae            Skip SAE training (reuse best checkpoint)\n"
+        "\nFor grid search experiments, use --skip-elsa --skip-preprocessing to\n"
+        "only train SAE with different hyperparameters while reusing ELSA outputs.",
     )
     parser.add_argument(
         "--config",
         default="configs/default.yaml",
-        help="Path to YAML config file",
+        help="Path to YAML config file (default: configs/default.yaml). "
+        "If the file contains a top-level 'experiments' list, train.py switches to sweep mode.",
+    )
+    parser.add_argument(
+        "--base-config",
+        default="configs/default.yaml",
+        help="Base config used when --config points to an experiments YAML file.",
+    )
+    parser.add_argument(
+        "--skip-preprocessing",
+        action="store_true",
+        help="Require an existing shared preprocessing cache for this data configuration. "
+        "If the cache is missing or invalid, training fails instead of rebuilding preprocessing.",
+    )
+    parser.add_argument(
+        "--skip-elsa",
+        action="store_true",
+        help="Skip ELSA training. Loads best ELSA checkpoint from previous run. "
+        "Useful for SAE hyperparameter tuning without retraining ELSA.",
+    )
+    parser.add_argument(
+        "--skip-sae",
+        action="store_true",
+        help="Skip SAE training. Useful for testing data pipeline or ELSA only.",
+    )
+    parser.add_argument(
+        "--elsa-checkpoint",
+        default=None,
+        help="Path to specific ELSA checkpoint to load (overrides 'latest' search). "
+        "Format: path/to/outputs/YYYYMMDD_HHMMSS/checkpoints/elsa_best.pt",
+    )
+    parser.add_argument(
+        "--sae-checkpoint",
+        default=None,
+        help="Path to specific SAE checkpoint to load (for SAE-only experiments).",
     )
     return parser.parse_args()
 
@@ -103,13 +1206,83 @@ def cosine_recon_loss(recon: torch.Tensor, target: torch.Tensor) -> torch.Tensor
     )
 
 
+def compute_model_sizes(elsa_model: ELSA, sae_model: TopKSAE, output_dir: Path) -> dict:
+    """Compute and save model file sizes in bytes and MB."""
+    elsa_temp = output_dir / "elsa_temp_size.pt"
+    sae_temp = output_dir / "sae_temp_size.pt"
+
+    try:
+        # Save model state dicts to temp files
+        torch.save(elsa_model.state_dict(), elsa_temp)
+        torch.save(sae_model.state_dict(), sae_temp)
+
+        # Get file sizes
+        elsa_size_bytes = elsa_temp.stat().st_size
+        sae_size_bytes = sae_temp.stat().st_size
+
+        sizes = {
+            "elsa_bytes": int(elsa_size_bytes),
+            "elsa_mb": float(elsa_size_bytes / 1e6),
+            "sae_bytes": int(sae_size_bytes),
+            "sae_mb": float(sae_size_bytes / 1e6),
+            "total_bytes": int(elsa_size_bytes + sae_size_bytes),
+            "total_mb": float((elsa_size_bytes + sae_size_bytes) / 1e6),
+        }
+
+        logger.info(
+            f"Model sizes: ELSA={sizes['elsa_mb']:.2f}MB, "
+            f"SAE={sizes['sae_mb']:.2f}MB, Total={sizes['total_mb']:.2f}MB"
+        )
+
+        return sizes
+    finally:
+        # Clean up temp files
+        elsa_temp.unlink(missing_ok=True)
+        sae_temp.unlink(missing_ok=True)
+
+
+def compute_sparsity_stats(
+    sae_model: TopKSAE, Z_data: torch.Tensor, device: str, batch_size: int = 256
+) -> dict:
+    """Compute sparsity statistics (active neurons, sparsity ratio)."""
+    sae_model.eval()
+    all_active_counts = []
+
+    loader = DataLoader(TensorDataset(Z_data), batch_size=batch_size, shuffle=False)
+
+    with torch.no_grad():
+        for (z_batch,) in loader:
+            z_batch = z_batch.to(device)
+            _, h_sparse, _ = sae_model(z_batch)
+
+            # Count active neurons per sample
+            active_per_sample = (h_sparse != 0).sum(dim=1).float()
+            all_active_counts.append(active_per_sample)
+
+    all_active = torch.cat(all_active_counts)
+    avg_active = all_active.mean().item()
+    max_active = all_active.max().item()
+
+    # Total neurons in SAE hidden layer (dictionary size)
+    total_neurons = sae_model.hidden_dim
+
+    return {
+        "avg_active_neurons": float(avg_active),
+        "max_active_neurons": float(max_active),
+        "total_neurons": int(total_neurons),
+        "sparsity_ratio": float(1.0 - (avg_active / total_neurons)),
+    }
+
+
 def train_elsa(
     config: Config,
     X_train,
     X_val,
     n_items: int,
     checkpoint_mgr: CheckpointManager,
-) -> tuple[ELSA, float]:
+    *,
+    seed: int,
+) -> tuple[ELSA, float, dict]:
     """Train ELSA model.
 
     Parameters
@@ -127,8 +1300,8 @@ def train_elsa(
 
     Returns
     -------
-    tuple[ELSA, float]
-        Trained ELSA model and best validation loss.
+    tuple[ELSA, float, dict]
+        Trained ELSA model, best validation loss, and training statistics
     """
     logger.info("=" * 60)
     logger.info("TRAINING ELSA")
@@ -140,14 +1313,17 @@ def train_elsa(
     model = ELSA(n_items, latent_dim=elsa_cfg["latent_dim"]).to(device)
     optimizer = optim.Adam(
         model.parameters(),
-        lr=elsa_cfg["learning_rate"],
+        lr=float(elsa_cfg["learning_rate"]),
         betas=(0.9, 0.99),
-        weight_decay=elsa_cfg["weight_decay"],
+        weight_decay=float(elsa_cfg.get("weight_decay", 0.0)),
     )
     criterion = NMSELoss()
 
     train_loader = torch.utils.data.DataLoader(
-        X_train, batch_size=elsa_cfg["batch_size"], shuffle=True
+        X_train,
+        batch_size=elsa_cfg["batch_size"],
+        shuffle=True,
+        generator=build_dataloader_generator(seed),
     )
     val_loader = torch.utils.data.DataLoader(
         X_val, batch_size=elsa_cfg["batch_size"], shuffle=False
@@ -156,11 +1332,15 @@ def train_elsa(
     metrics = MetricsCollector()
     best_val_loss = float("inf")
     patience_counter = 0
+    early_stop_reason = None
+    epoch_started = 0
 
     logger.info(
         f"Config: latent_dim={elsa_cfg['latent_dim']}, "
         f"lr={elsa_cfg['learning_rate']}, epochs={elsa_cfg['num_epochs']}"
     )
+
+    training_start = time.time()
 
     for epoch in range(elsa_cfg["num_epochs"]):
         # Training
@@ -202,6 +1382,7 @@ def train_elsa(
         if val_loss < best_val_loss - 1e-6:
             best_val_loss = val_loss
             patience_counter = 0
+            epoch_started = epoch
             # Save with dataset metadata
             metadata = {
                 "n_items": model.A.shape[0],
@@ -217,8 +1398,11 @@ def train_elsa(
         else:
             patience_counter += 1
             if patience_counter >= elsa_cfg["patience"]:
+                early_stop_reason = f"patience threshold ({elsa_cfg['patience']} epochs without improvement)"
                 logger.info(f"Early stopping after {epoch + 1} epochs")
                 break
+
+    training_time = time.time() - training_start
 
     # Load best model
     model.load_state_dict(
@@ -229,7 +1413,17 @@ def train_elsa(
     checkpoint_mgr.save_metrics(metrics.to_dict(), split="elsa_train")
 
     logger.info(f"ELSA training complete. Best val_loss={best_val_loss:.6f}")
-    return model, best_val_loss
+
+    return (
+        model,
+        best_val_loss,
+        {
+            "best_epoch": int(epoch_started),
+            "final_epoch": int(epoch),
+            "training_time_sec": float(training_time),
+            "early_stop_reason": early_stop_reason or "completed all epochs",
+        },
+    )
 
 
 def train_sae(
@@ -238,7 +1432,9 @@ def train_sae(
     Z_train: torch.Tensor,
     Z_val: torch.Tensor,
     checkpoint_mgr: CheckpointManager,
-) -> tuple[TopKSAE, float]:
+    *,
+    seed: int,
+) -> tuple[TopKSAE, float, dict]:
     """Train TopK SAE model.
 
     Parameters
@@ -256,8 +1452,8 @@ def train_sae(
 
     Returns
     -------
-    tuple[TopKSAE, float]
-        Trained SAE model and best validation loss.
+    tuple[TopKSAE, float, dict]
+        Trained SAE model, best validation loss, and training statistics.
     """
     logger.info("=" * 60)
     logger.info("TRAINING TOPK SAE")
@@ -273,18 +1469,21 @@ def train_sae(
         input_dim=elsa_cfg["latent_dim"],
         hidden_dim=hidden_dim,
         k=sae_cfg["k"],
-        l1_coef=sae_cfg["l1_coef"],
+        l1_coef=float(sae_cfg["l1_coef"]),
     ).to(device)
 
     optimizer = optim.Adam(
         sae.parameters(),
-        lr=sae_cfg["learning_rate"],
+        lr=float(sae_cfg["learning_rate"]),
         betas=(0.9, 0.99),
         weight_decay=0.0,
     )
 
     train_loader = torch.utils.data.DataLoader(
-        Z_train, batch_size=sae_cfg["batch_size"], shuffle=True
+        Z_train,
+        batch_size=sae_cfg["batch_size"],
+        shuffle=True,
+        generator=build_dataloader_generator(seed),
     )
     val_loader = torch.utils.data.DataLoader(
         Z_val, batch_size=sae_cfg["batch_size"], shuffle=False
@@ -293,6 +1492,8 @@ def train_sae(
     metrics = MetricsCollector()
     best_val_loss = float("inf")
     patience_counter = 0
+    early_stop_reason = None
+    epoch_started = 0
 
     logger.info(
         f"Config: width_ratio={sae_cfg['width_ratio']}, "
@@ -300,11 +1501,14 @@ def train_sae(
         f"l1_coef={sae_cfg['l1_coef']}, epochs={sae_cfg['num_epochs']}"
     )
 
+    training_start = time.time()
+
     for epoch in range(sae_cfg["num_epochs"]):
         # Training
         sae.train()
         train_recon_loss = 0.0
         train_l1_loss = 0.0
+        train_active_neurons = []
 
         for z_batch in train_loader:
             z_batch = z_batch.to(device)
@@ -314,7 +1518,7 @@ def train_sae(
 
             rec_loss = cosine_recon_loss(recon, z_batch)
             l1_loss = h_sparse.abs().mean()
-            loss = rec_loss + sae_cfg["l1_coef"] * l1_loss
+            loss = rec_loss + float(sae_cfg["l1_coef"]) * l1_loss
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(sae.parameters(), 1.0)
@@ -323,13 +1527,19 @@ def train_sae(
             train_recon_loss += rec_loss.item() * z_batch.size(0)
             train_l1_loss += l1_loss.item() * z_batch.size(0)
 
+            # Track sparsity
+            active_per_sample = (h_sparse != 0).sum(dim=1).float()
+            train_active_neurons.append(active_per_sample)
+
         train_recon_loss /= len(Z_train)
         train_l1_loss /= len(Z_train)
+        avg_train_active = torch.cat(train_active_neurons).mean().item()
 
         # Validation
         sae.eval()
         val_recon_loss = 0.0
         cosine_sims = []
+        val_active_neurons = []
 
         with torch.no_grad():
             for z_batch in val_loader:
@@ -348,27 +1558,36 @@ def train_sae(
                 ).mean()
                 cosine_sims.append(cos_sim.item())
 
+                # Track sparsity
+                active_per_sample = (h_sparse != 0).sum(dim=1).float()
+                val_active_neurons.append(active_per_sample)
+
         val_recon_loss /= len(Z_val)
         avg_cosine_sim = np.mean(cosine_sims)
+        avg_val_active = torch.cat(val_active_neurons).mean().item()
 
         metrics.record(
             epoch,
             train_recon=train_recon_loss,
             train_l1=train_l1_loss,
+            train_active=avg_train_active,
             val_recon=val_recon_loss,
+            val_active=avg_val_active,
             cosine_sim=avg_cosine_sim,
         )
 
         logger.info(
             f"Epoch {epoch+1:3d}/{sae_cfg['num_epochs']} | "
             f"train_recon={train_recon_loss:.6f} train_l1={train_l1_loss:.6f} | "
-            f"val_recon={val_recon_loss:.6f} cosine_sim={avg_cosine_sim:.4f}"
+            f"val_recon={val_recon_loss:.6f} cosine_sim={avg_cosine_sim:.4f} | "
+            f"active={avg_val_active:.1f}"
         )
 
         # Early stopping
-        if (best_val_loss - val_recon_loss) > sae_cfg["min_delta"]:
+        if (best_val_loss - val_recon_loss) > float(sae_cfg.get("min_delta", 0.0)):
             best_val_loss = val_recon_loss
             patience_counter = 0
+            epoch_started = epoch
             # Save with hyperparameter metadata
             metadata = {
                 "k": sae_cfg["k"],
@@ -385,8 +1604,11 @@ def train_sae(
         else:
             patience_counter += 1
             if patience_counter >= sae_cfg["patience"]:
+                early_stop_reason = f"patience threshold ({sae_cfg['patience']} epochs without improvement)"
                 logger.info(f"Early stopping after {epoch + 1} epochs")
                 break
+
+    training_time = time.time() - training_start
 
     # Load best model
     model_path = (
@@ -401,20 +1623,45 @@ def train_sae(
     checkpoint_mgr.save_metrics(metrics.to_dict(), split="sae_train")
 
     logger.info(f"SAE training complete. Best val_recon={best_val_loss:.6f}")
-    return sae, best_val_loss
+
+    return (
+        sae,
+        best_val_loss,
+        {
+            "best_epoch": int(epoch_started),
+            "final_epoch": int(epoch),
+            "training_time_sec": float(training_time),
+            "early_stop_reason": early_stop_reason or "completed all epochs",
+        },
+    )
 
 
 def main() -> None:
     """Main training entry point."""
     args = parse_args()
 
+    raw_config = _load_yaml_dict(args.config)
+    if "experiments" in raw_config:
+        _run_experiment_sweep(args)
+        return
+
     # Load config
     config = load_config(args.config)
 
     # Create output directory with timestamp
     output_cfg = config["output"]
-    output_dir = Path(output_cfg["base_dir"]) / datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(output_cfg["base_dir"]) / run_id
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Initialize run registry
+    registry = RunRegistry()
+    registry.register_run(
+        run_id,
+        "train",
+        config={"skip_preprocessing": args.skip_preprocessing},
+        status="pending",
+    )
 
     # Set up logging
     setup_logger(
@@ -423,6 +1670,20 @@ def main() -> None:
         level=getattr(logging, output_cfg["log_level"]),
     )
     logger.info(f"Output directory: {output_dir}")
+
+    seed = int(config["data"]["seed"])
+    reproducibility = set_global_reproducibility(seed)
+    logger.info(
+        "Reproducibility configured: seed=%d, cudnn_deterministic=%s, deterministic_algorithms=%s",
+        reproducibility["seed"],
+        reproducibility["cudnn_deterministic"],
+        reproducibility["deterministic_algorithms_enabled"],
+    )
+
+    # Save resolved config for downstream comparison / UI selectors
+    resolved_config_path = output_dir / "resolved_config.yaml"
+    _save_yaml(resolved_config_path, config.to_dict())
+    logger.info(f"Saved resolved config to: {resolved_config_path}")
 
     # Checkpoint manager
     checkpoint_dir = output_dir / "checkpoints"
@@ -438,38 +1699,45 @@ def main() -> None:
         logger.info("LOADING DATA")
         logger.info("=" * 60)
 
-        parquet_dir = Path(config["data"]["parquet_dir"])
         db_path = config["data"]["db_path"]
+        config_dict = config.to_dict()
+        shared_cache_dir = get_shared_preprocessing_cache_dir(config_dict)
+        preprocessing_cache_key = build_preprocessing_cache_key(config_dict)
 
-        if not parquet_dir.exists():
-            raise FileNotFoundError(f"Parquet directory not found: {parquet_dir}")
+        db_path_obj = Path(db_path)
+        if not db_path_obj.exists():
+            raise FileNotFoundError(f"DuckDB database not found: {db_path_obj}")
 
-        # Load with all applicable filters from config
-        # ⭐ FIRST: Create UNIVERSAL mappings from ALL data BEFORE any filtering
-        # This ensures we have complete mappings for all possible items
-        logger.info("Creating universal item/business mappings...")
-        all_reviews = load_reviews(
-            parquet_dir,
-            db_path=db_path,
-            pos_threshold=config["data"]["pos_threshold"],
-            year_min=config["data"].get("year_min"),
-            year_max=config["data"].get("year_max"),
+        if args.skip_preprocessing:
+            logger.info(
+                "--skip-preprocessing: loading shared preprocessing cache from %s",
+                shared_cache_dir,
+            )
+
+        (
+            preprocessing_payload,
+            preprocessing_source,
+            _,
+        ) = prepare_shared_preprocessing_cache(
+            config_dict, require_existing=args.skip_preprocessing
+        )
+        preprocessing_manifest = preprocessing_payload["manifest"]
+        reviews = preprocessing_payload["reviews"]
+        X_csr = preprocessing_payload["final_dataset"].csr
+        item_map_after_kcore = preprocessing_payload["item_map_after_kcore"]
+        final_user_ids = preprocessing_payload["final_user_ids"]
+        universal_user_map = preprocessing_payload["universal_user_map"]
+        universal_business_map = preprocessing_payload["universal_business_map"]
+        item_count_before_kcore = preprocessing_manifest["counts"]["raw_n_items"]
+
+        logger.info(
+            "Using shared preprocessing dataset: %d users x %d items, %d interactions",
+            X_csr.shape[0],
+            X_csr.shape[1],
+            X_csr.nnz,
         )
 
-        # Build universal mappings from all data
-        all_users = all_reviews["user_id"].unique()
-        all_businesses = all_reviews["business_id"].unique()
-
-        universal_user_map = {uid: idx for idx, uid in enumerate(all_users)}
-        universal_business_map = {bid: idx for idx, bid in enumerate(all_businesses)}
-
-        logger.info("Universal mappings created:")
-        logger.info(f"  Total unique users: {len(universal_user_map)}")
-        logger.info(f"  Total unique businesses: {len(universal_business_map)}")
-
         # Save universal mappings for downstream use (e.g., labeling notebook)
-        import pickle
-
         mappings_dir = output_dir / "mappings"
         mappings_dir.mkdir(parents=True, exist_ok=True)
 
@@ -480,54 +1748,43 @@ def main() -> None:
 
         logger.info(f"Universal mappings saved to {mappings_dir}")
 
-        # ⭐ NOW apply filtering on top of universal data
-        reviews = all_reviews.copy()
+        # Save FILTERED item mapping (after k-core)
+        with open(mappings_dir / "item2index.pkl", "wb") as f:
+            pickle.dump(item_map_after_kcore, f)
 
-        # Filter by state (if specified)
-        state_filter = config["data"].get("state_filter")
-        if state_filter:
-            businesses = load_businesses(
-                parquet_dir,
-                db_path=db_path,
-                state_filter=state_filter,
-                min_review_count=config["data"].get("min_review_count", 5),
-            )
-            business_ids = set(businesses["business_id"].values)
-            logger.info(
-                f"Filtering by state {state_filter}: {len(business_ids)} businesses"
-            )
-            reviews = reviews[reviews["business_id"].isin(business_ids)]
-
-        logger.info(f"Loaded {len(reviews)} reviews (after state filtering)")
-
-        # Build CSR matrix FROM FILTERED DATA
-        logger.info("Building CSR matrix from filtered data...")
-        dataset = build_csr(reviews)
-        X_csr = dataset.csr
         logger.info(
-            f"Built CSR: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
-            f"{X_csr.nnz} interactions"
+            f"Saved item2index_filtered (model space): {len(item_map_after_kcore)} items"
         )
 
-        # Apply k-core filtering
-        logger.info("Applying k-core filtering (k=5)...")
-        X_csr = apply_kcore_filtering(X_csr, k=5)
-        logger.info(
-            f"After k-core: {X_csr.shape[0]} users × {X_csr.shape[1]} items, "
-            f"{X_csr.nnz} interactions"
-        )
+        if len(final_user_ids) != X_csr.shape[0]:
+            raise RuntimeError(
+                "Shared preprocessing cache has inconsistent user ordering: "
+                f"{len(final_user_ids)} user IDs vs CSR rows {X_csr.shape[0]}"
+            )
 
         # Train/test split
         n_users = X_csr.shape[0]
         user_indices = np.arange(n_users)
+        train_test_ratio = config["data"]["train_test_split"]
+        val_ratio = config["data"]["val_split"]
+
         train_users, test_users = train_test_split(
             user_indices,
-            test_size=1 - config["data"]["train_test_split"],
+            test_size=1 - train_test_ratio,
             random_state=config["data"]["seed"],
+        )
+
+        n_test = len(test_users)
+        n_train = len(train_users)
+        logger.info(
+            f"Train/test split: {n_train} users ({train_test_ratio*100:.0f}%) → train, "
+            f"{n_test} users ({(1-train_test_ratio)*100:.0f}%) → test"
         )
 
         X_train_csr = X_csr[train_users]
         X_test_csr = X_csr[test_users]
+        train_user_ids = [str(final_user_ids[idx]) for idx in train_users]
+        test_user_ids = [str(final_user_ids[idx]) for idx in test_users]
 
         # Create datasets that handle sparse matrices efficiently
         X_train_dataset = SparseDataset(X_train_csr)
@@ -537,8 +1794,16 @@ def main() -> None:
         train_indices = np.arange(X_train_csr.shape[0])
         train_idx, val_idx = train_test_split(
             train_indices,
-            test_size=config["data"]["val_split"],
+            test_size=val_ratio,
             random_state=config["data"]["seed"],
+        )
+        val_user_ids = [str(train_user_ids[idx]) for idx in val_idx]
+
+        n_val = len(val_idx)
+        n_train_split = len(train_idx)
+        logger.info(
+            f"Train/val split (from training data): {n_train_split} users ({(1-val_ratio)*100:.0f}%) → train, "
+            f"{n_val} users ({val_ratio*100:.0f}%) → validation"
         )
 
         # Create subset datasets
@@ -547,10 +1812,29 @@ def main() -> None:
         X_train_split = Subset(X_train_dataset, train_idx)
         X_val_split = Subset(X_train_dataset, val_idx)
 
-        # Train ELSA
-        elsa_model, elsa_best_loss = train_elsa(
-            config, X_train_split, X_val_split, X_train_csr.shape[1], checkpoint_mgr
-        )
+        # Train or reuse ELSA
+        if args.skip_elsa:
+            elsa_checkpoint_path = _resolve_elsa_checkpoint_path(
+                args,
+                config=config,
+                expected_n_items=X_train_csr.shape[1],
+            )
+            elsa_model, elsa_best_loss, elsa_stats = _load_elsa_from_checkpoint(
+                checkpoint_path=elsa_checkpoint_path,
+                config=config,
+                n_items=X_train_csr.shape[1],
+                checkpoint_mgr=checkpoint_mgr,
+                device=device,
+            )
+        else:
+            elsa_model, elsa_best_loss, elsa_stats = train_elsa(
+                config,
+                X_train_split,
+                X_val_split,
+                X_train_csr.shape[1],
+                checkpoint_mgr,
+                seed=seed,
+            )
 
         # Encode all users with ELSA (frozen) using chunked encoding for large matrices
         logger.info("Encoding users with ELSA...")
@@ -571,10 +1855,24 @@ def main() -> None:
             f"Encoded: z_train={Z_train.shape}, z_val={Z_val.shape}, z_test={Z_test.shape}"
         )
 
-        # Train SAE
-        sae_model, sae_best_loss = train_sae(
-            config, elsa_model, Z_train, Z_val, checkpoint_mgr
-        )
+        # Train or reuse SAE
+        if args.skip_sae:
+            sae_checkpoint_path = _resolve_sae_checkpoint_path(args, config=config)
+            sae_model, sae_best_loss, sae_stats = _load_sae_from_checkpoint(
+                checkpoint_path=sae_checkpoint_path,
+                config=config,
+                checkpoint_mgr=checkpoint_mgr,
+                device=device,
+            )
+        else:
+            sae_model, sae_best_loss, sae_stats = train_sae(
+                config,
+                elsa_model,
+                Z_train,
+                Z_val,
+                checkpoint_mgr,
+                seed=seed,
+            )
 
         # Final evaluation on test set
         logger.info("=" * 60)
@@ -582,6 +1880,7 @@ def main() -> None:
         logger.info("=" * 60)
 
         sae_model.eval()
+        elsa_model.eval()
         with torch.no_grad():
             z_test_recon = sae_model.enc(Z_test)
             h_test = sae_model.encode(Z_test)
@@ -599,44 +1898,384 @@ def main() -> None:
             # Sparsity analysis
             active_neurons = (h_test != 0).sum(dim=1).float().mean().item()
 
+        sparse_activations_path = output_dir / "h_sparse_test.pt"
+        torch.save(h_test.cpu(), sparse_activations_path)
+        logger.info(f"Saved sparse test activations to {sparse_activations_path}")
+
+        # Compute ranking metrics (NDCG, Recall, MRR, etc.)
+        logger.info("Computing ranking metrics...")
+        evaluation_start = time.time()
+
+        # ⭐ DIAGNOSTIC LOGGING (Phase 1)
+        logger.info("\n📊 EVALUATION DIAGNOSTICS:")
+        logger.info(
+            f"Test set size: {X_test_csr.shape[0]} users × {X_test_csr.shape[1]} items"
+        )
+        logger.info(
+            f"Test set sparsity: {(1.0 - X_test_csr.nnz / (X_test_csr.shape[0] * X_test_csr.shape[1])) * 100:.2f}%"
+        )
+        logger.info(f"Train users indices (first 5): {train_users[:5]}")
+        logger.info(f"Test users indices (first 5): {test_users[:5]}")
+        overlap_check = len(set(train_users) & set(test_users))
+        logger.info(f"Train/test overlap: {overlap_check} users (should be 0)")
+        if overlap_check > 0:
+            logger.warning(
+                f"⚠️  POTENTIAL DATA LEAKAGE: {overlap_check} users in both train and test!"
+            )
+
+        with torch.no_grad():
+            # Build a sparse holdout ranking split: masked input vs held-out target items.
+            holdout_ratio = config.get("evaluation", {}).get("holdout_ratio", 0.2)
+            min_interactions = config.get("evaluation", {}).get("min_interactions", 5)
+            X_eval_input_csr, X_eval_target_csr = build_holdout_split_sparse(
+                X_test_csr,
+                holdout_ratio=holdout_ratio,
+                min_interactions=min_interactions,
+                seed=config["data"]["seed"],
+            )
+
+            eval_k_values = config.get("evaluation", {}).get(
+                "k_values", [5, 10, 20, 50]
+            )
+            holdout_diagnostics = compute_holdout_diagnostics(
+                X_eval_input_csr,
+                X_eval_target_csr,
+                min_interactions=min_interactions,
+            )
+
+            logger.info(
+                "Holdout diagnostics: %d split users, %d evaluated users, avg held-out items %.2f, skipped %.2f%%",
+                holdout_diagnostics["n_split_users"],
+                holdout_diagnostics["n_eval_users"],
+                holdout_diagnostics["avg_heldout_items_per_user"],
+                holdout_diagnostics["pct_skipped_users"] * 100.0,
+            )
+
+            logger.info(
+                "Evaluating ranking on held-out test items (per-user item holdout, masked input)"
+            )
+
+            # === ELSA ALONE EVALUATION ===
+            logger.info("\nEvaluating ELSA-only on held-out test items...")
+            ranking_metrics_elsa, n_eval_users = evaluate_recommendations_batched(
+                X_eval_input_csr,
+                X_eval_target_csr,
+                lambda batch: _score_elsa_batch(elsa_model, batch, device),
+                ks=eval_k_values,
+                batch_size=256,
+            )
+
+            # === SAE+ELSA EVALUATION ===
+            logger.info("\nEvaluating SAE+ELSA on held-out test items...")
+            ranking_metrics_sae, _ = evaluate_recommendations_batched(
+                X_eval_input_csr,
+                X_eval_target_csr,
+                lambda batch: _score_sae_batch(elsa_model, sae_model, batch, device),
+                ks=eval_k_values,
+                batch_size=256,
+            )
+
+            if n_eval_users == 0:
+                raise RuntimeError(
+                    "Training-time ranking evaluation produced zero effective users; "
+                    "check holdout settings and test split artifacts."
+                )
+
+            elsa_score_diag = compute_score_diagnostics(
+                lambda batch: _score_elsa_batch(elsa_model, batch, device),
+                X_eval_input_csr,
+                X_eval_target_csr,
+                top_k=max(eval_k_values),
+            )
+            sae_score_diag = compute_score_diagnostics(
+                lambda batch: _score_sae_batch(elsa_model, sae_model, batch, device),
+                X_eval_input_csr,
+                X_eval_target_csr,
+                top_k=max(eval_k_values),
+            )
+            logger.info(
+                "ELSA score diagnostics: finite_fraction=%.4f mean=%.4f std=%.4f range=[%.4f, %.4f]",
+                elsa_score_diag["finite_fraction"],
+                elsa_score_diag["score_mean"],
+                elsa_score_diag["score_std"],
+                elsa_score_diag["score_min"],
+                elsa_score_diag["score_max"],
+            )
+            logger.info(
+                "SAE+ELSA score diagnostics: finite_fraction=%.4f mean=%.4f std=%.4f range=[%.4f, %.4f]",
+                sae_score_diag["finite_fraction"],
+                sae_score_diag["score_mean"],
+                sae_score_diag["score_std"],
+                sae_score_diag["score_min"],
+                sae_score_diag["score_max"],
+            )
+
+        coverage, entropy, latency_metrics = _compute_auxiliary_metrics(
+            elsa_model,
+            sae_model,
+            X_eval_input_csr,
+            device=device,
+            batch_size=256,
+            top_k=max(eval_k_values),
+        )
+
+        # Add these to SAE+ELSA ranking metrics
+        ranking_metrics_sae["coverage"] = coverage
+        ranking_metrics_sae["entropy"] = entropy
+        ranking_metrics_sae["latency"] = latency_metrics
+
+        # ⭐ Print comparison table
+        comparison_report = compare_model_performance(
+            ranking_metrics_elsa, ranking_metrics_sae
+        )
+        logger.info("\n" + comparison_report)
+
+        # Print detailed reports
+        logger.info(
+            "\nELSA-only metrics:\n" + print_evaluation_report(ranking_metrics_elsa)
+        )
+        logger.info(
+            "\nSAE+ELSA metrics:\n" + print_evaluation_report(ranking_metrics_sae)
+        )
+
+        # Use SAE+ELSA metrics as primary ranking_metrics for saving
+        ranking_metrics = ranking_metrics_sae
+
+        evaluation_time = time.time() - evaluation_start
+        logger.info(f"Ranking evaluation completed in {evaluation_time:.2f}s")
+
         logger.info(f"Test reconstruction loss: {test_recon_loss:.6f}")
         logger.info(f"Test cosine similarity: {test_cosine_sim:.4f}")
         logger.info(
             f"Average active neurons: {active_neurons:.1f}/{config['sae']['width_ratio'] * config['elsa']['latent_dim']}"
         )
 
-        # Save summary
+        # Compute model sizes
+        model_sizes = compute_model_sizes(elsa_model, sae_model, output_dir)
+
+        # Compute sparsity stats on test set
+        test_sparsity = compute_sparsity_stats(
+            sae_model, Z_test, device, batch_size=256
+        )
+
+        test_user_artifacts = persist_test_user_artifacts(
+            output_dir,
+            reviews,
+            train_user_ids,
+            test_user_ids,
+            val_user_ids,
+            top_k=50,
+            evaluation_protocol={
+                "split": "per-user holdout",
+                "holdout_ratio": config.get("evaluation", {}).get("holdout_ratio", 0.2),
+                "min_interactions": config.get("evaluation", {}).get(
+                    "min_interactions", 5
+                ),
+                "k_values": eval_k_values,
+                "train_test_split_seed": seed,
+                "train_val_split_seed": seed,
+                "scoring_mode": "masked_input_minus_seen_items",
+            },
+            holdout_input_csr=X_eval_input_csr,
+            holdout_target_csr=X_eval_target_csr,
+            holdout_split="test",
+            holdout_metadata={
+                "artifact_schema": "ranking_holdout_v1",
+                "split": "test",
+                "holdout_ratio": holdout_ratio,
+                "min_interactions": min_interactions,
+                "k_values": eval_k_values,
+                "metric_input": "masked user history",
+                "metric_target": "held-out interactions",
+                "scoring_mode": "masked_input_minus_seen_items",
+                "n_eval_users": int(n_eval_users),
+                "diagnostics": holdout_diagnostics,
+            },
+        )
+
+        # Save comprehensive summary
         summary = {
             "timestamp": datetime.now().isoformat(),
             "config": config.to_dict(),
             "data": {
-                "n_users": n_users,
-                "n_items": X_csr.shape[1],
-                "n_interactions": X_csr.nnz,
+                "n_users": int(n_users),
+                "n_items": int(X_csr.shape[1]),
+                "n_items_before_kcore": int(item_count_before_kcore),
+                "n_interactions": int(X_csr.nnz),
+                "n_train_users": int(len(train_users)),
+                "n_test_users": int(len(test_users)),
+                "sparsity_percent": float(
+                    100.0 * (1.0 - X_csr.nnz / (X_csr.shape[0] * X_csr.shape[1]))
+                ),
             },
             "elsa": {
                 "best_val_loss": float(elsa_best_loss),
+                "best_epoch": elsa_stats["best_epoch"],
+                "final_epoch": elsa_stats["final_epoch"],
+                "training_time_sec": elsa_stats["training_time_sec"],
+                "early_stop_reason": elsa_stats["early_stop_reason"],
             },
             "sae": {
+                "best_val_loss": float(sae_best_loss),
+                "best_epoch": sae_stats["best_epoch"],
+                "final_epoch": sae_stats["final_epoch"],
+                "training_time_sec": sae_stats["training_time_sec"],
+                "early_stop_reason": sae_stats["early_stop_reason"],
                 "test_recon_loss": float(test_recon_loss),
                 "test_cosine_sim": float(test_cosine_sim),
-                "avg_active_neurons": float(active_neurons),
+                "test_avg_active_neurons": float(active_neurons),
+                "test_avg_active_neurons_detailed": test_sparsity["avg_active_neurons"],
+                "test_max_active_neurons": test_sparsity["max_active_neurons"],
+                "test_total_neurons": test_sparsity["total_neurons"],
+                "test_sparsity_ratio": test_sparsity["sparsity_ratio"],
+            },
+            "ranking_metrics_elsa": ranking_metrics_elsa,  # ELSA-only on holdout
+            "ranking_metrics_sae": ranking_metrics_sae,  # SAE+ELSA on holdout
+            "ranking_metrics": ranking_metrics,  # Primary (same as ranking_metrics_sae)
+            "model_sizes": model_sizes,
+            "training": {
+                "total_time_sec": elsa_stats["training_time_sec"]
+                + sae_stats["training_time_sec"],
+                "elsa_time_sec": elsa_stats["training_time_sec"],
+                "sae_time_sec": sae_stats["training_time_sec"],
+                "evaluation_time_sec": evaluation_time,
             },
             "output_dir": str(output_dir),
+            "preprocessing": {
+                "cache_key": preprocessing_cache_key,
+                "cache_dir": str(shared_cache_dir),
+                "source": preprocessing_source,
+                "manifest_path": str(
+                    shared_preprocessing_manifest_path(shared_cache_dir)
+                ),
+                "manifest": preprocessing_manifest,
+            },
+            "reproducibility": {
+                **reproducibility,
+                "device": device,
+                "train_test_split_seed": seed,
+                "holdout_split_seed": seed,
+            },
+            "artifacts": {key: str(path) for key, path in test_user_artifacts.items()},
+            "evaluation_protocol": {
+                "split": "per-user holdout",
+                "holdout_ratio": holdout_ratio,
+                "min_interactions": min_interactions,
+                "k_values": eval_k_values,
+                "metric_input": "masked user history",
+                "metric_target": "held-out interactions",
+                "scoring_mode": "masked_input_minus_seen_items",
+                "holdout_diagnostics": holdout_diagnostics,
+            },
         }
 
         summary_path = output_dir / "summary.json"
         with summary_path.open("w") as f:
             json.dump(summary, f, indent=2)
 
+        # � SAVE DATA FOR NEURON LABELING REPRODUCIBILITY
+        logger.info("\nSaving data files for neuron labeling...")
+        data_dir = output_dir / "data"
+        data_dir.mkdir(exist_ok=True, parents=True)
+
+        try:
+            shared_manifest = build_shared_data_manifest(
+                cache_dir=shared_cache_dir,
+                cache_key=preprocessing_cache_key,
+                manifest_path=shared_preprocessing_manifest_path(shared_cache_dir),
+            )
+            shared_manifest_file = shared_data_manifest_path(data_dir)
+            shared_manifest_file.write_text(
+                json.dumps(shared_manifest, indent=2),
+                encoding="utf-8",
+            )
+            logger.info("Saved shared data manifest to %s", shared_manifest_file)
+        except Exception as e:
+            logger.error(f"Failed to save data for neuron labeling: {e}")
+            logger.warning(
+                "Continuing without saved data manifest (labeling fallback may be limited)"
+            )
+
+        # 🔄 PRECOMPUTE USER CSR MATRICES (post-training step)
+        # This enables fast user history lookup in the app without querying DB each time
+        logger.info("\nPRECOMPUTATION PHASE:")
+        try:
+            precompute_user_csr_matrices(
+                reviews,
+                item_map_after_kcore,
+                output_dir,
+                upload_to_cloud=True,
+                top_n_users=50,
+                allowed_user_ids=test_user_ids,
+            )
+        except Exception as e:
+            logger.error(f"User matrix precomputation failed: {e}")
+            logger.warning(
+                "Continuing without precomputed matrices (app will work but slower)"
+            )
+
+        # Upload results to cloud if configured
+        timestamp = output_dir.name  # YYYYMMDD_HHMMSS format
+        upload_results_to_cloud(output_dir, timestamp)
+
         logger.info("=" * 60)
         logger.info("TRAINING COMPLETE")
         logger.info("=" * 60)
+        logger.info(
+            f"Total training time: {summary['training']['total_time_sec']:.1f}s"
+        )
+        logger.info(f"  ELSA: {summary['training']['elsa_time_sec']:.1f}s")
+        logger.info(f"  SAE: {summary['training']['sae_time_sec']:.1f}s")
+        logger.info(f"  Evaluation: {summary['training']['evaluation_time_sec']:.1f}s")
+        logger.info(
+            f"Model sizes: Total {model_sizes['total_mb']:.2f}MB "
+            f"(ELSA {model_sizes['elsa_mb']:.2f}MB, SAE {model_sizes['sae_mb']:.2f}MB)"
+        )
+        logger.info(f"\nRanking Metrics Summary:")
+        for metric_name in ["ndcg", "recall", "precision", "mrr"]:
+            if metric_name in ranking_metrics:
+                values = ranking_metrics[metric_name]
+                logger.info(
+                    f"  {metric_name.upper()}: "
+                    + ", ".join(f"{k}={v:.4f}" for k, v in sorted(values.items()))
+                )
         logger.info(f"Output directory: {output_dir}")
         logger.info(f"Summary saved to: {summary_path}")
 
+        # Register run as completed
+        final_metrics = {
+            "elsa_epochs": config["elsa"]["num_epochs"],
+            "sae_epochs": config["sae"]["num_epochs"],
+            "final_output_dir": str(output_dir),
+        }
+        registry.update_run_status(run_id, "train", "completed", final_metrics)
+        write_latest_run_pointer(output_dir)
+        logger.info(f"✓ Run {run_id} registered as completed")
+
+        # Upload artifacts to cloud for Streamlit deployment
+        try:
+            from src.cloud_upload_utils import upload_run_artifacts
+
+            experiment_manifest_dir = (
+                output_dir.parent if output_dir.parent.name == "experiments" else None
+            )
+            if upload_run_artifacts(
+                output_dir, experiment_manifest_dir, skip_if_exists=True
+            ):
+                logger.info("✓ Artifacts successfully uploaded to cloud")
+            else:
+                logger.warning(
+                    "⚠️ Could not upload all artifacts to cloud (training succeeded locally)"
+                )
+        except Exception as e:
+            logger.warning(
+                f"Could not upload to cloud: {e} (training succeeded locally)"
+            )
+
     except Exception as e:
         logger.exception(f"Training failed with error: {e}")
+        # Register run as failed
+        registry.update_run_status(run_id, "train", "failed", {"error": str(e)})
         raise
 
 

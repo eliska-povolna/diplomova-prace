@@ -20,46 +20,39 @@ yelp_dataset/
     yelp_academic_dataset_tip.json           (optional)
 ```
 
-### 2. Convert JSON to Parquet
+### 2. Load JSON into DuckDB
 
-**Option A: Automatic conversion in preprocessing notebook (recommended)**
+**Setup (one-time only)**
 
-The preprocessing notebook (`notebooks/00_preprocessing.ipynb`) automatically converts JSON to Parquet on first run:
+Load raw Yelp JSON files into DuckDB:
 
-1. Open `notebooks/00_preprocessing.ipynb`
-2. Run the "Convert Raw JSON to Parquet" cell
-3. If Parquet files don't exist, the notebook:
-   - Reads raw Yelp JSON files
-   - Creates DataFrames using pandas
-   - Saves partitioned Parquet files:
-     - **Business data** partitioned by state: `business/state=XX/part-0.parquet`
-     - **Review data** partitioned by year: `review/year=YYYY/part-0.parquet`
+```bash
+python -m src.setup_database --json-dir /path/to/yelp_dataset
+```
 
-**Why partitioning?**
-- State partitioning: Enables fast filtering for per-state analysis
-- Year partitioning: Enables temporal analysis and efficient range queries
-- Compression: Uses Snappy compression for smaller file sizes
+This creates:
+- `yelp.duckdb` with three tables: `yelp_business`, `yelp_review`, `yelp_user`
+- Enables efficient SQL queries directly on the data
+- No file conversion needed - DuckDB reads JSON natively
 
-**Option B: Manual script conversion (legacy)**
+**Next steps**
 
-If you prefer standalone conversion, use:
+After setup, run preprocessing:
 
 ```bash
 cd <repo_root>
-python src/data/convert_json_to_parquet.py \
-    --json_dir /path/to/yelp_dataset \
-    --parquet_dir /path/to/yelp_parquet
+python -m src.preprocess_data --config configs/default.yaml
 ```
 
-This produces the same partitioned structure:
+This reads from DuckDB and creates:
+
 ```
-yelp_parquet/
-    business/state=AZ/part-0.parquet
-    business/state=CA/part-0.parquet
-    ...
-    review/year=2005/part-0.parquet
-    review/year=2006/part-0.parquet
-    ...
+data/preprocessed_yelp/
+    processed_train.npz        # Training interaction matrix (CSR format)
+    processed_test.npz         # Test interaction matrix (CSR format)
+    user2index.pkl             # User ID to index mapping
+    item2index.pkl             # Business ID to index mapping
+    state_statistics.csv       # Statistics per state
 ```
 
 ## Directory layout

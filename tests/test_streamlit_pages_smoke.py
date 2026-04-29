@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("streamlit")
@@ -50,6 +53,7 @@ class _FakeInference:
 
 class _FakeData:
     num_pois = 2
+    state_filter = "PA"
 
     def get_test_users(self, limit=50):
         return [{"id": "user_1", "interactions": 2}]
@@ -73,6 +77,89 @@ class _FakeData:
             "business_id": f"biz_{poi_idx}",
         }
 
+    def get_dataset_summary(self, scope="training", state=None, city=None, pos_threshold=None):
+        return {
+            "n_businesses": 10,
+            "n_users": 20,
+            "n_items": 10,
+            "n_interactions": 100,
+            "density_pct": 1.0,
+            "min_year": 2018,
+            "max_year": 2022,
+        }
+
+    def get_state_distribution(self, limit=60):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [{"state": "PA", "n_businesses": 10, "avg_rating": 3.8}]
+        )
+
+    def get_top_cities(self, scope="training", state=None, limit=20):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [{"city": "Philadelphia", "state": "PA", "n_businesses": 10, "avg_rating": 3.9}]
+        )
+
+    def get_rating_distribution(self, scope="training", state=None, city=None):
+        import pandas as pd
+
+        return pd.DataFrame([{"stars": 4, "review_count": 50}, {"stars": 5, "review_count": 30}])
+
+    def get_review_volume_by_year(
+        self,
+        scope="training",
+        state=None,
+        city=None,
+        rating_min=None,
+        rating_max=None,
+    ):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [{"year": 2020, "review_count": 40}, {"year": 2021, "review_count": 60}]
+        )
+
+    def get_top_categories(self, scope="training", state=None, city=None, limit=20):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [{"categories": "Restaurants, Pizza", "n_businesses": 5, "avg_rating": 4.0}]
+        )
+
+    def get_activity_distributions(self, scope="training", state=None, city=None, pos_threshold=None):
+        import pandas as pd
+
+        return (
+            pd.DataFrame([{"cnt": 1, "num_users": 10}, {"cnt": 2, "num_users": 5}]),
+            pd.DataFrame([{"cnt": 1, "num_items": 7}, {"cnt": 2, "num_items": 3}]),
+        )
+
+    def get_sample_business_rows(self, scope="training", state=None, city=None, limit=10):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [{"business_id": "b1", "name": "Test Biz", "city": "Philadelphia", "state": "PA"}]
+        )
+
+    def get_sample_review_rows(
+        self,
+        scope="training",
+        state=None,
+        city=None,
+        year_min=None,
+        year_max=None,
+        rating_min=None,
+        rating_max=None,
+        limit=10,
+    ):
+        import pandas as pd
+
+        return pd.DataFrame(
+            [{"review_id": "r1", "text": "Great place", "business_name": "Test Biz"}]
+        )
+
 
 class _FakeLabels:
     def get_label(self, neuron_idx):
@@ -83,6 +170,7 @@ class _FakeLabels:
 
 
 def _build_app_test(app_fn):
+    tempfile.tempdir = str(Path.cwd())
     at = AppTest.from_function(app_fn)
     at.session_state["inference"] = _FakeInference()
     at.session_state["data"] = _FakeData()
@@ -131,5 +219,16 @@ def test_live_demo_page_renders_without_exceptions():
         live_demo.show()
 
     at = _build_app_test(_live_demo_app)
+    assert len(at.exception) == 0
+    assert len(at.error) == 0
+
+
+def test_dataset_statistics_page_renders_without_exceptions():
+    def _dataset_app():
+        from src.ui.pages import dataset_statistics
+
+        dataset_statistics.show()
+
+    at = _build_app_test(_dataset_app)
     assert len(at.exception) == 0
     assert len(at.error) == 0

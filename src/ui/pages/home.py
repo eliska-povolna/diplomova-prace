@@ -1,165 +1,180 @@
-"""Home page — Welcome & quick stats."""
+"""Home page: overview and system explanation."""
+
+from typing import Any, Dict, Optional
 
 import streamlit as st
+
+
+def _safe_get(d: Optional[Dict[str, Any]], *path, default=None):
+    current: Any = d
+    for key in path:
+        if not isinstance(current, dict) or key not in current:
+            return default
+        current = current[key]
+    return current
+
+
+def _dataset_label(config: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(config, dict):
+        return "Yelp (all)"
+    state_filter = config.get("state_filter")
+    if state_filter and str(state_filter).strip().lower() not in {"all", "*"}:
+        return f"Yelp ({str(state_filter).strip()})"
+    return "Yelp (all)"
 
 
 def show():
     """Display home page."""
     inference = st.session_state.get("inference")
     data = st.session_state.get("data")
+    training_results = st.session_state.get("training_results") or {}
+    config = st.session_state.get("config") or {}
 
     if not inference or not data:
         st.error("Services not initialized")
         return
 
-    # Debug section at top to help diagnose caching issues
-    with st.expander("🔧 Debug Info", expanded=False):
-        debug_cols = st.columns([3, 1])
-        with debug_cols[0]:
-            st.write(f"**Model n_items**: {inference.n_items}")
-            st.write(f"**Data POIs**: {data.num_pois}")
-            item2index_size = getattr(data, "item2index", None)
-            if item2index_size:
-                st.write(f"**item2index mapping size**: {len(item2index_size)}")
-            else:
-                st.write("**item2index**: Not loaded")
-            test_users = data.get_test_users(limit=50)
-            st.write(f"**Test users loaded**: {len(test_users)}")
-            if test_users:
-                st.write(f"  First user: {test_users[0]['id']}")
-            if not test_users:
-                st.warning("⚠️ No test users found! Check cache at data/ui_cache/")
-        with debug_cols[1]:
-            if st.button("🔄 Clear Cache", key="clear_cache_btn"):
-                # Clear service cache to force reload on next run
-                st.cache_resource.clear()
-                st.success("Cache cleared! Reload page in browser.")
+    summary_data = _safe_get(training_results, "summary", "data", default={}) or {}
+    summary_eval = (
+        _safe_get(training_results, "summary", "evaluation", default={}) or {}
+    )
 
-    # Title
+    n_users = (
+        summary_data.get("n_users")
+        or summary_data.get("users")
+        or summary_data.get("num_users")
+    )
+    n_items = (
+        summary_data.get("n_items")
+        or summary_data.get("items")
+        or summary_data.get("num_items")
+        or data.num_pois
+    )
+    n_interactions = (
+        summary_data.get("n_interactions")
+        or summary_data.get("interactions")
+        or summary_data.get("num_interactions")
+    )
+
+    test_users_count = summary_eval.get("n_users_test")
+    if test_users_count is None:
+        test_users_count = len(data.get_test_users(limit=50))
+
+    default_alpha = float(getattr(inference, "alpha", 0.3))
+
     st.title("🗺️ Interpretable POI Recommender")
     st.write(
         """
-    Discover places tailored to your preferences using **sparse, interpretable neural features**.
-    
-    This demo showcases a recommendation system that combines:
-    - **ELSA**: Collaborative filtering autoencoder for dense embeddings
-    - **Sparse Autoencoder (SAE)**: Decomposition into interpretable features
-    - **Interactive Steering**: Adjust your preferences in real-time
-    """
+Discover places tailored to user preferences with sparse, interpretable neural features.
+
+This app combines:
+- ELSA collaborative filtering for dense user representations
+- Sparse autoencoder decomposition for interpretable features
+- Interactive steering with a shared canonical neuron-level configuration
+"""
     )
 
-    # Quick stats
     st.subheader("📊 Dataset Overview")
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
+    metrics_cols = st.columns(5)
+    with metrics_cols[0]:
+        if isinstance(n_items, int):
+            st.metric("POIs", f"{n_items:,}", delta=None, delta_color="off")
+        else:
+            st.metric("POIs", str(n_items), delta=None, delta_color="off")
+    with metrics_cols[1]:
+        st.metric("Dataset", _dataset_label(config), delta=None, delta_color="off")
+    with metrics_cols[2]:
         st.metric(
-            "🧠 Active Features",
-            getattr(inference.sae, "k", 64),
+            "Users",
+            f"{int(n_users):,}" if isinstance(n_users, (int, float)) else "N/A",
+            delta=None,
+            delta_color="off",
+        )
+    with metrics_cols[3]:
+        st.metric(
+            "Interactions",
+            (
+                f"{int(n_interactions):,}"
+                if isinstance(n_interactions, (int, float))
+                else "N/A"
+            ),
+            delta=None,
+            delta_color="off",
+        )
+    with metrics_cols[4]:
+        st.metric(
+            "Test users",
+            (
+                f"{int(test_users_count):,}"
+                if isinstance(test_users_count, (int, float))
+                else "N/A"
+            ),
             delta=None,
             delta_color="off",
         )
 
-    with col2:
-        st.metric("📍 POIs", f"{data.num_pois:,}", delta=None, delta_color="off")
-
-    with col3:
-        st.metric(
-            "👥 Test Users",
-            len(data.get_test_users(limit=50)),
-            delta="available",
-            delta_color="off",
-        )
-
-    with col4:
-        st.metric("🏙️ Dataset", "Yelp Academic", delta="California", delta_color="off")
-
-    # How it works
     st.subheader("⚙️ How It Works")
 
-    with st.expander("1️⃣ ELSA — Collaborative Filtering Autoencoder", expanded=False):
+    with st.expander("1️⃣ ELSA: Collaborative Filtering"):
         st.markdown(
             """
-        **ELSA** learns dense latent representations from user-POI interactions:
-        
-        - Encodes each user's history into a high-dimensional embedding
-        - Captures general preference patterns across all users
-        - Reconstructs user interests via a decoder
-        - Serves as the foundation for feature interpretation
-        """
+- Encodes each user's interaction history into a dense latent vector.
+- Learns collaborative structure across similar users and venues.
+- Produces the base ranking signal before interpretability and steering layers.
+- Captures preference patterns that are hard to express with simple hand-crafted rules.
+"""
         )
 
-    with st.expander(
-        "2️⃣ Sparse Autoencoder (SAE) — Feature Extraction", expanded=False
-    ):
+    with st.expander("2️⃣ Sparse Autoencoder: Interpretable Features"):
         st.markdown(
             f"""
-        **Sparse Autoencoder** decomposes ELSA embeddings into **{getattr(inference.sae, 'k', 64)} interpretable features**:
-        
-        - Only top-k features activate per user (highly sparse)
-        - Each neuron learns a distinct semantic concept
-        - Examples: "Italian Restaurants", "Budget-Friendly", "Late-Night Venues"
-        - Enables human understanding of model decisions
-        """
+- SAE dictionary width (`hidden_dim`) controls total feature capacity.
+- Sparsity (`k`) controls how many features are active per user vector.
+- Feature meanings come from run-scoped labeling artifacts loaded for the strict best run.
+- This enables feature-level explanations and controllable steering in the UI.
+"""
         )
 
-    with st.expander("3️⃣ Interactive Steering — Adjust Preferences", expanded=False):
+    with st.expander("3️⃣ Unified Steering (Concept + Neuron Compatible)"):
+        st.markdown(
+            f"""
+- Concept steering and neuron steering both write to the same canonical `neuron_values` map.
+- Updates are merged (patch semantics), so one steering action does not erase unrelated edits.
+- A single `alpha` controls interpolation strength for the final latent vector.
+
+Formula used by inference:
+```text
+z_final = (1 - alpha) * z_user + alpha * z_steered
+```
+Default `alpha` in this run is `{default_alpha:.2f}`.
+"""
+        )
+
+    with st.expander("4️⃣ Evaluation Metrics"):
         st.markdown(
             """
-        Use **steering sliders** to explore how preferences change recommendations:
-        
-        - Move slider → strength of that feature changes
-        - Real-time updates to recommendations
-        - See map and cards update instantly
-        - Understand feature influence on rankings
-        
-        **Algorithm**: 
-        ```
-        z_steered = (1 - α) × z_user + α × steering_vector
-        ```
-        where α = 0.3 (30% influence)
-        """
+- `Recall@20`: how many relevant places appear in top-20 recommendations.
+- `NDCG@20`: ranking quality with position-aware gain.
+- Additional ranking, diversity, and latency metrics are shown on the Results page.
+"""
         )
 
-    with st.expander("4️⃣ Evaluation Metrics — Quality Assessment", expanded=False):
-        st.markdown(
-            """
-        Evaluate recommendation quality across:
-        
-        - **Recall@20**: What % of liked items appear in top-20?
-        - **NDCG@100**: How well are items ranked?
-        - **Model Size**: Trade-off between sparsity and accuracy
-        - **Inference Speed**: <2s recommendations for interactive use
-        """
-        )
-
-    # Navigation buttons
     st.divider()
     st.subheader("🚀 Get Started")
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        if st.button("📊 View Evaluation Results", use_container_width=True):
-            st.switch_page("📊 Results")
-
-    with col2:
-        if st.button("🎛️ Try Interactive Steering", use_container_width=True):
-            st.switch_page("🎛️ Live Demo")
-
-    with col3:
-        if st.button("🔍 Browse Features", use_container_width=True):
-            st.switch_page("🔍 Interpretability")
-
-    # Footer
-    st.divider()
-    st.markdown(
-        """
-    ---
-    **Citation**: 
-    Sparse autoencoders for recommendation systems interpretation.
-    *WWW 2026* (Demo Track)
-    
-    **Data**: Yelp Academic Dataset (California businesses)
-    """
-    )
+    nav1, nav2, nav3 = st.columns(3)
+    with nav1:
+        if st.button("📊 View Evaluation Results", width="stretch"):
+            page = st.session_state.get("_results_page")
+            if page:
+                st.switch_page(page)
+    with nav2:
+        if st.button("🎛️ Try Interactive Steering", width="stretch"):
+            page = st.session_state.get("_live_demo_page")
+            if page:
+                st.switch_page(page)
+    with nav3:
+        if st.button("🔍 Browse Features", width="stretch"):
+            page = st.session_state.get("_interpretability_page")
+            if page:
+                st.switch_page(page)
