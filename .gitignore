@@ -72,10 +72,6 @@ docs/_build/
 # Local analysis & internal documentation (not for version control)
 docs/analysis/
 
-# ── Development scripts & debug files ────────────────────────────────────────
-# Debug, test, and utility scripts (keep in scripts/ folder)
-scripts/
-
 # ── Data files (not for version control) ─────────────────────────────────────
 # LARGE DATASETS - Keep locally or in cloud storage, do NOT commit
 # - Yelp-JSON/yelp.duckdb (1-2 GB)

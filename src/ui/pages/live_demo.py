@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import base64
+import csv
 import hashlib
 import json
 import logging
 import re
 from io import BytesIO
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 from scipy.sparse import csr_matrix
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+import torch
 from PIL import Image, ImageDraw
 
 from src.ui.steering_state import (
@@ -24,6 +28,10 @@ from src.ui.steering_state import (
 from src.ui.utils import info_section
 from src.ui.utils.formatting import format_feature_id, format_features_list
 from src.ui.components.concept_steering_panel import render_concept_steering_panel
+from src.ui.services.steering_eval import (
+    append_steering_eval_rows,
+    build_presence_ratio,
+)
 from src.utils.evaluation import ndcg_at_k
 
 try:
@@ -125,6 +133,10 @@ def _compute_live_ndcg(
     return float(ndcg_at_k(np.asarray(y_true), argsorted, k))
 
 
+def _visible_ndcg_cache_key(selected_user: str) -> str:
+    return _demo_state_key(selected_user, "visible_ndcg_cache")
+
+
 def _format_ndcg_delta(before: float | None, after: float | None) -> str:
     if before is None or after is None:
         return "N/A"
@@ -184,6 +196,199 @@ def merge_steering_vectors(
             merged.pop(neuron_idx, None)
 
     return merged
+
+
+def _concept_metadata_key(selected_user: str) -> str:
+    return f"concept_steering_metadata::{selected_user}"
+
+
+def _pending_eval_key(selected_user: str) -> str:
+    return _demo_state_key(selected_user, "pending_steering_eval")
+
+
+def _resolve_run_id(inference) -> str:
+    config = getattr(inference, "config", {}) or {}
+    candidates = [
+        config.get("run_id"),
+        config.get("run_dir"),
+        config.get("output_dir"),
+        st.session_state.get("results_view_run_dir"),
+    ]
+    for candidate in candidates:
+        if candidate:
+            return Path(str(candidate)).name or str(candidate)
+    return "live-demo"
+
+
+def _compute_activation_snapshot(inference, selected_user: str, steering_config=None) -> Dict[int, float]:
+    user_z = inference.user_latents[selected_user].to(inference.device)
+    with torch.no_grad():
+        z_final = user_z
+        if steering_config:
+            z_final = inference._apply_steering(user_z, steering_config)
+        h_final = inference.sae.encode(z_final.unsqueeze(0)).squeeze()
+    return {int(idx): float(h_final[idx].abs().item()) for idx in range(h_final.shape[0])}
+
+
+def _mean_activation(snapshot: Dict[int, float], neuron_ids: List[int]) -> float:
+    values = [float(snapshot.get(int(idx), float("nan"))) for idx in neuron_ids]
+    values = [value for value in values if not np.isnan(value)]
+    if not values:
+        return float("nan")
+    return float(np.mean(values))
+
+
+def _build_label_specs(
+    *,
+    active_config: Dict,
+    draft_neuron_values: Dict[int, float],
+    concept_metadata: List[Dict],
+    labels_method: str,
+) -> List[Dict]:
+    label_specs: List[Dict] = []
+    active_neuron_values = dict(active_config.get("neuron_values") or {})
+
+    for raw_idx, raw_value in draft_neuron_values.items():
+        try:
+            neuron_idx = int(raw_idx)
+            draft_value = float(raw_value)
+        except (TypeError, ValueError):
+            continue
+        baseline_value = float(active_neuron_values.get(neuron_idx, 0.0))
+        delta = draft_value - baseline_value
+        if abs(delta) <= 1e-9:
+            continue
+        label_specs.append(
+            {
+                "label": f"neuron:{neuron_idx}",
+                "target_neuron_ids": [int(neuron_idx)],
+                "method": labels_method,
+                "weights_changed_json": json.dumps(
+                    {str(neuron_idx): float(delta)}, sort_keys=True
+                ),
+                "strength": float(delta),
+            }
+        )
+
+    for entry in concept_metadata or []:
+        try:
+            label = str(entry.get("label") or entry.get("entity_id") or "concept")
+        except Exception:
+            label = "concept"
+        selected_weights = entry.get("neuron_weights") or {}
+        if not selected_weights:
+            continue
+
+        deltas: Dict[int, float] = {}
+        for raw_idx, raw_value in selected_weights.items():
+            try:
+                neuron_idx = int(raw_idx)
+                selected_value = float(raw_value)
+            except (TypeError, ValueError):
+                continue
+            baseline_value = float(active_neuron_values.get(neuron_idx, 0.0))
+            delta = selected_value - baseline_value
+            if abs(delta) <= 1e-9:
+                continue
+            deltas[neuron_idx] = delta
+
+        if not deltas:
+            continue
+
+        label_specs.append(
+            {
+                "label": label,
+                "target_neuron_ids": sorted(deltas.keys()),
+                "method": labels_method,
+                "weights_changed_json": json.dumps(
+                    {str(idx): float(delta) for idx, delta in deltas.items()},
+                    sort_keys=True,
+                ),
+                "strength": float(sum(delta for delta in deltas.values())),
+            }
+        )
+
+    return label_specs
+
+
+def _build_steering_eval_rows(
+    *,
+    inference,
+    selected_user: str,
+    pending_payload: Dict,
+    baseline_recommendations: List[Dict],
+    steered_recommendations: List[Dict],
+) -> List[Dict]:
+    label_specs = pending_payload.get("label_specs") or []
+    if not label_specs:
+        return []
+
+    run_id = pending_payload.get("run_id") or _resolve_run_id(inference)
+    k = int(pending_payload.get("k") or len(steered_recommendations) or 0)
+    timestamp_iso = datetime.now(timezone.utc).isoformat()
+    baseline_activation_snapshot = pending_payload.get("baseline_activation_snapshot") or {}
+    after_activation_snapshot = _compute_activation_snapshot(
+        inference,
+        selected_user,
+        steering_config=pending_payload.get("new_steering_config"),
+    )
+
+    ndcg_before = pending_payload.get("ndcg_before")
+    ndcg_after = pending_payload.get("ndcg_after")
+    if ndcg_before is None:
+        ndcg_before_live = _compute_live_ndcg(
+            inference, selected_user, baseline_recommendations[:k]
+        )
+        ndcg_before = (
+            float(ndcg_before_live) if ndcg_before_live is not None else float("nan")
+        )
+    if ndcg_after is None:
+        ndcg_after_live = _compute_live_ndcg(
+            inference, selected_user, steered_recommendations[:k]
+        )
+        ndcg_after = (
+            float(ndcg_after_live) if ndcg_after_live is not None else float("nan")
+        )
+
+    rows: List[Dict] = []
+    for spec in label_specs:
+        target_neuron_ids = [int(idx) for idx in spec.get("target_neuron_ids", [])]
+        if not target_neuron_ids:
+            continue
+
+        activation_before = _mean_activation(baseline_activation_snapshot, target_neuron_ids)
+        activation_after = _mean_activation(after_activation_snapshot, target_neuron_ids)
+        method = str(spec.get("method") or "neuron")
+
+        if method.startswith("llm"):
+            cpr_before = float("nan")
+            cpr_after = float("nan")
+        else:
+            cpr_before = build_presence_ratio(baseline_recommendations, target_neuron_ids)
+            cpr_after = build_presence_ratio(steered_recommendations, target_neuron_ids)
+
+        row = {
+            "timestamp_iso": timestamp_iso,
+            "run_id": run_id,
+            "user_id": selected_user,
+            "k": k,
+            "method": method,
+            "label": str(spec.get("label") or "unknown"),
+            "strength": float(spec.get("strength") or 0.0),
+            "ndcg_before": ndcg_before,
+            "ndcg_after": ndcg_after,
+            "cpr_before": cpr_before,
+            "cpr_after": cpr_after,
+            "activation_before": activation_before,
+            "activation_after": activation_after,
+            "delta_ndcg": ndcg_after - ndcg_before if np.isfinite(ndcg_before) and np.isfinite(ndcg_after) else float("nan"),
+            "delta_cpr": cpr_after - cpr_before if np.isfinite(cpr_before) and np.isfinite(cpr_after) else float("nan"),
+            "delta_activation": activation_after - activation_before if np.isfinite(activation_before) and np.isfinite(activation_after) else float("nan"),
+            "weights_changed_json": str(spec.get("weights_changed_json") or "{}"),
+        }
+        rows.append(row)
+
+    return rows
 
 
 def _set_demo_recommendation_state(
@@ -253,11 +458,13 @@ def _clear_demo_steering_state(selected_user: str) -> None:
     st.session_state[_demo_state_key(selected_user, "steering_hash")] = ""
     st.session_state[_demo_state_key(selected_user, "draft_neuron_values")] = {}
     st.session_state[_demo_state_key(selected_user, "draft_concept_neuron_values")] = {}
+    st.session_state[_demo_state_key(selected_user, "pending_steering_eval")] = {}
     st.session_state[_demo_state_key(selected_user, "draft_source")] = None
     st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
     st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
     st.session_state.current_recommendations = base
     st.session_state.steering_modified = False
+    st.session_state.pop(_concept_metadata_key(selected_user), None)
 
     # Reset concept steering panel checkbox states
     keys_to_delete = [
@@ -727,6 +934,12 @@ def _recompute_recommendations_shared(
             )
             st.session_state[base_cache_key] = baseline_recommendations
 
+        valid_baseline = [
+            reco
+            for reco in baseline_recommendations
+            if (reco.get("item_id") or reco.get("poi_idx")) is not None
+        ]
+
         inference_steering = to_inference_config(steering_config)
         needs_model_recompute = steering_changed or force or current_base is None
 
@@ -744,10 +957,47 @@ def _recompute_recommendations_shared(
             full_recommendations = list(
                 (recommendations_with_delta or baseline_recommendations)[:TOP_K]
             )
+
+            if inference_steering:
+                pending_eval = st.session_state.pop(
+                    _pending_eval_key(selected_user),
+                    None,
+                )
+                if pending_eval:
+                    try:
+                        steering_eval_rows = _build_steering_eval_rows(
+                            inference=inference,
+                            selected_user=selected_user,
+                            pending_payload=pending_eval,
+                            baseline_recommendations=valid_baseline,
+                            steered_recommendations=full_recommendations,
+                        )
+                        if steering_eval_rows:
+                            append_steering_eval_rows(steering_eval_rows)
+                    except Exception as log_error:
+                        logger.exception("Failed to write steering eval CSV")
+                        st.warning(
+                            f"Could not save steering evaluation log: {log_error}"
+                        )
         else:
             full_recommendations = list(st.session_state.get(full_cache_key, []) or [])
             if not full_recommendations:
                 full_recommendations = list(baseline_recommendations[:TOP_K])
+
+        visible_recommendations = list(full_recommendations[:num_recommendations])
+        visible_baseline = list(valid_baseline[:num_recommendations])
+        st.session_state[_visible_ndcg_cache_key(selected_user)] = {
+            "visible_k": int(num_recommendations),
+            "steering_hash": current_hash,
+            "baseline_hash": _compute_data_hash(visible_baseline),
+            "current_hash": _compute_data_hash(visible_recommendations),
+            "baseline_ndcg": _compute_live_ndcg(
+                inference, selected_user, visible_baseline
+            ),
+            "current_ndcg": _compute_live_ndcg(
+                inference, selected_user, visible_recommendations
+            ),
+        }
 
         cached_poi_details = dict(
             st.session_state.get(f"poi_details_map_{selected_user}", {}) or {}
@@ -767,12 +1017,6 @@ def _recompute_recommendations_shared(
         if missing_indices:
             fetched = data.get_poi_details_batch(missing_indices)
             cached_poi_details.update(fetched)
-
-        valid_baseline = [
-            reco
-            for reco in baseline_recommendations
-            if (reco.get("item_id") or reco.get("poi_idx")) is not None
-        ]
 
         _set_demo_recommendation_state(
             selected_user,
@@ -888,16 +1132,39 @@ def _render_poi_cards_section(
                     or []
                 )
                 base_recommendations = base_recommendations[:visible_ndcg_k]
-                current_ndcg = _compute_live_ndcg(
-                    inference,
-                    selected_user,
-                    filtered_recommendations,
+                cache = st.session_state.get(_visible_ndcg_cache_key(selected_user), {})
+                expected_current_hash = _compute_data_hash(filtered_recommendations)
+                expected_base_hash = _compute_data_hash(base_recommendations)
+                expected_steering_hash = steering_config_hash(
+                    get_steering_config(st.session_state, selected_user)
                 )
-                baseline_ndcg = _compute_live_ndcg(
-                    inference,
-                    selected_user,
-                    base_recommendations,
-                )
+                if (
+                    cache.get("visible_k") == visible_ndcg_k
+                    and cache.get("steering_hash") == expected_steering_hash
+                    and cache.get("current_hash") == expected_current_hash
+                    and cache.get("baseline_hash") == expected_base_hash
+                ):
+                    current_ndcg = cache.get("current_ndcg")
+                    baseline_ndcg = cache.get("baseline_ndcg")
+                else:
+                    current_ndcg = _compute_live_ndcg(
+                        inference,
+                        selected_user,
+                        filtered_recommendations,
+                    )
+                    baseline_ndcg = _compute_live_ndcg(
+                        inference,
+                        selected_user,
+                        base_recommendations,
+                    )
+                    st.session_state[_visible_ndcg_cache_key(selected_user)] = {
+                        "visible_k": visible_ndcg_k,
+                        "steering_hash": expected_steering_hash,
+                        "baseline_hash": expected_base_hash,
+                        "current_hash": expected_current_hash,
+                        "baseline_ndcg": baseline_ndcg,
+                        "current_ndcg": current_ndcg,
+                    }
                 if current_ndcg is not None:
                     if st.session_state.get("steering_modified"):
                         st.metric(
@@ -1297,7 +1564,7 @@ def show():
             key="show_history_checkbox",
             on_change=_on_history_checkbox_change,
         )
-        show_scores = st.checkbox("Show scores", value=True)
+        show_map = st.checkbox("Show map", value=True)
 
         st.divider()
 
@@ -1536,6 +1803,23 @@ def show():
             st.rerun()
 
         if apply_clicked:
+            labels_service = st.session_state.get("labels")
+            labels_method = str(
+                getattr(labels_service, "selected_method", None)
+                or active_config.get("source", "neuron")
+            )
+            baseline_activation_snapshot = _compute_activation_snapshot(
+                inference, selected_user, steering_config=None
+            )
+            concept_metadata = list(
+                st.session_state.get(_concept_metadata_key(selected_user), []) or []
+            )
+            label_specs = _build_label_specs(
+                active_config=active_config,
+                draft_neuron_values=draft_neuron_values,
+                concept_metadata=concept_metadata,
+                labels_method=labels_method,
+            )
             active_neuron_values = dict(active_config.get("neuron_values") or {})
             neuron_contributions: Dict[int, float] = {}
             for raw_idx, raw_value in draft_neuron_values.items():
@@ -1586,23 +1870,46 @@ def show():
                 len(draft_concept_neuron_values)
             )
 
-            set_steering_config(
-                st.session_state,
-                selected_user,
-                neuron_values=merged_neuron_values,
-                alpha=st.session_state.get(draft_alpha_key, active_alpha),
-                source=source,
-                provenance=provenance,
-            )
-            st.session_state[_demo_state_key(selected_user, "force_recompute")] = True
-            st.session_state[draft_key] = {}
-            st.session_state[concept_draft_key] = {}
-            st.session_state[_demo_state_key(selected_user, "draft_source")] = None
-            st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
-            st.session_state[
-                _demo_state_key(selected_user, "sync_sliders_from_config")
-            ] = True
-            st.rerun()
+            # If there are no merged neuron values and alpha wasn't changed, inform the user
+            if not merged_neuron_values and not has_pending_alpha:
+                st.info("No pending steering changes to apply.")
+                logger.debug(
+                    "Apply clicked but no changes detected: merged_neuron_values empty and alpha unchanged"
+                )
+            else:
+                set_steering_config(
+                    st.session_state,
+                    selected_user,
+                    neuron_values=merged_neuron_values,
+                    alpha=st.session_state.get(draft_alpha_key, active_alpha),
+                    source=source,
+                    provenance=provenance,
+                )
+                st.session_state[_pending_eval_key(selected_user)] = {
+                    "run_id": _resolve_run_id(inference),
+                    "k": int(st.session_state.get("display_num_recommendations", 12)),
+                    "label_specs": label_specs,
+                    "baseline_activation_snapshot": baseline_activation_snapshot,
+                    "new_steering_config": to_inference_config(
+                        {
+                            "type": "neuron",
+                            "source": source,
+                            "alpha": st.session_state.get(draft_alpha_key, active_alpha),
+                            "neuron_values": merged_neuron_values,
+                        }
+                    ),
+                }
+                st.session_state[_demo_state_key(selected_user, "force_recompute")] = True
+                st.session_state[draft_key] = {}
+                st.session_state[concept_draft_key] = {}
+                st.session_state.pop(_concept_metadata_key(selected_user), None)
+                st.session_state[_demo_state_key(selected_user, "draft_source")] = None
+                st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
+                st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
+                logger.info(
+                    f"Applied steering: source={source}, neuron_updates={len(different_neurons)}, concept_updates={len(draft_concept_neuron_values)}"
+                )
+                st.rerun()
 
         # ===================================================================
         # Section 3: Shared Recommendations Compute Block
@@ -1630,10 +1937,9 @@ def show():
         )
         filtered_recommendations = displayed_recommendations[:num_recommendations]
 
-        # Section 4: Map Visualization (ALWAYS renders instantly with recommendations)
+        # Section 4: Map Visualization (optional)
         # ===================================================================
-        map_placeholder = st.empty()
-        with map_placeholder.container():
+        if show_map:
             _render_map_section(
                 selected_user=selected_user,
                 data=data,
@@ -1649,7 +1955,7 @@ def show():
             data=data,
             available_width=available_width,
             card_width_px=card_width_px,
-            show_scores=show_scores,
+            show_scores=True,
             photo_height_px=photo_height_px,
             filtered_recommendations=filtered_recommendations,
             poi_details_map=st.session_state.get(

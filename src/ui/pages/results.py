@@ -13,6 +13,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from src.ui.services.steering_eval import (
+    DEFAULT_STEERING_EVAL_CSV,
+    DEFAULT_STEERING_EVAL_OUTDIR,
+    filter_steering_eval_dataframe,
+    generate_steering_eval_plots,
+    load_steering_eval_dataframe,
+)
+
 logger = logging.getLogger(__name__)
 SUPPORTED_K_VALUES = [5, 10, 20, 50]
 
@@ -778,6 +786,99 @@ def _render_metric_formulas(k_tags: List[str]) -> None:
     st.markdown("`IDCG@k = sum_{i=1..min(|Rel_u|, k)} (1 / log2(i+1))`")
     st.markdown("`NDCG@k = DCG@k / IDCG@k`")
 
+
+def _build_steering_k_options(df: pd.DataFrame) -> List[int | str]:
+    options: List[int | str] = ["All", 10, 20, 50]
+    if "k" not in df.columns:
+        return options
+
+    available_ks = []
+    for value in pd.Series(df["k"]).dropna().tolist():
+        try:
+            available_ks.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    for value in sorted(set(available_ks)):
+        if value not in options:
+            options.append(value)
+    return options
+
+
+def _render_steering_eval_tab() -> None:
+    df = load_steering_eval_dataframe(DEFAULT_STEERING_EVAL_CSV, max_rows=500)
+    if df.empty:
+        st.info("no data gathered")
+        return
+
+    st.caption(
+        "Charts are generated from the latest 500 steering rows so the tab stays responsive."
+    )
+
+    k_options = _build_steering_k_options(df)
+    method_options = ["All"] + sorted(
+        {
+            str(value)
+            for value in df["method"].dropna().astype(str).tolist()
+            if str(value).strip()
+        }
+    )
+    user_options = ["All"] + sorted(
+        {
+            str(value)
+            for value in df["user_id"].dropna().astype(str).tolist()
+            if str(value).strip()
+        }
+    )
+
+    filter_cols = st.columns([1, 1, 1, 2])
+    with filter_cols[0]:
+        user_choice = st.selectbox("user", options=user_options, index=0)
+    with filter_cols[1]:
+        k_choice = st.selectbox("k", options=k_options, index=0)
+    with filter_cols[2]:
+        method_choice = st.selectbox("method", options=method_options, index=0)
+    with filter_cols[3]:
+        label_query = st.text_input("label contains", value="")
+
+    filtered_df = filter_steering_eval_dataframe(
+        df,
+        k_value=k_choice,
+        method_value=method_choice,
+        label_contains=label_query,
+    )
+    if user_choice != "All":
+        filtered_df = filtered_df[filtered_df["user_id"].astype(str) == str(user_choice)]
+    if filtered_df.empty:
+        st.info("No steering log rows match the current filters.")
+        return
+
+    filtered_df = filtered_df.sort_values("timestamp_iso", na_position="last").tail(100)
+    display_df = filtered_df.copy()
+    if pd.api.types.is_datetime64_any_dtype(display_df["timestamp_iso"]):
+        display_df["timestamp_iso"] = display_df["timestamp_iso"].dt.strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+
+    st.dataframe(_arrow_safe_df(display_df), width="stretch", hide_index=True)
+
+    current_k = None if k_choice == "All" else int(k_choice)
+    strength_path = DEFAULT_STEERING_EVAL_OUTDIR / "steering_vs_strength.png"
+
+    regenerate = st.button("Regenerate plots")
+    if regenerate or not strength_path.exists():
+        try:
+            generate_steering_eval_plots(df, DEFAULT_STEERING_EVAL_OUTDIR, k_filter=current_k)
+            st.success("Regenerated steering plots.")
+        except Exception as e:
+            logger.exception("Failed to regenerate steering plots")
+            st.warning(f"Could not regenerate plots: {e}")
+
+    if strength_path.exists():
+        st.image(str(strength_path), use_container_width=True)
+    else:
+        st.info("Plots are not available yet. Click Regenerate plots to create them.")
+
     st.markdown("**MRR@k:** How early the first relevant recommendation appears.")
     st.markdown("`MRR@k = 1 / rank_first_relevant` (or `0` if none in top-`k`)")
 
@@ -896,8 +997,8 @@ def show_actual_results(results: Dict[str, Any]) -> None:
             "Available cutoffs in this run: " + ", ".join(f"@{k}" for k in available_ks)
         )
 
-    tab_metrics, tab_comparison, tab_ablation, tab_speed = st.tabs(
-        ["Metrics", "Model Comparison", "Ablations", "Performance"]
+    tab_metrics, tab_comparison, tab_ablation, tab_steering, tab_speed = st.tabs(
+        ["Metrics", "Model Comparison", "Ablations", "Steering Eval", "Performance"]
     )
 
     with tab_metrics:
@@ -985,6 +1086,10 @@ def show_actual_results(results: Dict[str, Any]) -> None:
             st.info("No experiment runs available for ablation analysis.")
         else:
             _render_ablation_section(experiment_runs, primary_k_tag)
+
+    with tab_steering:
+        st.subheader("Steering Evaluation")
+        _render_steering_eval_tab()
 
     with tab_speed:
         st.subheader("Inference Latency")
