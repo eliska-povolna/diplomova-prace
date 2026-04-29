@@ -105,6 +105,11 @@ def append_steering_eval_rows(
 
                     if normalized_rows:
                         conn.execute(insert_sql, normalized_rows)
+                        logger.info(
+                            "Wrote %d steering eval row(s) to Cloud SQL table %s",
+                            len(normalized_rows),
+                            DEFAULT_STEERING_EVAL_TABLE,
+                        )
                         return
     except Exception:
         logger.debug("Cloud SQL write failed; falling back to local CSV", exc_info=True)
@@ -121,6 +126,12 @@ def append_steering_eval_rows(
         for row in rows:
             normalized = {column: row.get(column, "") for column in CSV_COLUMNS}
             writer.writerow(normalized)
+
+    logger.info(
+        "Wrote %d steering eval row(s) to local CSV %s",
+        len(rows),
+        output_path,
+    )
 
 
 def load_steering_eval_dataframe(
@@ -300,23 +311,51 @@ def generate_steering_eval_plots(
 def _plot_tradeoff(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> None:
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    plot_df = df[["cpr_after", "ndcg_after", "strength"]].copy()
-    plot_df = plot_df.dropna(subset=["cpr_after", "ndcg_after"])
+    plot_df = df[["cpr_after", "ndcg_after", "strength", "method"]].copy()
+    
+    # Separate neuron-based (has CPR) and LLM-based (no CPR) rows
+    neuron_df = plot_df[
+        plot_df["method"].astype(str).str.startswith("neuron", na=False)
+    ].copy()
+    neuron_df = neuron_df.dropna(subset=["cpr_after", "ndcg_after"])
+    
+    llm_df = plot_df[
+        plot_df["method"].astype(str).str.startswith("llm", na=False)
+    ].copy()
+    llm_df = llm_df.dropna(subset=["ndcg_after"])
 
-    if plot_df.empty:
+    if neuron_df.empty and llm_df.empty:
         _annotate_no_data(ax, "No steering rows available for this filter")
     else:
-        scatter = ax.scatter(
-            plot_df["cpr_after"],
-            plot_df["ndcg_after"],
-            c=plot_df["strength"],
-            cmap="viridis",
-            alpha=0.85,
-            s=40,
-            edgecolors="none",
-        )
-        cbar = fig.colorbar(scatter, ax=ax)
-        cbar.set_label("Strength")
+        # Plot neuron-based rows (has CPR on X-axis)
+        if not neuron_df.empty:
+            scatter1 = ax.scatter(
+                neuron_df["cpr_after"],
+                neuron_df["ndcg_after"],
+                c=neuron_df["strength"],
+                cmap="viridis",
+                alpha=0.85,
+                s=60,
+                edgecolors="none",
+                label="neuron-based",
+            )
+            cbar = fig.colorbar(scatter1, ax=ax)
+            cbar.set_label("Strength")
+        
+        # Plot LLM-based rows (no CPR, show on left side at x=0)
+        if not llm_df.empty:
+            ax.scatter(
+                [0] * len(llm_df),
+                llm_df["ndcg_after"],
+                c="red",
+                alpha=0.5,
+                s=60,
+                marker="x",
+                edgecolors="darkred",
+                linewidths=2,
+                label="LLM-based (CPR N/A)",
+            )
+        
         ax.set_xlabel("CPR after")
         ax.set_ylabel("NDCG after")
         ax.set_title(
@@ -324,6 +363,9 @@ def _plot_tradeoff(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> 
             + (f" (k={k_filter})" if k_filter is not None else "")
         )
         ax.grid(True, alpha=0.25)
+        if not neuron_df.empty and not llm_df.empty:
+            ax.legend(loc="best")
+        ax.set_xlim(-0.1, 1.1)
 
     fig.tight_layout()
     fig.savefig(outpath, dpi=160, bbox_inches="tight")

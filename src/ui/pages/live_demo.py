@@ -266,7 +266,7 @@ def _build_label_specs(
                 "weights_changed_json": json.dumps(
                     {str(neuron_idx): float(delta)}, sort_keys=True
                 ),
-                "strength": float(abs(delta)),
+                "strength": float(delta),
             }
         )
 
@@ -304,7 +304,7 @@ def _build_label_specs(
                     {str(idx): float(delta) for idx, delta in deltas.items()},
                     sort_keys=True,
                 ),
-                "strength": float(sum(abs(delta) for delta in deltas.values())),
+                "strength": float(sum(delta for delta in deltas.values())),
             }
         )
 

@@ -823,22 +823,23 @@ def _render_steering_eval_tab() -> None:
             if str(value).strip()
         }
     )
+    user_options = ["All"] + sorted(
+        {
+            str(value)
+            for value in df["user_id"].dropna().astype(str).tolist()
+            if str(value).strip()
+        }
+    )
 
-    filter_cols = st.columns([1, 1, 2, 1])
+    filter_cols = st.columns([1, 1, 1, 2])
     with filter_cols[0]:
-        k_choice = st.selectbox("k", options=k_options, index=0)
+        user_choice = st.selectbox("user", options=user_options, index=0)
     with filter_cols[1]:
-        method_choice = st.selectbox("method", options=method_options, index=0)
+        k_choice = st.selectbox("k", options=k_options, index=0)
     with filter_cols[2]:
-        label_query = st.text_input("label contains", value="")
+        method_choice = st.selectbox("method", options=method_options, index=0)
     with filter_cols[3]:
-        row_limit = st.number_input(
-            "limit last N rows",
-            min_value=1,
-            max_value=max(1, int(len(df))),
-            value=min(100, int(len(df))),
-            step=1,
-        )
+        label_query = st.text_input("label contains", value="")
 
     filtered_df = filter_steering_eval_dataframe(
         df,
@@ -846,13 +847,13 @@ def _render_steering_eval_tab() -> None:
         method_value=method_choice,
         label_contains=label_query,
     )
+    if user_choice != "All":
+        filtered_df = filtered_df[filtered_df["user_id"].astype(str) == str(user_choice)]
     if filtered_df.empty:
         st.info("No steering log rows match the current filters.")
         return
 
-    filtered_df = filtered_df.sort_values("timestamp_iso", na_position="last").tail(
-        int(row_limit)
-    )
+    filtered_df = filtered_df.sort_values("timestamp_iso", na_position="last").tail(100)
     display_df = filtered_df.copy()
     if pd.api.types.is_datetime64_any_dtype(display_df["timestamp_iso"]):
         display_df["timestamp_iso"] = display_df["timestamp_iso"].dt.strftime(
@@ -862,11 +863,10 @@ def _render_steering_eval_tab() -> None:
     st.dataframe(_arrow_safe_df(display_df), width="stretch", hide_index=True)
 
     current_k = None if k_choice == "All" else int(k_choice)
-    tradeoff_path = DEFAULT_STEERING_EVAL_OUTDIR / "steering_tradeoff_cpr_vs_ndcg.png"
     strength_path = DEFAULT_STEERING_EVAL_OUTDIR / "steering_vs_strength.png"
 
     regenerate = st.button("Regenerate plots")
-    if regenerate or not tradeoff_path.exists() or not strength_path.exists():
+    if regenerate or not strength_path.exists():
         try:
             generate_steering_eval_plots(df, DEFAULT_STEERING_EVAL_OUTDIR, k_filter=current_k)
             st.success("Regenerated steering plots.")
@@ -874,12 +874,8 @@ def _render_steering_eval_tab() -> None:
             logger.exception("Failed to regenerate steering plots")
             st.warning(f"Could not regenerate plots: {e}")
 
-    if tradeoff_path.exists() and strength_path.exists():
-        img_col_left, img_col_right = st.columns(2)
-        with img_col_left:
-            st.image(str(tradeoff_path), use_container_width=True)
-        with img_col_right:
-            st.image(str(strength_path), use_container_width=True)
+    if strength_path.exists():
+        st.image(str(strength_path), use_container_width=True)
     else:
         st.info("Plots are not available yet. Click Regenerate plots to create them.")
 
