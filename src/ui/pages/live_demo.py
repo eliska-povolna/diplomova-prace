@@ -59,9 +59,9 @@ def _compute_data_hash(
             "recommendations": [
                 {
                     "item_id": r.get("item_id"),
-                        # "rank_after": r.get("rank_after"),
-                        # "score": round(
-                        #     r.get("score", 0), 3
+                    # "rank_after": r.get("rank_after"),
+                    # "score": round(
+                    #     r.get("score", 0), 3
                     # ),  # Round to avoid float precision issues
                 }
                 for r in (recommendations or [])
@@ -82,9 +82,7 @@ def _demo_state_key(selected_user: str, suffix: str) -> str:
 
 def _normalize_terms(text: str) -> set[str]:
     return {
-        token
-        for token in re.split(r"[^a-z0-9]+", str(text).lower())
-        if len(token) > 1
+        token for token in re.split(r"[^a-z0-9]+", str(text).lower()) if len(token) > 1
     }
 
 
@@ -101,7 +99,9 @@ def _recommendation_item_ids(recommendations: List[Dict]) -> List[int]:
     return item_ids
 
 
-def _compute_live_ndcg(inference, selected_user: str, recommendations: List[Dict]) -> float | None:
+def _compute_live_ndcg(
+    inference, selected_user: str, recommendations: List[Dict]
+) -> float | None:
     if not recommendations:
         return None
 
@@ -195,13 +195,13 @@ def _set_demo_recommendation_state(
     poi_details_map: Optional[Dict] = None,
 ) -> None:
     if base_recommendations is not None:
-        st.session_state[_demo_state_key(selected_user, "base_recommendations")] = (
-            base_recommendations
-        )
+        st.session_state[
+            _demo_state_key(selected_user, "base_recommendations")
+        ] = base_recommendations
     if steered_recommendations is not None:
-        st.session_state[_demo_state_key(selected_user, "steered_recommendations")] = (
-            steered_recommendations
-        )
+        st.session_state[
+            _demo_state_key(selected_user, "steered_recommendations")
+        ] = steered_recommendations
 
     active_config = active_steering_config
     if active_config is None:
@@ -209,9 +209,9 @@ def _set_demo_recommendation_state(
             _demo_state_key(selected_user, "active_steering_config")
         )
 
-    st.session_state[_demo_state_key(selected_user, "active_steering_config")] = (
-        active_config
-    )
+    st.session_state[
+        _demo_state_key(selected_user, "active_steering_config")
+    ] = active_config
 
     displayed = (
         steered_recommendations
@@ -258,11 +258,16 @@ def _clear_demo_steering_state(selected_user: str) -> None:
     st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
     st.session_state.current_recommendations = base
     st.session_state.steering_modified = False
-    
+
     # Reset concept steering panel checkbox states
-    keys_to_delete = [k for k in st.session_state.keys() if k.startswith(f"concept_select_") or k.startswith("concept_strength_")]
+    keys_to_delete = [
+        k
+        for k in st.session_state.keys()
+        if k.startswith(f"concept_select_") or k.startswith("concept_strength_")
+    ]
     for k in keys_to_delete:
         del st.session_state[k]
+
 
 def _render_action_buttons(selected_user: str):
     action_col_apply, action_col_reset = st.columns(2)
@@ -279,6 +284,7 @@ def _render_action_buttons(selected_user: str):
     )
 
     return apply_clicked, reset_clicked
+
 
 @st.fragment
 def _render_active_features_section(
@@ -376,6 +382,7 @@ def render_steering_tabs(
                 _demo_state_key(selected_user, "draft_concept_neuron_values")
             ] = dict(concept_draft)
 
+
 def _ensure_cpr_cache(
     selected_user: str,
     inference,
@@ -430,9 +437,7 @@ def _ensure_cpr_cache(
     needed_indices = set(_recommendation_item_ids(base_recommendations))
     needed_indices.update(_recommendation_item_ids(displayed_recommendations))
 
-    missing_indices = [
-        idx for idx in needed_indices if idx not in cached_poi_details
-    ]
+    missing_indices = [idx for idx in needed_indices if idx not in cached_poi_details]
 
     if missing_indices and data is not None:
         fetched = data.get_poi_details_batch(missing_indices)
@@ -475,6 +480,7 @@ def _ensure_cpr_cache(
 
     return cpr_values
 
+
 def _render_neuron_steering_draft(
     selected_user: str,
     inference,
@@ -491,7 +497,6 @@ def _render_neuron_steering_draft(
         "for matrix-based and weighted-category labels only.",
     )
 
-
     if not activations:
         st.info("No active features to steer")
         return
@@ -505,13 +510,16 @@ Steer your preferences using this formula in the latent space:
 - You can see the current and steered activation value under each slider.
 """
     )
-    if labels_service and getattr(labels_service, "selected_method", "") not in {"matrix-based", "weighted-category"}:
+    if labels_service and getattr(labels_service, "selected_method", "") not in {
+        "matrix-based",
+        "weighted-category",
+    }:
         info_section(
             "🎯 Steering Metrics: NDCG available, CPR unavailable for LLM labeling methods",
             "NDCG and CPR are computed on the currently visible recommendations. "
             "NDCG compares the visible ranking against the held-out test split, and the delta shows the effect of steering versus the baseline ordering. You can see it on the top of the recommendation list."
             "CPR reports how many visible recommendations match the selected label/category concept. You can see it under each label.",
-            "LLM-based labels show N/A as their evaluation would require token usage."
+            "LLM-based labels show N/A as their evaluation would require token usage.",
         )
     else:
         info_section(
@@ -675,8 +683,11 @@ Steer your preferences using this formula in the latent space:
         except Exception as e:
             logger.debug(f"Could not compute steered activations chart: {e}")
     else:
-        st.session_state[_demo_state_key(selected_user, "feature_chart_original")] = None
+        st.session_state[
+            _demo_state_key(selected_user, "feature_chart_original")
+        ] = None
         st.session_state[_demo_state_key(selected_user, "feature_chart_steered")] = None
+
 
 def _recompute_recommendations_shared(
     selected_user: str,
@@ -702,9 +713,7 @@ def _recompute_recommendations_shared(
         current_base = st.session_state.get(base_cache_key)
         valid_item_ids = data.get_valid_item_ids()
 
-        num_recommendations = st.session_state.get(
-            "display_num_recommendations", 12
-        )
+        num_recommendations = st.session_state.get("display_num_recommendations", 12)
 
         TOP_K = 50
         baseline_recommendations = current_base
@@ -736,9 +745,7 @@ def _recompute_recommendations_shared(
                 (recommendations_with_delta or baseline_recommendations)[:TOP_K]
             )
         else:
-            full_recommendations = list(
-                st.session_state.get(full_cache_key, []) or []
-            )
+            full_recommendations = list(st.session_state.get(full_cache_key, []) or [])
             if not full_recommendations:
                 full_recommendations = list(baseline_recommendations[:TOP_K])
 
@@ -788,9 +795,7 @@ def _recompute_recommendations_shared(
         )
 
         if render_diagnostics and needs_model_recompute and inference_steering:
-            up = sum(
-                1 for r in full_recommendations if r.get("position_delta", 0) < 0
-            )
+            up = sum(1 for r in full_recommendations if r.get("position_delta", 0) < 0)
             down = sum(
                 1 for r in full_recommendations if r.get("position_delta", 0) > 0
             )
@@ -817,12 +822,8 @@ def _recompute_recommendations_shared(
             st.markdown("#### Steering Diagnostics")
 
             provenance = dict((steering_config or {}).get("provenance") or {})
-            last_neuron_updates = int(
-                provenance.get("last_apply_neuron_updates", 0)
-            )
-            last_concept_updates = int(
-                provenance.get("last_apply_concept_updates", 0)
-            )
+            last_neuron_updates = int(provenance.get("last_apply_neuron_updates", 0))
+            last_concept_updates = int(provenance.get("last_apply_concept_updates", 0))
 
             source_breakdown_part = ""
             if last_neuron_updates or last_concept_updates:
@@ -922,18 +923,24 @@ def _render_poi_cards_section(
         cols = st.columns(responsive_cards_per_row)
 
         cached_poi_details = dict(
-            poi_details_map or st.session_state.get(f"poi_details_map_{selected_user}", {}) or {}
+            poi_details_map
+            or st.session_state.get(f"poi_details_map_{selected_user}", {})
+            or {}
         )
         missing_indices = [
             idx
-            for idx in [r.get("item_id") or r.get("poi_idx") for r in filtered_recommendations]
+            for idx in [
+                r.get("item_id") or r.get("poi_idx") for r in filtered_recommendations
+            ]
             if idx is not None and idx not in cached_poi_details
         ]
         if missing_indices and data is not None:
             fetched = data.get_poi_details_batch(missing_indices)
             cached_poi_details.update(fetched)
             if selected_user:
-                st.session_state[f"poi_details_map_{selected_user}"] = cached_poi_details
+                st.session_state[
+                    f"poi_details_map_{selected_user}"
+                ] = cached_poi_details
 
         valid_card_rows = []
         for reco in filtered_recommendations:
@@ -1141,7 +1148,9 @@ def _render_map_section(
                 map_cache_key = f"cached_folium_map_{selected_user}_{data_hash}"
                 # cleanup old cached maps for this user
                 cache_prefix = f"cached_folium_map_{selected_user}_"
-                existing_keys = [k for k in st.session_state if k.startswith(cache_prefix)]
+                existing_keys = [
+                    k for k in st.session_state if k.startswith(cache_prefix)
+                ]
 
                 if len(existing_keys) > 3:
                     for k in existing_keys[:-3]:
@@ -1444,7 +1453,7 @@ def show():
             activations = _render_active_features_section(
                 selected_user=selected_user,
                 inference=inference,
-                num_features = st.session_state["display_num_features_slider"]
+                num_features=st.session_state["display_num_features_slider"],
             )
         else:
             user_z = inference.user_latents[selected_user]
@@ -1481,7 +1490,9 @@ def show():
         )
 
         draft_neuron_values = dict(st.session_state.get(draft_key, {}) or {})
-        concept_draft_key = _demo_state_key(selected_user, "draft_concept_neuron_values")
+        concept_draft_key = _demo_state_key(
+            selected_user, "draft_concept_neuron_values"
+        )
         draft_concept_neuron_values = dict(
             st.session_state.get(concept_draft_key, {}) or {}
         )
@@ -1518,7 +1529,6 @@ def show():
             st.caption(
                 f"Pending alpha change: current {active_alpha:.2f} → new {global_alpha:.2f}."
             )
-
 
         apply_clicked, reset_clicked = _render_action_buttons(selected_user)
         if reset_clicked:
@@ -1589,7 +1599,9 @@ def show():
             st.session_state[concept_draft_key] = {}
             st.session_state[_demo_state_key(selected_user, "draft_source")] = None
             st.session_state[_demo_state_key(selected_user, "draft_provenance")] = {}
-            st.session_state[_demo_state_key(selected_user, "sync_sliders_from_config")] = True
+            st.session_state[
+                _demo_state_key(selected_user, "sync_sliders_from_config")
+            ] = True
             st.rerun()
 
         # ===================================================================
@@ -1601,9 +1613,11 @@ def show():
         current_steering_hash = steering_config_hash(steering_config)
         previous_steering_hash = st.session_state.get(steering_hash_key, "")
         steering_changed_check = current_steering_hash != previous_steering_hash
-        
+
         # Only recompute if steering changed, initial load, or Apply was clicked
-        if steering_changed_check or not st.session_state.get(_demo_state_key(selected_user, "displayed_recommendations")):
+        if steering_changed_check or not st.session_state.get(
+            _demo_state_key(selected_user, "displayed_recommendations")
+        ):
             _recompute_recommendations_shared(
                 selected_user=selected_user,
                 inference=inference,
@@ -1902,9 +1916,7 @@ def build_folium_map(
         # Add in REVERSE order so rank 1 appears on top (last added = highest z-index)
         # When we enumerate(reversed(pois)), we iterate: worst→...→best
         # This means rank 1 (best) is added LAST, so it appears on top ✓
-        logger.info(
-            f"Adding {len(pois)} recommendation markers"
-        )
+        logger.info(f"Adding {len(pois)} recommendation markers")
         logger.debug(
             f"First POI in list (best/rank1): {pois[0].get('name', 'unknown')}"
         )

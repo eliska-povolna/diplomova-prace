@@ -192,10 +192,10 @@ class WordcloudService:
     ) -> List[Dict[str, Any]]:
         """
         Get top categories by total activation strength (sum, not average).
-        
+
         This uses the same aggregation as weighted-category labeling:
         categories are ranked by their total activation contribution.
-        
+
         Returns list of dicts with:
         - category: name
         - total_activation: sum of activations where this category appeared
@@ -232,9 +232,7 @@ class WordcloudService:
 
         # Sort by TOTAL activation strength (sum), not average
         # This is consistent with weighted-category labeling
-        categories_with_stats.sort(
-            key=lambda x: x["total_activation"], reverse=True
-        )
+        categories_with_stats.sort(key=lambda x: x["total_activation"], reverse=True)
 
         logger.debug(
             f"Neuron {neuron_id}: found {len(categories_with_stats)} categories with activation data"

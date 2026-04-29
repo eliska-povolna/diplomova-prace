@@ -61,7 +61,9 @@ def _render_global_label_method_selector(labels_service) -> None:
             index=available_methods.index(default_method),
             key="global_label_method",
         )
-        st.caption("Applies across Live Demo and Interpretability, not used in Dataset Statistics and Results.")
+        st.caption(
+            "Applies across Live Demo and Interpretability, not used in Dataset Statistics and Results."
+        )
         if len(available_methods) == 1 and available_methods[0] == "weighted-category":
             st.warning("Only weighted-category artifact found for this run.")
 
@@ -85,7 +87,7 @@ try:
     )
 
     init_session_state()
-    
+
     # Only load artifacts once during startup, not on every rerun
     if "inference" not in st.session_state:
         config = load_config(config_path)

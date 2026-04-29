@@ -1146,7 +1146,9 @@ def load_inference_service(
                 for local_path in missing_holdout_files:
                     gcs_name = f"{gcs_prefix}/{local_path.name}"
                     if _download_gcs_file(cloud_storage, gcs_name, local_path):
-                        logger.info("Downloaded missing holdout artifact from GCS: %s", gcs_name)
+                        logger.info(
+                            "Downloaded missing holdout artifact from GCS: %s", gcs_name
+                        )
         else:
             logger.debug("GCS not configured; skipping on-demand holdout download")
 

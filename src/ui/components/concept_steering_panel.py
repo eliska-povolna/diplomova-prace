@@ -35,7 +35,7 @@ def _render_inline_concept_strength(
     key_prefix: str,
 ) -> Tuple[Dict[int, float], bool]:
     """Render slider inline for strength adjustment.
-    
+
     Returns:
         (selected_weights dict, whether user configured it)
     """
@@ -136,7 +136,7 @@ def render_concept_steering_panel(
     selected_user: str | None = None,
 ) -> Optional[Dict[int, float]]:
     """Render concept steering with checkbox selection and inline strength sliders.
-    
+
     Each search result shows a checkbox. When checked, a strength slider appears inline.
     All selected concepts are combined and returned as draft neuron values.
     """
