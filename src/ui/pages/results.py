@@ -1008,7 +1008,11 @@ def _render_steering_eval_tab() -> None:
     regenerate = st.button("Regenerate plots")
     if regenerate or not strength_path.exists():
         try:
-            generate_steering_eval_plots(df, DEFAULT_STEERING_EVAL_OUTDIR, k_filter=current_k)
+            generate_steering_eval_plots(
+                filtered_df,
+                DEFAULT_STEERING_EVAL_OUTDIR,
+                k_filter=current_k,
+            )
             st.success("Regenerated steering plots.")
         except Exception as e:
             logger.exception("Failed to regenerate steering plots")
@@ -1274,7 +1278,8 @@ def show_actual_results(results: Dict[str, Any]) -> None:
             st.write(
                 "Latency measures the end-to-end time for one inference pass of the recommender, "
                 "measured in milliseconds.\n\n"
-                "The scatter plot below shows the individual measured samples used to compute these summaries."
+                "The scatter plot below shows the individual measured samples used to compute these summaries.\n\n"
+                "The latency observed in the demo app is not caused by the model, but by other page element loading."
             )
         ranking = results.get("ranking_metrics", {}) or {}
         latency = ranking.get("latency", {})

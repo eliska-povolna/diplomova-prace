@@ -198,7 +198,7 @@ def render_clickable_feature(feature_id: int, feature_label: str):
         st.session_state._pending_feature_search = str(feature_id)
         logger.info(f"   ✓ Set session_state.selected_feature_id = {feature_id}")
         logger.info(f"   ✓ Set session_state._pending_feature_search = '{feature_id}'")
-        logger.info(f"   → Triggering rerun...")
+        logger.info("   → Triggering rerun...")
         st.rerun()
 
 
@@ -269,7 +269,7 @@ def show():
     with st.sidebar:
         st.markdown("## 🔍 Search Features")
         st.caption(
-            "Search by feature number (e.g., '5', '42'), label name (e.g., 'Italian', 'Coffee'), or by meaning (e.g., 'Asian' finds semantically similar features)"
+            "Search by neuron number (e.g., '5', '42'), label name (e.g., 'Italian', 'Coffee'), or by meaning (e.g., 'Asian' finds semantically similar features)"
         )
         browse_mode = "Neuron"
         if superfeatures:
@@ -279,6 +279,31 @@ def show():
                 horizontal=True,
                 key="interpretability_browse_mode",
             )
+
+        current_superfeature_id = st.session_state.get("selected_superfeature_id")
+        if browse_mode == "Neuron" and current_superfeature_id is not None:
+            current_superfeature = superfeatures.get(str(current_superfeature_id), {})
+            anchor = st.session_state.get("selected_superfeature_anchor_neuron")
+            member_neurons = []
+            for raw_n in current_superfeature.get("neurons", []):
+                try:
+                    n = int(raw_n)
+                except Exception:
+                    continue
+                if 0 <= n <= max_neuron:
+                    member_neurons.append(n)
+
+            if anchor not in member_neurons:
+                anchor = member_neurons[0] if member_neurons else None
+
+            if anchor is not None:
+                st.session_state.selected_feature_id = int(anchor)
+                st.session_state.feature_search = str(anchor)
+
+            if "selected_superfeature_id" in st.session_state:
+                del st.session_state["selected_superfeature_id"]
+            if "selected_superfeature_anchor_neuron" in st.session_state:
+                del st.session_state["selected_superfeature_anchor_neuron"]
 
         # If pending feature search was set by button click, update session state directly
         # (value param doesn't override existing keyed widget values in session_state)
@@ -291,9 +316,9 @@ def show():
                 f"   → Updating session_state.feature_search to '{pending_value}'"
             )
             st.session_state.feature_search = pending_value
-            logger.info(f"   ✓ session_state.feature_search updated")
+            logger.info("   ✓ session_state.feature_search updated")
             del st.session_state._pending_feature_search
-            logger.info(f"   ✓ Cleared _pending_feature_search")
+            logger.info("   ✓ Cleared _pending_feature_search")
         else:
             logger.debug("No pending_feature_search found")
 
@@ -526,7 +551,7 @@ def show():
 
         # Clear it so it doesn't interfere with next interaction
         if "selected_feature_id" in st.session_state:
-            logger.info(f"   ✓ Clearing selected_feature_id from session_state")
+            logger.info("   ✓ Clearing selected_feature_id from session_state")
             del st.session_state.selected_feature_id
 
     # Validate neuron index
@@ -765,6 +790,8 @@ def show():
                     del st.session_state["selected_superfeature_id"]
                 if "selected_superfeature_anchor_neuron" in st.session_state:
                     del st.session_state["selected_superfeature_anchor_neuron"]
+                st.session_state["interpretability_browse_mode"] = "Neuron"
+                st.session_state["feature_search"] = str(member_id)
                 st.session_state.selected_feature_id = int(member_id)
                 st.rerun()
     else:
