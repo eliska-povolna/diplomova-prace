@@ -383,6 +383,21 @@ def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> 
     else:
         ax_left.plot(left_df["strength"], left_df["cpr_after"], marker="o", label="mean CPR after")
         ax_left.plot(left_df["strength"], left_df["ndcg_after"], marker="o", label="mean NDCG after")
+        
+        # Add regression lines for both metrics
+        if len(left_df) >= 2:
+            # CPR regression line
+            cpr_poly = np.polyfit(left_df["strength"].dropna(), left_df["cpr_after"].dropna(), 1)
+            cpr_line = np.poly1d(cpr_poly)
+            x_range_cpr = np.linspace(left_df["strength"].min(), left_df["strength"].max(), 100)
+            ax_left.plot(x_range_cpr, cpr_line(x_range_cpr), "--", alpha=0.5, color="C0", linewidth=1.5)
+            
+            # NDCG regression line
+            ndcg_poly = np.polyfit(left_df["strength"].dropna(), left_df["ndcg_after"].dropna(), 1)
+            ndcg_line = np.poly1d(ndcg_poly)
+            x_range_ndcg = np.linspace(left_df["strength"].min(), left_df["strength"].max(), 100)
+            ax_left.plot(x_range_ndcg, ndcg_line(x_range_ndcg), "--", alpha=0.5, color="C1", linewidth=1.5)
+        
         ax_left.set_xlabel("Strength")
         ax_left.set_ylabel("Mean metric")
         ax_left.set_title(
@@ -406,6 +421,21 @@ def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> 
             marker="o",
             label="mean delta NDCG",
         )
+        
+        # Add regression lines for both metrics
+        if len(right_df) >= 2:
+            # Delta CPR regression line
+            cpr_poly = np.polyfit(right_df["delta_activation"].dropna(), right_df["delta_cpr"].dropna(), 1)
+            cpr_line = np.poly1d(cpr_poly)
+            x_range_cpr = np.linspace(right_df["delta_activation"].min(), right_df["delta_activation"].max(), 100)
+            ax_right.plot(x_range_cpr, cpr_line(x_range_cpr), "--", alpha=0.5, color="C0", linewidth=1.5)
+            
+            # Delta NDCG regression line
+            ndcg_poly = np.polyfit(right_df["delta_activation"].dropna(), right_df["delta_ndcg"].dropna(), 1)
+            ndcg_line = np.poly1d(ndcg_poly)
+            x_range_ndcg = np.linspace(right_df["delta_activation"].min(), right_df["delta_activation"].max(), 100)
+            ax_right.plot(x_range_ndcg, ndcg_line(x_range_ndcg), "--", alpha=0.5, color="C1", linewidth=1.5)
+        
         ax_right.set_xlabel("Delta activation")
         ax_right.set_ylabel("Mean delta metric")
         ax_right.set_title("Metric deltas vs activation shift")
