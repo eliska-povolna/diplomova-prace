@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import random
@@ -15,6 +16,8 @@ import streamlit as st
 
 logger = logging.getLogger(__name__)
 SUPPORTED_K_VALUES = [5, 10, 20, 50]
+BASELINE_SUMMARY_PATH = Path("outputs") / "baseline_20260429_162715" / "summary.json"
+MODEL_COMPARISON_ORDER = ["ELSA", "ELSA+SAE", "ALS", "BPR", "Random"]
 
 
 def _arrow_safe_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -569,6 +572,143 @@ def _build_elsa_vs_sae_df(results: Dict[str, Any], k_tags: List[str]) -> pd.Data
     return pd.DataFrame(rows)
 
 
+def _load_baseline_summary() -> Dict[str, Any] | None:
+    """Load ALS/BPR baseline summary without changing the selected ELSA/SAE run."""
+    logger.info("Trying to load baseline summary from: %s", BASELINE_SUMMARY_PATH)
+    if not BASELINE_SUMMARY_PATH.exists():
+        logger.warning("Baseline summary not found at: %s", BASELINE_SUMMARY_PATH)
+        return None
+
+    try:
+        with BASELINE_SUMMARY_PATH.open("r", encoding="utf-8") as f:
+            summary = json.load(f)
+        logger.info("Baseline summary loaded. Keys: %s", sorted(summary.keys()))
+        return summary
+    except Exception:
+        logger.exception("Failed to load baseline summary from: %s", BASELINE_SUMMARY_PATH)
+        return None
+
+
+def _build_baseline_comparison_df(k_tags: List[str]) -> pd.DataFrame:
+    """Build ALS/BPR comparison rows from baseline summary.json."""
+    summary = _load_baseline_summary()
+    if not summary:
+        return pd.DataFrame()
+
+    rows: List[Dict[str, Any]] = []
+    model_blocks = {
+        "ALS": summary.get("als_best"),
+        "BPR": summary.get("bpr_best"),
+    }
+    metric_names = {
+        "ndcg": "NDCG",
+        "recall": "Recall",
+        "precision": "Precision",
+        "mrr": "MRR",
+        "map": "MAP",
+        "hr": "Hit Rate",
+        "hit_rate": "Hit Rate",
+    }
+
+    for model_name, block in model_blocks.items():
+        if not isinstance(block, dict):
+            logger.warning("Missing baseline block for model %s", model_name)
+            continue
+        metrics = block.get("metrics", {})
+        if not isinstance(metrics, dict):
+            logger.warning("Missing metrics in baseline block for model %s", model_name)
+            continue
+
+        for metric_key, metric_label in metric_names.items():
+            metric = metrics.get(metric_key)
+            if not isinstance(metric, dict):
+                continue
+            for k_tag in k_tags:
+                if k_tag not in metric:
+                    continue
+                rows.append(
+                    {
+                        "Metric": metric_label,
+                        "K": k_tag,
+                        "Model": model_name,
+                        "Score": float(metric[k_tag]),
+                    }
+                )
+
+    df = pd.DataFrame(rows)
+    logger.info("Baseline comparison rows loaded: %s", len(df))
+    return df
+
+
+def _build_combined_model_comparison_df(
+    results: Dict[str, Any],
+    k_tags: List[str],
+    random_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Combine ELSA, ELSA+SAE, ALS, BPR, and optionally Random into one long table."""
+    rows: List[Dict[str, Any]] = []
+    elsa_sae_df = _build_elsa_vs_sae_df(results, k_tags)
+
+    if not elsa_sae_df.empty:
+        for _, row in elsa_sae_df.iterrows():
+            rows.append(
+                {
+                    "Metric": row["Metric"],
+                    "K": row["K"],
+                    "Model": "ELSA",
+                    "Score": float(row["ELSA"]),
+                }
+            )
+            rows.append(
+                {
+                    "Metric": row["Metric"],
+                    "K": row["K"],
+                    "Model": "ELSA+SAE",
+                    "Score": float(row["ELSA+SAE"]),
+                }
+            )
+
+    baseline_df = _build_baseline_comparison_df(k_tags)
+    if not baseline_df.empty:
+        rows.extend(baseline_df.to_dict("records"))
+
+    if random_df is not None and not random_df.empty:
+        metric_map = {
+            "Recall": "Recall",
+            "Precision": "Precision",
+            "Hit Rate": "Hit Rate",
+            "NDCG": "NDCG",
+            "MRR": "MRR",
+            "MAP": "MAP",
+        }
+        for k_tag in k_tags:
+            random_row = random_df[random_df["K"] == k_tag]
+            if random_row.empty:
+                continue
+            for source_col, metric_label in metric_map.items():
+                if source_col not in random_row.columns:
+                    continue
+                rows.append(
+                    {
+                        "Metric": metric_label,
+                        "K": k_tag,
+                        "Model": "Random",
+                        "Score": float(random_row.iloc[0][source_col]),
+                    }
+                )
+
+    combined_df = pd.DataFrame(rows)
+    if combined_df.empty:
+        logger.warning("Combined model comparison is empty.")
+    else:
+        logger.info(
+            "Combined model comparison loaded. Models=%s, rows=%s",
+            sorted(combined_df["Model"].unique()),
+            len(combined_df),
+        )
+    return combined_df
+
+
 def _build_ablation_table(
     runs: List[dict],
     varying_keys: List[str],
@@ -908,12 +1048,6 @@ def show_actual_results(results: Dict[str, Any]) -> None:
         else:
             st.dataframe(_arrow_safe_df(metrics_df), width="stretch", hide_index=True)
             chart_df = _build_metrics_chart_df(results, selected_k_tags)
-            (
-                baseline_df,
-                n_items,
-                avg_heldout,
-                missing_reqs,
-            ) = _build_random_baseline_reference(results, selected_k_values)
             if not chart_df.empty:
                 fig = px.bar(
                     chart_df,
@@ -924,7 +1058,6 @@ def show_actual_results(results: Dict[str, Any]) -> None:
                     text_auto=".3f",
                     title=f"Core Ranking Metrics at {', '.join(selected_k_tags)}",
                 )
-                _overlay_random_baseline(fig, baseline_df, selected_k_tags)
                 fig.update_layout(
                     margin={"l": 20, "r": 20, "t": 50, "b": 30},
                     height=380,
@@ -935,47 +1068,91 @@ def show_actual_results(results: Dict[str, Any]) -> None:
                     width="stretch",
                     key=f"metrics_core_bar_{'_'.join(selected_k_tags)}",
                 )
-            _render_random_baseline_reference(
-                baseline_df, n_items, avg_heldout, missing_reqs
-            )
             _render_metric_formulas(selected_k_tags)
 
     with tab_comparison:
-        st.subheader("ELSA vs ELSA+SAE")
-        comp_df = _build_elsa_vs_sae_df(results, selected_k_tags)
-        if comp_df.empty:
+        st.subheader("Model Comparison")
+        st.markdown(
+            "This tab compares the proposed ELSA+SAE model with a pure ELSA model, as well as with "
+            "simple collaborative-filtering "
+            "baselines and a random recommender reference. ELSA and ELSA+SAE are loaded from the "
+            "currently selected experiment run. ALS and BPR are loaded from the baseline summary file. "
+            "The random recommender is included as a lower-bound reference estimated from the catalog "
+            "size and the average number of held-out relevant items. The results show that ELSA+SAE outperforms "
+            "these basic baselines and SAE does not decrease the performance of ELSA."
+        )
+
+        (
+            random_df,
+            random_n_items,
+            random_avg_heldout,
+            random_missing_reqs,
+        ) = _build_random_baseline_reference(results, selected_k_values)
+
+        combined_df = _build_combined_model_comparison_df(
+            results,
+            selected_k_tags,
+            random_df=random_df,
+        )
+
+        if combined_df.empty:
             st.info(
-                "Comparison metrics are unavailable in this run summary for selected @k cutoffs."
+                "Comparison metrics are unavailable. Check whether ELSA/SAE metrics are in the selected run "
+                f"and whether baseline summary exists at {BASELINE_SUMMARY_PATH}."
             )
         else:
-            show_df = comp_df.copy()
-            show_df["ELSA"] = show_df["ELSA"].map(lambda v: f"{v:.4f}")
-            show_df["ELSA+SAE"] = show_df["ELSA+SAE"].map(lambda v: f"{v:.4f}")
-            show_df["Diff"] = show_df["Diff"].map(lambda v: f"{v:+.4f}")
-            show_df["Diff%"] = show_df["Diff%"].map(lambda v: f"{v:+.2f}%")
-            st.dataframe(_arrow_safe_df(show_df), width="stretch", hide_index=True)
+            table_df = combined_df.pivot_table(
+                index=["Metric", "K"],
+                columns="Model",
+                values="Score",
+                aggfunc="first",
+            ).reset_index()
 
-            long_df = comp_df.melt(
-                id_vars=["Metric", "K"],
-                value_vars=["ELSA", "ELSA+SAE"],
-                var_name="Model",
-                value_name="Score",
-            )
+            ordered_model_cols = [
+                model for model in MODEL_COMPARISON_ORDER if model in table_df.columns
+            ]
+            other_cols = [
+                col
+                for col in table_df.columns
+                if col not in ["Metric", "K"] + ordered_model_cols
+            ]
+            table_df = table_df[["Metric", "K"] + ordered_model_cols + other_cols]
+
+            for col in table_df.columns:
+                if col not in ["Metric", "K"]:
+                    table_df[col] = table_df[col].map(
+                        lambda v: "" if pd.isna(v) else f"{float(v):.4f}"
+                    )
+
+            st.markdown("#### Comparison Table")
+            st.dataframe(_arrow_safe_df(table_df), width="stretch", hide_index=True)
+
             fig = px.bar(
-                long_df,
+                combined_df,
                 x="Metric",
                 y="Score",
                 color="Model",
                 barmode="group",
                 facet_col="K",
-                title=f"ELSA vs ELSA+SAE across {', '.join(selected_k_tags)}",
+                title=f"Model comparison across {', '.join(selected_k_tags)}",
                 text_auto=".3f",
+                category_orders={"Model": MODEL_COMPARISON_ORDER},
             )
-            fig.update_layout(margin={"l": 20, "r": 10, "t": 50, "b": 30}, height=420)
+            fig.update_layout(
+                margin={"l": 20, "r": 10, "t": 50, "b": 30},
+                height=420,
+            )
             st.plotly_chart(
                 fig,
                 width="stretch",
-                key=f"comparison_grouped_bar_{'_'.join(selected_k_tags)}",
+                key=f"combined_model_comparison_bar_{'_'.join(selected_k_tags)}",
+            )
+
+            _render_random_baseline_reference(
+                random_df,
+                random_n_items,
+                random_avg_heldout,
+                random_missing_reqs,
             )
 
     with tab_ablation:

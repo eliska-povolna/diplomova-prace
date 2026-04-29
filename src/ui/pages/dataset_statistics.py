@@ -326,9 +326,7 @@ def show() -> None:
     kpi_cols[2].metric("Items", f"{int(summary.get('n_items', 0)):,}")
     kpi_cols[3].metric("Interactions", f"{int(summary.get('n_interactions', 0)):,}")
     density_pct = float(summary.get("density_pct", 0.0))
-    sparsity_pct = max(0.0, 100.0 - density_pct)
     kpi_cols[4].metric("Density (positive)", f"{density_pct:.4f}%")
-    kpi_cols[5].metric("Sparsity", f"{sparsity_pct:.4f}%")
     kpi_cols[6].metric(
         "Year span",
         (

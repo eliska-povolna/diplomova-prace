@@ -1,0 +1,17 @@
+# Baseline Grid Search Configuration
+# Defines hyperparameter grids for ALS and BPR-MF baseline models
+#
+# Usage:
+#   python scripts/train_baseline.py --config scripts/baseline_gridsearch.yaml
+
+als:
+  # Grid: try all combinations of these parameters
+  factors: [32, 64]               # Latent dimensionality (reduced for memory)
+  regularization: [0.1, 1.0]      # L2 regularization strength
+  iterations: [15]                # Number of ALS iterations (single value for baseline)
+
+bpr:
+  # Grid: try all combinations of these parameters
+  factors: [64]                   # Latent dimensionality
+  regularization: [0.01, 0.1]     # L2 regularization strength
+  iterations: [100]               # Number of BPR iterations

@@ -592,10 +592,29 @@ Steer your preferences using this formula in the latent space:
                 slider_col, learn_col = st.columns([5, 1])
 
                 with slider_col:
+                    # Slider bounds
+                    _min_val = -1.0
+                    _max_val = 2.0
+
+                    # Initialize or clamp session_state before widget creation to avoid conflicts
+                    if slider_key not in st.session_state:
+                        # Initialize with current value (clamped if needed)
+                        _init_val = float(active_or_current_value)
+                        _init_val = max(_min_val, min(_init_val, _max_val))
+                        st.session_state[slider_key] = _init_val
+                    else:
+                        # Clamp any existing value to valid range
+                        try:
+                            _existing = float(st.session_state[slider_key])
+                            if _existing < _min_val or _existing > _max_val:
+                                st.session_state[slider_key] = max(_min_val, min(_existing, _max_val))
+                        except Exception:
+                            st.session_state[slider_key] = float(active_or_current_value)
+
                     user_profile = st.slider(
                         "Set your preference:",
-                        min_value=-1.0,
-                        max_value=2.0,
+                        min_value=_min_val,
+                        max_value=_max_val,
                         step=0.1,
                         key=slider_key,
                         help="If you want to see more of this feature, move the slider to the right. If less, move it to the left.",
@@ -1260,12 +1279,26 @@ def show():
             u["id"]: f"{u['id'][:8]}... ({u['interactions']} items)" for u in test_users
         }
 
+        # Get list of user IDs
+        user_ids = list(user_options.keys())
+        
+        # Determine initial index (use last selected user if available)
+        current_user_id = st.session_state.get("current_user_id")
+        initial_index = 0
+        if current_user_id and current_user_id in user_ids:
+            initial_index = user_ids.index(current_user_id)
+        
+        # Select user with persistence
         selected_user = st.selectbox(
             "User ID",
-            options=list(user_options.keys()),
+            options=user_ids,
             format_func=lambda x: user_options[x],
+            index=initial_index,
             key="user_selectbox",
         )
+        
+        # Save selection to session state for persistence across pages
+        st.session_state.current_user_id = selected_user
 
         st.divider()
 

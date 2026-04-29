@@ -7,9 +7,12 @@ updates. It does not retrain models or regenerate labels.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Dict, Optional, Tuple
 
 import streamlit as st
+
+from src.ui.steering_state import get_steering_config
 
 logger = logging.getLogger(__name__)
 
@@ -59,40 +62,106 @@ def _render_inline_concept_strength(
     return {int(idx): float(strength_value) for idx in neuron_weights.keys()}, True
 
 
-def _build_search_index(labels_service, selected_method: str) -> Dict[str, str]:
-    if selected_method == "matrix-based":
-        concepts = labels_service.get_concept_mapping().get("concepts", [])
-        return {
-            str(concept["concept_id"]): str(
-                concept.get("display_name") or concept["concept_id"]
-            )
-            for concept in concepts
-        }
+def _demo_state_key(selected_user: str, suffix: str) -> str:
+    return f"live_demo::{selected_user}::{suffix}"
 
-    if selected_method.startswith("llm"):
-        superfeatures = labels_service.get_superfeatures()
-        search_index = {}
-        if superfeatures:
-            search_index.update(
-                {
-                    f"superfeature:{sf_id}": str(
-                        sf_data.get("super_label", f"Superfeature {sf_id}")
-                    )
-                    for sf_id, sf_data in superfeatures.items()
-                }
-            )
-        hidden_dim = getattr(
-            getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0
+
+def _normalize_terms(text: str) -> set[str]:
+    return {token for token in re.split(r"[^a-z0-9]+", str(text).lower()) if len(token) > 1}
+
+
+def _compute_neuron_cpr(
+    label_method: str,
+    label_text: str,
+    recommendations,
+    poi_details_map,
+) -> float | None:
+    if label_method not in {"matrix-based", "weighted-category"}:
+        return None
+
+    label_terms = _normalize_terms(label_text)
+    if not label_terms or not recommendations:
+        return None
+
+    matches = 0
+    counted = 0
+    for reco in recommendations:
+        item_id = reco.get("item_id") or reco.get("poi_idx")
+        if item_id is None:
+            continue
+        counted += 1
+        details = poi_details_map.get(item_id, {}) if poi_details_map else {}
+        category_terms = _normalize_terms(details.get("category", ""))
+        if label_terms & category_terms:
+            matches += 1
+
+    if counted == 0:
+        return None
+    return float(matches) / float(counted)
+
+
+def _get_recommendation_context(selected_user: str, session_state):
+    base_recommendations = list(
+        session_state.get(_demo_state_key(selected_user, "base_recommendations"), [])
+        or []
+    )
+    displayed_recommendations = list(
+        session_state.get(
+            _demo_state_key(selected_user, "displayed_recommendations"), []
         )
-        search_index.update(
-            {str(idx): labels_service.get_label(idx) for idx in range(hidden_dim)}
-        )
-        return search_index
+        or []
+    )
+    if not displayed_recommendations:
+        displayed_recommendations = list(base_recommendations)
+
+    poi_details_map = dict(session_state.get(f"poi_details_map_{selected_user}", {}) or {})
+    return base_recommendations, displayed_recommendations, poi_details_map
+
+
+def _build_search_index(
+    labels_service,
+    selected_method: str,
+    include_neurons: bool,
+    include_concepts: bool,
+) -> Dict[str, str]:
+    search_index: Dict[str, str] = {}
 
     hidden_dim = getattr(
         getattr(st.session_state.get("inference"), "sae", None), "hidden_dim", 0
     )
-    return {str(idx): labels_service.get_label(idx) for idx in range(hidden_dim)}
+
+    if include_neurons:
+        search_index.update(
+            {
+                f"neuron:{idx}": labels_service.get_label(idx)
+                for idx in range(hidden_dim)
+            }
+        )
+
+    if include_concepts:
+        if selected_method == "matrix-based":
+            concepts = labels_service.get_concept_mapping().get("concepts", [])
+            search_index.update(
+                {
+                    f"concept:{concept['concept_id']}": str(
+                        concept.get("display_name") or concept["concept_id"]
+                    )
+                    for concept in concepts
+                }
+            )
+        elif selected_method.startswith("llm"):
+            superfeatures = labels_service.get_superfeatures()
+            if superfeatures:
+                search_index.update(
+                    {
+                        f"superfeature:{sf_id}": str(
+                            sf_data.get("super_label", f"Superfeature {sf_id}")
+                        )
+                        for sf_id, sf_data in superfeatures.items()
+                    }
+                )
+
+    return search_index
 
 
 def _resolve_result(
@@ -101,20 +170,35 @@ def _resolve_result(
     score: float,
     labels_service,
 ) -> Tuple[str, Dict[int, float], str]:
-    if selected_method == "matrix-based":
-        neuron_weights = labels_service.resolve_concept_to_neurons(entity_id)
+    if entity_id.startswith("neuron:"):
+        neuron_idx = int(entity_id.split(":", 1)[1])
+        return (
+            labels_service.get_label(neuron_idx),
+            {neuron_idx: max(0.1, float(score))},
+            "neuron",
+        )
+
+    if entity_id.startswith("concept:") or selected_method == "matrix-based":
+        concept_id = (
+            entity_id.split(":", 1)[1] if entity_id.startswith("concept:") else entity_id
+        )
+        neuron_weights = labels_service.resolve_concept_to_neurons(concept_id)
         label = next(
             (
-                concept.get("display_name", entity_id)
+                concept.get("display_name", concept_id)
                 for concept in labels_service.get_concept_mapping().get("concepts", [])
-                if concept.get("concept_id") == entity_id
+                if concept.get("concept_id") == concept_id
             ),
-            entity_id,
+            concept_id,
         )
         return label, neuron_weights, "concept"
 
-    if selected_method.startswith("llm") and entity_id.startswith("superfeature:"):
-        superfeature_id = entity_id.split(":", 1)[1]
+    if entity_id.startswith("superfeature:") or selected_method.startswith("llm"):
+        superfeature_id = (
+            entity_id.split(":", 1)[1]
+            if entity_id.startswith("superfeature:")
+            else entity_id
+        )
         superfeature = labels_service.get_superfeature(superfeature_id) or {}
         return (
             str(superfeature.get("super_label", f"Superfeature {superfeature_id}")),
@@ -174,12 +258,49 @@ and apply steering through the same hidden-space mechanism used for direct neuro
     )
 
     selected_method = labels_service.selected_method
-    search_index = _build_search_index(labels_service, selected_method)
-    if not search_index:
-        st.info("No concepts or labels available for this method yet.")
+    query = st.text_input(
+        "Search concepts",
+        placeholder="e.g. japanese food, quiet cafes, nightlife",
+        key=f"concept_query_{selected_method}",
+    )
+
+    control_col1, control_col2 = st.columns([3, 1])
+    with control_col1:
+        search_sources = st.multiselect(
+            "Include in search",
+            options=["Neurons", "Concepts / superfeatures"],
+            default=["Neurons", "Concepts / superfeatures"],
+            key=f"concept_search_sources_{selected_method}",
+        )
+    with control_col2:
+        top_k = st.slider(
+            "Top-K",
+            min_value=1,
+            max_value=15,
+            value=8,
+            key=f"concept_top_k_{selected_method}",
+        )
+
+    if not search_sources:
+        st.info("Select at least one search source.")
         return None
 
-    search_cache_key = f"concept_search::{selected_method}"
+    include_neurons = "Neurons" in search_sources
+    include_concepts = "Concepts / superfeatures" in search_sources
+
+    search_index = _build_search_index(
+        labels_service,
+        selected_method,
+        include_neurons=include_neurons,
+        include_concepts=include_concepts,
+    )
+    if not search_index:
+        st.info("No concepts or labels available for the selected search sources.")
+        return None
+
+    search_cache_key = (
+        f"concept_search::{selected_method}::{','.join(sorted(search_sources))}"
+    )
     cached = session_state.get(search_cache_key)
     if not cached or cached.get("labels") != search_index:
         session_state[search_cache_key] = {
@@ -188,21 +309,15 @@ and apply steering through the same hidden-space mechanism used for direct neuro
         }
     search_engine = session_state[search_cache_key]["engine"]
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        query = st.text_input(
-            "Search concepts",
-            placeholder="e.g. japanese food, quiet cafes, nightlife",
-            key=f"concept_query_{selected_method}",
-        )
-    with col2:
-        top_k = st.slider(
-            "Top-K",
-            min_value=1,
-            max_value=15,
-            value=8,
-            key=f"concept_top_k_{selected_method}",
-        )
+    try:
+        current_activations = inference_service.get_user_steering(selected_user)
+    except Exception:
+        current_activations = {}
+
+    active_config = get_steering_config(session_state, selected_user)
+    base_recommendations, displayed_recommendations, poi_details_map = (
+        _get_recommendation_context(selected_user, session_state)
+    )
 
     if not query:
         st.info(
@@ -255,6 +370,46 @@ and apply steering through the same hidden-space mechanism used for direct neuro
             # Add all neurons from this concept with the selected strength
             for neuron_idx, weight in selected_weights.items():
                 all_selected_weights[int(neuron_idx)] = float(weight)
+
+            if entity_type == "neuron":
+                neuron_idx = next(iter(neuron_weights.keys()))
+                selected_value = float(next(iter(selected_weights.values())))
+                current_value = float(current_activations.get(neuron_idx, 0.0))
+
+                try:
+                    steered_value = inference_service.get_steered_neuron_activation(
+                        selected_user,
+                        neuron_idx,
+                        selected_value,
+                    )
+                except Exception:
+                    steered_value = current_value
+
+                st.caption(
+                    f"📊 Activation: {current_value:.2f} → steered to: {steered_value:.2f}"
+                )
+
+                base_cpr = _compute_neuron_cpr(
+                    selected_method,
+                    resolved_label,
+                    base_recommendations,
+                    poi_details_map,
+                )
+                current_cpr = _compute_neuron_cpr(
+                    selected_method,
+                    resolved_label,
+                    displayed_recommendations,
+                    poi_details_map,
+                )
+
+                if base_cpr is not None:
+                    if active_config and current_cpr is not None:
+                        st.caption(f"🎯 CPR: {base_cpr:.1%} → {current_cpr:.1%}")
+                    else:
+                        st.caption(f"🎯 CPR: {base_cpr:.1%}")
+                else:
+                    st.caption("🎯 CPR: N/A")
+
             st.divider()
 
     return all_selected_weights if all_selected_weights else None
