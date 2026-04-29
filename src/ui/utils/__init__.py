@@ -14,23 +14,24 @@ def info_section(title, *info_texts):
 
     Args:
         title: Section title (includes emoji icon)
-        *info_texts: One or more tooltip text strings explaining the section
+        *info_texts: One or more strings describing the section; they'll be
+            joined together for the tooltip and detailed box. This keeps the
+            function backward-compatible with existing two-argument calls.
     """
-    # Join multiple info text parts into a single help string
-    info_text = "\n\n".join([str(t) for t in info_texts if t is not None])
+    help_text = " ".join(str(t).strip() for t in info_texts if t)
 
     col_title, col_info = st.columns([0.85, 0.15])
     with col_title:
         st.subheader(title)
     with col_info:
-        if st.button("ℹ️", key=f"info_{title}", help=info_text):
+        if st.button("ℹ️", key=f"info_{title}", help=help_text):
             st.session_state[f"show_info_{title}"] = not st.session_state.get(
                 f"show_info_{title}", False
             )
 
     # Show info if button was clicked
     if st.session_state.get(f"show_info_{title}", False):
-        st.info(info_text)
+        st.info(help_text)
 
 
 __all__ = [
