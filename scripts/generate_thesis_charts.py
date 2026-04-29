@@ -1,3 +1,19 @@
+"""Generate thesis visualization charts from Yelp database.
+
+This script creates and saves figures used in the thesis (e.g. dataset statistics
+charts). It queries the Yelp database directly and exports PNG images to a 
+specified output directory (typically the LaTeX figures folder).
+
+The charts show:
+- State and city distribution of businesses
+- Top business categories
+- Rating distribution
+- Activity metrics
+
+Usage:
+    python scripts/generate_thesis_charts.py
+"""
+
 import json
 from pathlib import Path
 
