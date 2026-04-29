@@ -95,7 +95,7 @@ def append_steering_eval_rows(
                 with engine.begin() as conn:
                     # Prepare rows for insert: normalize keys and ensure timestamp present
                     insert_cols = ", ".join(CSV_COLUMNS)
-                    placeholders = ", ".join([f":" + c for c in CSV_COLUMNS])
+                    placeholders = ", ".join(":" + c for c in CSV_COLUMNS)
                     insert_sql = text(f"INSERT INTO {DEFAULT_STEERING_EVAL_TABLE} ({insert_cols}) VALUES ({placeholders})")
 
                     normalized_rows = []
@@ -372,7 +372,7 @@ def _plot_tradeoff(df: pd.DataFrame, outpath: Path, *, k_filter: int | None) -> 
         ax.set_xlabel("CPR after")
         ax.set_ylabel("NDCG after")
         ax.set_title(
-            f"Steering trade-off: CPR vs NDCG"
+            "Steering trade-off: CPR vs NDCG"
             + (f" (k={k_filter})" if k_filter is not None else "")
         )
         ax.grid(True, alpha=0.25)
@@ -419,32 +419,43 @@ def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None, lan
         },
     }
     
-    l = labels.get(lang, labels["en"])
+    label_texts = labels.get(lang, labels["en"])
+
+    def _add_regression_line(
+        ax: plt.Axes,
+        frame: pd.DataFrame,
+        x_column: str,
+        y_column: str,
+        color: str,
+    ) -> None:
+        regression_df = frame[[x_column, y_column]].dropna()
+        if len(regression_df) < 2:
+            return
+
+        x_values = regression_df[x_column].to_numpy(dtype=float)
+        y_values = regression_df[y_column].to_numpy(dtype=float)
+        if len(x_values) != len(y_values) or len(x_values) < 2:
+            return
+
+        poly = np.polyfit(x_values, y_values, 1)
+        line = np.poly1d(poly)
+        x_range = np.linspace(float(np.min(x_values)), float(np.max(x_values)), 100)
+        ax.plot(x_range, line(x_range), "--", alpha=0.5, color=color, linewidth=1.5)
 
     if left_df.empty:
         _annotate_no_data(ax_left, "No data for strength grouping" if lang == "en" else "Žádná data pro seskupení podle síly")
     else:
-        ax_left.plot(left_df["strength"], left_df["cpr_after"], marker="o", label=l["cpr_after"])
-        ax_left.plot(left_df["strength"], left_df["ndcg_after"], marker="o", label=l["ndcg_after"])
+        ax_left.plot(left_df["strength"], left_df["cpr_after"], marker="o", label=label_texts["cpr_after"])
+        ax_left.plot(left_df["strength"], left_df["ndcg_after"], marker="o", label=label_texts["ndcg_after"])
         
         # Add regression lines for both metrics
-        if len(left_df) >= 2:
-            # CPR regression line
-            cpr_poly = np.polyfit(left_df["strength"].dropna(), left_df["cpr_after"].dropna(), 1)
-            cpr_line = np.poly1d(cpr_poly)
-            x_range_cpr = np.linspace(left_df["strength"].min(), left_df["strength"].max(), 100)
-            ax_left.plot(x_range_cpr, cpr_line(x_range_cpr), "--", alpha=0.5, color="C0", linewidth=1.5)
-            
-            # NDCG regression line
-            ndcg_poly = np.polyfit(left_df["strength"].dropna(), left_df["ndcg_after"].dropna(), 1)
-            ndcg_line = np.poly1d(ndcg_poly)
-            x_range_ndcg = np.linspace(left_df["strength"].min(), left_df["strength"].max(), 100)
-            ax_left.plot(x_range_ndcg, ndcg_line(x_range_ndcg), "--", alpha=0.5, color="C1", linewidth=1.5)
+        _add_regression_line(ax_left, left_df, "strength", "cpr_after", "C0")
+        _add_regression_line(ax_left, left_df, "strength", "ndcg_after", "C1")
         
-        ax_left.set_xlabel(l["strength"])
-        ax_left.set_ylabel(l["metric"])
+        ax_left.set_xlabel(label_texts["strength"])
+        ax_left.set_ylabel(label_texts["metric"])
         ax_left.set_title(
-            l["title_strength"] + (f" (k={k_filter})" if k_filter is not None else "")
+            label_texts["title_strength"] + (f" (k={k_filter})" if k_filter is not None else "")
         )
         ax_left.grid(True, alpha=0.25)
         ax_left.legend()
@@ -456,32 +467,22 @@ def _plot_strength(df: pd.DataFrame, outpath: Path, *, k_filter: int | None, lan
             right_df["delta_activation"],
             right_df["delta_cpr"],
             marker="o",
-            label=l["delta_cpr"],
+            label=label_texts["delta_cpr"],
         )
         ax_right.plot(
             right_df["delta_activation"],
             right_df["delta_ndcg"],
             marker="o",
-            label=l["delta_ndcg"],
+            label=label_texts["delta_ndcg"],
         )
-        
+
         # Add regression lines for both metrics
-        if len(right_df) >= 2:
-            # Delta CPR regression line
-            cpr_poly = np.polyfit(right_df["delta_activation"].dropna(), right_df["delta_cpr"].dropna(), 1)
-            cpr_line = np.poly1d(cpr_poly)
-            x_range_cpr = np.linspace(right_df["delta_activation"].min(), right_df["delta_activation"].max(), 100)
-            ax_right.plot(x_range_cpr, cpr_line(x_range_cpr), "--", alpha=0.5, color="C0", linewidth=1.5)
-            
-            # Delta NDCG regression line
-            ndcg_poly = np.polyfit(right_df["delta_activation"].dropna(), right_df["delta_ndcg"].dropna(), 1)
-            ndcg_line = np.poly1d(ndcg_poly)
-            x_range_ndcg = np.linspace(right_df["delta_activation"].min(), right_df["delta_activation"].max(), 100)
-            ax_right.plot(x_range_ndcg, ndcg_line(x_range_ndcg), "--", alpha=0.5, color="C1", linewidth=1.5)
+        _add_regression_line(ax_right, right_df, "delta_activation", "delta_cpr", "C0")
+        _add_regression_line(ax_right, right_df, "delta_activation", "delta_ndcg", "C1")
         
-        ax_right.set_xlabel(l["delta_activation"])
-        ax_right.set_ylabel(l["delta_metric"])
-        ax_right.set_title(l["title_delta"])
+        ax_right.set_xlabel(label_texts["delta_activation"])
+        ax_right.set_ylabel(label_texts["delta_metric"])
+        ax_right.set_title(label_texts["title_delta"])
         ax_right.grid(True, alpha=0.25)
         ax_right.legend()
 

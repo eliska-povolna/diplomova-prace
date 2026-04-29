@@ -759,7 +759,13 @@ def show():
                 f"Feature {member_id}: {member_label}",
                 key=f"superfeature_member_{sf_id}_{member_id}",
             ):
-                st.session_state.selected_superfeature_anchor_neuron = int(member_id)
+                # Clear superfeature selection to switch to neuron view
+                # This implements "take the last selected thing" - clicking member neuron clears superfeature
+                if "selected_superfeature_id" in st.session_state:
+                    del st.session_state["selected_superfeature_id"]
+                if "selected_superfeature_anchor_neuron" in st.session_state:
+                    del st.session_state["selected_superfeature_anchor_neuron"]
+                st.session_state.selected_feature_id = int(member_id)
                 st.rerun()
     else:
         coactivation_service = st.session_state.get("coactivation")
