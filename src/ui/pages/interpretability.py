@@ -5,7 +5,7 @@ from collections import defaultdict
 
 import streamlit as st
 
-from interpret.prompts import (
+from src.interpret.prompts import (
     NEURON_LABEL_SYSTEM_PROMPT,
     SUPERFEATURE_SYSTEM_PROMPT,
 )
