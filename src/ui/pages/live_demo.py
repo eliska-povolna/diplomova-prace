@@ -30,7 +30,6 @@ from src.ui.utils.formatting import format_feature_id, format_features_list
 from src.ui.components.concept_steering_panel import render_concept_steering_panel
 from src.ui.services.steering_eval import (
     append_steering_eval_rows,
-    build_ndcg_from_recommendations,
     build_presence_ratio,
 )
 from src.utils.evaluation import ndcg_at_k
@@ -132,6 +131,10 @@ def _compute_live_ndcg(
         return None
 
     return float(ndcg_at_k(np.asarray(y_true), argsorted, k))
+
+
+def _visible_ndcg_cache_key(selected_user: str) -> str:
+    return _demo_state_key(selected_user, "visible_ndcg_cache")
 
 
 def _format_ndcg_delta(before: float | None, after: float | None) -> str:
@@ -323,7 +326,6 @@ def _build_steering_eval_rows(
     run_id = pending_payload.get("run_id") or _resolve_run_id(inference)
     k = int(pending_payload.get("k") or len(steered_recommendations) or 0)
     timestamp_iso = datetime.now(timezone.utc).isoformat()
-    history_item_ids = pending_payload.get("history_item_ids") or []
     baseline_activation_snapshot = pending_payload.get("baseline_activation_snapshot") or {}
     after_activation_snapshot = _compute_activation_snapshot(
         inference,
@@ -331,16 +333,22 @@ def _build_steering_eval_rows(
         steering_config=pending_payload.get("new_steering_config"),
     )
 
-    ndcg_before = build_ndcg_from_recommendations(
-        baseline_recommendations,
-        history_item_ids,
-        k=k,
-    )
-    ndcg_after = build_ndcg_from_recommendations(
-        steered_recommendations,
-        history_item_ids,
-        k=k,
-    )
+    ndcg_before = pending_payload.get("ndcg_before")
+    ndcg_after = pending_payload.get("ndcg_after")
+    if ndcg_before is None:
+        ndcg_before_live = _compute_live_ndcg(
+            inference, selected_user, baseline_recommendations[:k]
+        )
+        ndcg_before = (
+            float(ndcg_before_live) if ndcg_before_live is not None else float("nan")
+        )
+    if ndcg_after is None:
+        ndcg_after_live = _compute_live_ndcg(
+            inference, selected_user, steered_recommendations[:k]
+        )
+        ndcg_after = (
+            float(ndcg_after_live) if ndcg_after_live is not None else float("nan")
+        )
 
     rows: List[Dict] = []
     for spec in label_specs:
@@ -976,6 +984,21 @@ def _recompute_recommendations_shared(
             if not full_recommendations:
                 full_recommendations = list(baseline_recommendations[:TOP_K])
 
+        visible_recommendations = list(full_recommendations[:num_recommendations])
+        visible_baseline = list(valid_baseline[:num_recommendations])
+        st.session_state[_visible_ndcg_cache_key(selected_user)] = {
+            "visible_k": int(num_recommendations),
+            "steering_hash": current_hash,
+            "baseline_hash": _compute_data_hash(visible_baseline),
+            "current_hash": _compute_data_hash(visible_recommendations),
+            "baseline_ndcg": _compute_live_ndcg(
+                inference, selected_user, visible_baseline
+            ),
+            "current_ndcg": _compute_live_ndcg(
+                inference, selected_user, visible_recommendations
+            ),
+        }
+
         cached_poi_details = dict(
             st.session_state.get(f"poi_details_map_{selected_user}", {}) or {}
         )
@@ -1109,16 +1132,39 @@ def _render_poi_cards_section(
                     or []
                 )
                 base_recommendations = base_recommendations[:visible_ndcg_k]
-                current_ndcg = _compute_live_ndcg(
-                    inference,
-                    selected_user,
-                    filtered_recommendations,
+                cache = st.session_state.get(_visible_ndcg_cache_key(selected_user), {})
+                expected_current_hash = _compute_data_hash(filtered_recommendations)
+                expected_base_hash = _compute_data_hash(base_recommendations)
+                expected_steering_hash = steering_config_hash(
+                    get_steering_config(st.session_state, selected_user)
                 )
-                baseline_ndcg = _compute_live_ndcg(
-                    inference,
-                    selected_user,
-                    base_recommendations,
-                )
+                if (
+                    cache.get("visible_k") == visible_ndcg_k
+                    and cache.get("steering_hash") == expected_steering_hash
+                    and cache.get("current_hash") == expected_current_hash
+                    and cache.get("baseline_hash") == expected_base_hash
+                ):
+                    current_ndcg = cache.get("current_ndcg")
+                    baseline_ndcg = cache.get("baseline_ndcg")
+                else:
+                    current_ndcg = _compute_live_ndcg(
+                        inference,
+                        selected_user,
+                        filtered_recommendations,
+                    )
+                    baseline_ndcg = _compute_live_ndcg(
+                        inference,
+                        selected_user,
+                        base_recommendations,
+                    )
+                    st.session_state[_visible_ndcg_cache_key(selected_user)] = {
+                        "visible_k": visible_ndcg_k,
+                        "steering_hash": expected_steering_hash,
+                        "baseline_hash": expected_base_hash,
+                        "current_hash": expected_current_hash,
+                        "baseline_ndcg": baseline_ndcg,
+                        "current_ndcg": current_ndcg,
+                    }
                 if current_ndcg is not None:
                     if st.session_state.get("steering_modified"):
                         st.metric(
@@ -1852,7 +1898,6 @@ def show():
                             "neuron_values": merged_neuron_values,
                         }
                     ),
-                    "history_item_ids": inference.get_user_history(selected_user),
                 }
                 st.session_state[_demo_state_key(selected_user, "force_recompute")] = True
                 st.session_state[draft_key] = {}

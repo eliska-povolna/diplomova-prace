@@ -806,12 +806,7 @@ def _build_steering_k_options(df: pd.DataFrame) -> List[int | str]:
 
 
 def _render_steering_eval_tab() -> None:
-    csv_path = DEFAULT_STEERING_EVAL_CSV
-    if not csv_path.exists():
-        st.info("no data gathered")
-        return
-
-    df = load_steering_eval_dataframe(csv_path, max_rows=500)
+    df = load_steering_eval_dataframe(DEFAULT_STEERING_EVAL_CSV, max_rows=500)
     if df.empty:
         st.info("no data gathered")
         return
