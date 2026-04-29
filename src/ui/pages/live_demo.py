@@ -926,6 +926,12 @@ def _recompute_recommendations_shared(
             )
             st.session_state[base_cache_key] = baseline_recommendations
 
+        valid_baseline = [
+            reco
+            for reco in baseline_recommendations
+            if (reco.get("item_id") or reco.get("poi_idx")) is not None
+        ]
+
         inference_steering = to_inference_config(steering_config)
         needs_model_recompute = steering_changed or force or current_base is None
 
@@ -945,40 +951,6 @@ def _recompute_recommendations_shared(
             )
 
             if inference_steering:
-                base_score_by_item = {
-                    int(r.get("item_id") or r.get("poi_idx")): float(r.get("score", 0.0))
-                    for r in valid_baseline
-                    if (r.get("item_id") or r.get("poi_idx")) is not None
-                }
-
-                score_deltas = []
-                for r in full_recommendations:
-                    item_idx = r.get("item_id") or r.get("poi_idx")
-                    if item_idx in base_score_by_item:
-                        score_deltas.append(
-                            float(r.get("score", 0.0)) - base_score_by_item[item_idx]
-                        )
-                avg_delta = float(np.mean(score_deltas)) if score_deltas else 0.0
-                st.markdown("#### Steering Diagnostics")
-                provenance = dict((steering_config or {}).get("provenance") or {})
-                last_neuron_updates = int(
-                    provenance.get("last_apply_neuron_updates", 0)
-                )
-                last_concept_updates = int(
-                    provenance.get("last_apply_concept_updates", 0)
-                )
-                source_breakdown_part = ""
-                if last_neuron_updates or last_concept_updates:
-                    source_breakdown_part = (
-                        "Source breakdown: "
-                        f"neuron {last_neuron_updates}, concept {last_concept_updates} | "
-                    )
-                st.caption(
-                    f"Changed features: {len(inference_steering.get('neuron_values', {}))} | "
-                    f"{source_breakdown_part}"
-                    f"Rank delta: up {up}, down {down}, unchanged {flat} | "
-                    f"Avg score delta: {avg_delta:+.4f}"
-                )
                 pending_eval = st.session_state.pop(
                     _pending_eval_key(selected_user),
                     None,
@@ -1027,12 +999,6 @@ def _recompute_recommendations_shared(
         if missing_indices:
             fetched = data.get_poi_details_batch(missing_indices)
             cached_poi_details.update(fetched)
-
-        valid_baseline = [
-            reco
-            for reco in baseline_recommendations
-            if (reco.get("item_id") or reco.get("poi_idx")) is not None
-        ]
 
         _set_demo_recommendation_state(
             selected_user,
